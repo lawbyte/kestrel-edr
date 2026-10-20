@@ -44,7 +44,7 @@
     <Property Id="CA_Uninstall" Hidden="yes" />
 
     <Launch Condition="Installed OR (SERVER AND TOKEN AND CA_B64)"
-            Message="SERVER, TOKEN and CA_B64 are required. Copy the install command from the Kestrel console (Settings → Enrollment)." />
+            Message="SERVER, TOKEN and CA_B64 are required. Copy the install command from the Kestrel console (Devices > Enrollment tokens)." />
     <Launch Condition="VersionNT64 &gt;= 603"
             Message="Kestrel requires 64-bit Windows 10, Windows 11 or Windows Server 2019 or later." />
 
@@ -64,7 +64,7 @@
 
     <StandardDirectory Id="CommonAppDataFolder">
       <Directory Id="STATEFOLDER" Name="Kestrel">
-        <Component Id="StateDir" Guid="*">
+        <Component Id="StateDir" Guid="7B0E52A4-3C1D-4F5E-9A8B-6D2C1E0F4A31">
           <CreateFolder>
             <!-- State (keys, outbox, quarantine): SYSTEM and Administrators only. -->
             <util:PermissionEx User="SYSTEM" GenericAll="yes" />
