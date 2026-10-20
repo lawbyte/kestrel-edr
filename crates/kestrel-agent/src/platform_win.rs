@@ -78,6 +78,15 @@ mod imp {
     pub fn release_isolation_offline(state_dir: &Path) -> Result<String> {
         kestrel_win::release_isolation_offline(state_dir)
     }
+
+    /// M6: enrollment token left by the MSI in a SYSTEM/Administrators-only key.
+    pub fn take_msi_enroll_token() -> Result<String> {
+        kestrel_win::take_enroll_token()
+    }
+
+    pub fn delete_msi_setup_key() {
+        kestrel_win::delete_setup_key()
+    }
 }
 
 #[cfg(all(windows, not(feature = "win-platform")))]
@@ -150,6 +159,12 @@ mod imp {
     pub fn release_isolation_offline(_state_dir: &Path) -> Result<String> {
         bail!("release-isolation requires the `win-platform` feature")
     }
+
+    pub fn take_msi_enroll_token() -> Result<String> {
+        bail!("--token-from-msi requires the `win-platform` feature")
+    }
+
+    pub fn delete_msi_setup_key() {}
 }
 
 #[cfg(not(windows))]
@@ -197,6 +212,12 @@ mod imp {
     pub fn release_isolation_offline(_state_dir: &Path) -> Result<String> {
         bail!("release-isolation is Windows-only (the simulator isolates in memory)")
     }
+
+    pub fn take_msi_enroll_token() -> Result<String> {
+        bail!("--token-from-msi is Windows-only")
+    }
+
+    pub fn delete_msi_setup_key() {}
 }
 
 pub use imp::*;

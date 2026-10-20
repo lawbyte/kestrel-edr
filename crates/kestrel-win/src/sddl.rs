@@ -226,9 +226,46 @@ pub fn state_dir_trusted(sddl: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Is the MSI token hand-off registry key private? Owner SYSTEM or
+/// Administrators and **no** allow ACE (read included: the value is a secret)
+/// for anyone else.
+pub fn handoff_key_trusted(sddl: &str) -> Result<(), String> {
+    let sd = parse(sddl)?;
+    match sd.owner.as_deref() {
+        Some(o) if is_admin_sid(o) => {}
+        Some(o) => return Err(format!("owner {o} is not SYSTEM or Administrators")),
+        None => return Err("owner unknown".into()),
+    }
+    let aces = match sd.dacl {
+        None => return Err("no DACL".into()),
+        Some(None) => return Err("NULL DACL (everyone has full control)".into()),
+        Some(Some(a)) => a,
+    };
+    for a in &aces {
+        if (a.ace_type == "A" || a.ace_type == "OA") && !is_admin_sid(&a.sid) {
+            return Err(format!("DACL grants access to {}", a.sid));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handoff_key_must_be_private() {
+        // What the MSI sets (MsiLockPermissionsEx SDDL).
+        assert!(handoff_key_trusted("O:SYG:SYD:P(A;;KA;;;SY)(A;;KA;;;BA)").is_ok());
+        // Inherited HKLM\SOFTWARE read for Users leaks the token.
+        assert!(handoff_key_trusted("O:BAG:SYD:AI(A;ID;KA;;;SY)(A;ID;KA;;;BA)(A;ID;KR;;;BU)").is_err());
+        // Planted by a standard user.
+        assert!(handoff_key_trusted(
+            "O:S-1-5-21-1-2-3-1001G:SYD:P(A;;KA;;;SY)(A;;KA;;;BA)"
+        )
+        .is_err());
+        assert!(handoff_key_trusted("O:SYG:SYD:NO_ACCESS_CONTROL").is_err());
+    }
 
     #[test]
     fn our_descriptor_is_trusted() {

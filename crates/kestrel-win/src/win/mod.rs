@@ -6,6 +6,7 @@ pub(crate) mod etw;
 pub(crate) mod evtsub;
 pub(crate) mod hardening;
 pub(crate) mod host;
+pub(crate) mod msihandoff;
 pub(crate) mod platform;
 pub(crate) mod quarantine;
 pub(crate) mod respond;

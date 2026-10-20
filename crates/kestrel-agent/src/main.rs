@@ -112,23 +112,38 @@ struct ServerArgs {
     /// Server CA: PEM file path, PEM text, or base64.
     #[arg(long, env = "KESTREL_CA")]
     ca: String,
-    /// Enrollment token.
-    #[arg(long, env = "KESTREL_ENROLL_TOKEN")]
-    token: String,
+    /// Enrollment token. Avoid on shared hosts: command lines are visible to
+    /// every process-creation sensor; the MSI uses `--token-from-msi`.
+    #[arg(
+        long,
+        env = "KESTREL_ENROLL_TOKEN",
+        hide_env_values = true,
+        required_unless_present = "token_from_msi"
+    )]
+    token: Option<String>,
+    /// Take the enrollment token the MSI stored in a SYSTEM/Administrators-only
+    /// registry key (and delete it), so it never appears on a command line (M6).
+    #[arg(long, hide = true)]
+    token_from_msi: bool,
     /// TLS name to verify on the server certificate (default: host from --server).
     #[arg(long)]
     server_name: Option<String>,
 }
 
 impl ServerArgs {
-    fn install_opts(&self) -> InstallOpts {
-        InstallOpts {
+    fn install_opts(&self) -> Result<InstallOpts> {
+        let token = match (&self.token, self.token_from_msi) {
+            (_, true) => platform_win::take_msi_enroll_token()?,
+            (Some(t), false) => t.clone(),
+            (None, false) => bail!("--token or --token-from-msi is required"),
+        };
+        Ok(InstallOpts {
             server: self.server.clone(),
             ca: self.ca.clone(),
-            token: self.token.clone(),
+            token,
             server_name: self.server_name.clone(),
             ..Default::default()
-        }
+        })
     }
 }
 
@@ -196,7 +211,7 @@ async fn dispatch(state_dir: PathBuf, cmd: Cmd) -> Result<()> {
             uninstall_token,
             no_service,
         } => {
-            let mut o = server.install_opts();
+            let mut o = server.install_opts()?;
             o.tags = group_tag;
             o.uninstall_token = uninstall_token;
             // H4: never trust a state directory a standard user could have
@@ -256,6 +271,7 @@ async fn dispatch(state_dir: PathBuf, cmd: Cmd) -> Result<()> {
         Cmd::Uninstall { token, purge } => {
             commands::verify_uninstall(&state_dir, &token)?;
             if cfg!(windows) {
+                platform_win::delete_msi_setup_key();
                 platform_win::uninstall_service().context("removing the service")?;
                 println!("Service {} removed", platform_win::SERVICE_NAME);
             }
@@ -290,7 +306,7 @@ async fn dispatch(state_dir: PathBuf, cmd: Cmd) -> Result<()> {
                 tuning.heartbeat = Duration::from_secs(h.max(1));
             }
             let o = SimulateOpts {
-                install: server.install_opts(),
+                install: server.install_opts()?,
                 replay,
                 speed,
                 hostname,

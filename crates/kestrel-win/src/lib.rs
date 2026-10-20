@@ -46,6 +46,8 @@ pub use win::platform::WindowsPlatform;
 #[cfg(windows)]
 pub use win::service::{install_service, run_service, uninstall_service};
 #[cfg(windows)]
+pub use win::msihandoff::{delete_setup_key, take_enroll_token};
+#[cfg(windows)]
 pub use win::statedir::{secure_state_dir, StateDirResult};
 #[cfg(windows)]
 pub use win::wfp::{release_isolation_offline, remove_all_wfp_objects};

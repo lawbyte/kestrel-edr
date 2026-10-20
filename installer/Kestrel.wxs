@@ -74,10 +74,29 @@
       </Directory>
     </StandardDirectory>
 
+    <!--
+      M6: the enrollment token never goes on a command line (process-creation
+      sensors of every EDR on the host would see it). It is written to a key
+      whose protected DACL allows only SYSTEM and Administrators (MsiLockPermissionsEx
+      SDDL replaces the inherited HKLM\SOFTWARE ACL, which grants Users read);
+      the install custom action (token-from-msi mode) verifies that DACL, takes the
+      token and deletes the value and key. TOKEN is a hidden property, so
+      WriteRegistryValues masks it in verbose logs.
+    -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Component Id="EnrollHandoff" Guid="2F9C4B1E-6A7D-4E83-B0C5-8D1A3F6E7C92" Condition="TOKEN AND NOT Installed">
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Kestrel\Setup" ForceCreateOnInstall="yes">
+          <PermissionEx Sddl="O:SYG:SYD:P(A;;KA;;;SY)(A;;KA;;;BA)" />
+          <RegistryValue Name="EnrollToken" Type="string" Value="[TOKEN]" KeyPath="yes" />
+        </RegistryKey>
+      </Component>
+    </StandardDirectory>
+
     <Feature Id="Main" Title="Kestrel EDR Agent" Level="1">
       <ComponentRef Id="AgentExe" />
       <ComponentRef Id="TrayExe" />
       <ComponentRef Id="StateDir" />
+      <ComponentRef Id="EnrollHandoff" />
     </Feature>
 
     <!--
@@ -89,7 +108,7 @@
       installs and starts the service with a restricted DACL.
     -->
     <SetProperty Id="CA_Install" Sequence="execute" Before="CA_Install"
-                 Value="&quot;[INSTALLFOLDER]kestrel-agent.exe&quot; install --server &quot;[SERVER]&quot; --ca &quot;[CA_B64]&quot; --token &quot;[TOKEN]&quot;" />
+                 Value="&quot;[INSTALLFOLDER]kestrel-agent.exe&quot; install --server &quot;[SERVER]&quot; --ca &quot;[CA_B64]&quot; --token-from-msi" />
     <CustomAction Id="CA_Install" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec"
                   Execute="deferred" Impersonate="no" Return="check" HideTarget="yes" />
 
@@ -99,7 +118,7 @@
                   Execute="deferred" Impersonate="no" Return="check" HideTarget="yes" />
 
     <InstallExecuteSequence>
-      <Custom Action="CA_Install" After="InstallFiles" Condition="NOT Installed AND NOT REMOVE" />
+      <Custom Action="CA_Install" After="WriteRegistryValues" Condition="NOT Installed AND NOT REMOVE" />
       <!-- The agent refuses to stop without a valid uninstall token (tamper protection). -->
       <Custom Action="CA_Uninstall" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
