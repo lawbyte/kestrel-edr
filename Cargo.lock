@@ -2615,6 +2615,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
+ "webpki-roots",
  "x509-parser 0.16.0",
  "zstd",
 ]
@@ -2678,6 +2679,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dashmap",
+ "ed25519-dalek",
  "futures",
  "hex",
  "hmac 0.12.1",
