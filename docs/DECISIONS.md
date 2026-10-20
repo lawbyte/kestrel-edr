@@ -1,0 +1,10 @@
+# Decisions log
+
+Append-only. Format: date — decision — why — alternatives considered.
+
+## 2026-10-21 — Windows phase (v1.1 run)
+
+* **Git identity and line endings.** Repo initialised locally with a baseline commit; author email `islahelanggi10@gmail.com` (owner's instruction). `core.autocrlf=false` and a `.gitattributes` forcing LF (CRLF only for `.ps1`/`.wxs`), because the owner's global `autocrlf=true` would turn `scripts/e2e.sh` into CRLF and break it in WSL. *Alt:* rely on global config — rejected.
+* **WiX v6 pinned (6.0.2).** `dotnet tool install wix` now installs WiX 7, which adds an OSMF EULA acceptance gate. The installer is authored for v6 and CLAUDE.md names v6. *Alt:* migrate to v7 — deferred; licence terms are the same maintenance-fee model (see research report).
+* **Defender exclusion for build output only.** Defender quarantined the `kestrel-detect` test binary as `Trojan:Win32/Cryware.B` (heuristic on the wallet/credential path tables the engine embeds). Per CLAUDE.md rule 4 we added exclusions only for `D:\project\kestrel\target`, `D:\project\kestrel\tray\src-tauri\target` and the scratch build root `D:\kestrel-build` (parallel `CARGO_TARGET_DIR`s, VM work files). Nothing else. **The shipped agent will hit the same heuristic on customer machines** — code signing + submitting the release binaries to Microsoft (WDSI false-positive submission) is an owner task; see HANDOFF.
+* **Disposable VM = QEMU/KVM inside WSL2.** The host is Windows 11 *Home*: no Hyper-V Manager, no Windows Sandbox. WSL2 exposes `/dev/kvm` (nested virtualisation), so a Windows 11 Enterprise **Evaluation** VM (90-day, free from the Microsoft Evaluation Center) runs under QEMU in the Kali distro with a qcow2 overlay that is thrown away after each run. This satisfies CLAUDE.md's "disposable VM" requirement without enabling features or rebooting the host. Enterprise also lets us validate AppLocker enforcement (known risk 8). *Alt:* VirtualBox on the host (installs kernel drivers on the owner's PC) — rejected; skip Phase 2 — rejected since a safe option exists.

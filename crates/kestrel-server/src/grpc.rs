@@ -1,6 +1,10 @@
 //! Agent gRPC service (`proto/kestrel.proto`): enrollment and the live stream.
 
+// tonic's `Status` is ~180 bytes; every gRPC handler returns it by design.
+#![allow(clippy::result_large_err)]
+
 pub mod pb {
+    #![allow(clippy::all, clippy::pedantic)]
     tonic::include_proto!("kestrel.v1");
 }
 
