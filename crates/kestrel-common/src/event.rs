@@ -74,6 +74,14 @@ pub enum EventKind {
     DebugAttach,
     ScriptBlock,
     Tamper,
+    /// Aggregated per-process file write/rename/delete activity (ransomware sensor).
+    FileActivity,
+    /// Scheduled task registered / updated / deleted.
+    TaskRegistered,
+    /// Service installed (SCM 7045 / Security 4697).
+    ServiceInstalled,
+    /// WMI permanent event subscription (filter → consumer binding).
+    WmiSubscription,
 }
 
 impl EventKind {
@@ -93,6 +101,10 @@ impl EventKind {
             EventKind::DebugAttach => "debug_attach",
             EventKind::ScriptBlock => "script_block",
             EventKind::Tamper => "tamper",
+            EventKind::FileActivity => "file_activity",
+            EventKind::TaskRegistered => "task_registered",
+            EventKind::ServiceInstalled => "service_installed",
+            EventKind::WmiSubscription => "wmi_subscription",
         }
     }
 }
@@ -118,10 +130,14 @@ pub enum EventData {
         op: FileOp,
     },
     RegistrySet {
+        /// Normalised absolute key (`HKLM\…`, `HKU\<SID>\…`).
         key: String,
         value_name: String,
         #[serde(default)]
         data: Option<String>,
+        /// What happened to the value (older agents only report sets).
+        #[serde(default)]
+        op: RegistryOp,
     },
     NetConnect {
         proto: NetProto,
@@ -163,6 +179,16 @@ pub enum EventData {
         kind: TamperKind,
         detail: String,
     },
+    /// Aggregated file activity of the acting process over `window_ms`.
+    FileActivity(FileActivity),
+    /// Scheduled task change. The event's `pid`/`guid` are the creator when it
+    /// could be attributed, else the Task Scheduler service.
+    TaskRegistered(TaskChange),
+    /// Service installed. `pid`/`guid` are the installer when attributed,
+    /// else services.exe.
+    ServiceInstalled(ServiceInstall),
+    /// WMI permanent event subscription bound (WMI-Activity 5861).
+    WmiSubscription(WmiBinding),
 }
 
 impl EventData {
@@ -182,6 +208,10 @@ impl EventData {
             EventData::DebugAttach(_) => EventKind::DebugAttach,
             EventData::ScriptBlock { .. } => EventKind::ScriptBlock,
             EventData::Tamper { .. } => EventKind::Tamper,
+            EventData::FileActivity(_) => EventKind::FileActivity,
+            EventData::TaskRegistered(_) => EventKind::TaskRegistered,
+            EventData::ServiceInstalled(_) => EventKind::ServiceInstalled,
+            EventData::WmiSubscription(_) => EventKind::WmiSubscription,
         }
     }
 }
@@ -219,9 +249,125 @@ pub struct TargetProcess {
     #[serde(default)]
     pub target_guid: Option<ProcessGuid>,
     pub target_image: String,
-    /// Access mask granted on the handle (0 when not applicable).
+    /// Access mask on the handle (0 when not applicable). From Sysmon 10 this
+    /// is the *granted* access; from Kernel-Audit-API-Calls it is the
+    /// *desired* access (what the caller asked for).
     #[serde(default)]
     pub granted_access: u32,
+    /// NTSTATUS of the open (0 = success). Failed opens are reported only for
+    /// high-value targets (lsass), e.g. an attempt blocked by LSA protection.
+    #[serde(default)]
+    pub return_code: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistryOp {
+    #[default]
+    Set,
+    DeleteValue,
+    DeleteKey,
+}
+
+/// Per-process file activity summary from the ransomware sensor. The sensor
+/// aggregates Kernel-File create/rename/delete events on user-data and network
+/// paths in a sliding window and emits a summary when a pre-threshold is
+/// crossed (or at once on a ransomware-canary hit). Counts are distinct files
+/// within the window.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct FileActivity {
+    /// Length of the aggregation window (ms) ending at the event's `ts`.
+    pub window_ms: u64,
+    /// Distinct files overwritten, renamed, created or deleted.
+    pub files_touched: u32,
+    /// Distinct parent directories of the touched files.
+    pub dirs: u32,
+    #[serde(default)]
+    pub renames: u32,
+    /// Renames / new files whose extension differs from the original and is
+    /// not a well-known document, archive or temp extension.
+    #[serde(default)]
+    pub ext_changes: u32,
+    /// Existing files opened for overwrite / supersede.
+    #[serde(default)]
+    pub overwrites: u32,
+    #[serde(default)]
+    pub new_files: u32,
+    #[serde(default)]
+    pub deletes: u32,
+    /// Touched files on network paths (UNC or mapped drives).
+    #[serde(default)]
+    pub net_paths: u32,
+    /// Most common new extension among `ext_changes` (lower-case, no dot).
+    #[serde(default)]
+    pub top_new_ext: Option<String>,
+    /// Share of `ext_changes` using `top_new_ext`, 0-100.
+    #[serde(default)]
+    pub top_ext_pct: u8,
+    /// A file name (lower-case) newly created in several directories (ransom note candidate).
+    #[serde(default)]
+    pub note_name: Option<String>,
+    /// Number of distinct directories `note_name` was created in.
+    #[serde(default)]
+    pub note_dirs: u32,
+    /// Ransomware canary files written, renamed or deleted (full paths).
+    #[serde(default)]
+    pub canary_hits: Vec<String>,
+    /// Up to 5 example paths (privacy-filtered before upload).
+    #[serde(default)]
+    pub sample_paths: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskOp {
+    #[default]
+    Created,
+    Updated,
+    Deleted,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct TaskChange {
+    /// Task path, e.g. `\Microsoft\Windows\Foo` or `\Updater`.
+    pub name: String,
+    pub op: TaskOp,
+    /// Principal the task runs as, if known.
+    #[serde(default)]
+    pub user: Option<String>,
+    /// `Exec` actions as command lines (`"C:\x.exe" args`), read from the task XML.
+    #[serde(default)]
+    pub actions: Vec<String>,
+    /// Task XML `<Hidden>true</Hidden>`.
+    #[serde(default)]
+    pub hidden: bool,
+    /// Trigger kinds, e.g. `logon`, `boot`, `time`, `idle`, `event`.
+    #[serde(default)]
+    pub triggers: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct ServiceInstall {
+    pub name: String,
+    /// ImagePath as registered (may contain arguments / unquoted spaces).
+    pub image_path: String,
+    /// 0 boot, 1 system, 2 auto, 3 demand, 4 disabled.
+    #[serde(default)]
+    pub start_type: Option<u32>,
+    /// 1 = kernel driver, 0x10 = own process, 0x20 = shared process, …
+    #[serde(default)]
+    pub service_type: Option<u32>,
+    #[serde(default)]
+    pub account: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct WmiBinding {
+    pub namespace: String,
+    /// Filter (ESS) name or query.
+    pub filter: String,
+    /// Consumer, e.g. `CommandLineEventConsumer="x"` plus its command line when known.
+    pub consumer: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -548,6 +694,72 @@ mod tests {
         let back: Event = serde_json::from_str(&s).unwrap();
         assert_eq!(back, e);
         assert_eq!(back.kind(), EventKind::FileAccess);
+    }
+
+    #[test]
+    fn old_agent_json_still_parses() {
+        // v1.0 agents: no `op` on registry_set, no `return_code` on process_access.
+        let reg: Event = serde_json::from_str(
+            r#"{"ts":1,"pid":2,"guid":"g","type":"registry_set","key":"HKLM\\X","value_name":"v","data":"d"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            reg.data,
+            EventData::RegistrySet {
+                op: RegistryOp::Set,
+                ..
+            }
+        ));
+        let pa: Event = serde_json::from_str(
+            r#"{"ts":1,"pid":2,"guid":"g","type":"process_access","target_pid":3,"target_image":"x","granted_access":16}"#,
+        )
+        .unwrap();
+        assert!(matches!(pa.data, EventData::ProcessAccess(ref t) if t.return_code == 0));
+    }
+
+    #[test]
+    fn new_event_kinds_roundtrip() {
+        for data in [
+            EventData::FileActivity(FileActivity {
+                window_ms: 10_000,
+                files_touched: 40,
+                dirs: 4,
+                ext_changes: 38,
+                top_new_ext: Some("k3str".into()),
+                top_ext_pct: 95,
+                ..Default::default()
+            }),
+            EventData::TaskRegistered(TaskChange {
+                name: r"\Updater".into(),
+                op: TaskOp::Created,
+                actions: vec![r#""C:\Users\a\AppData\Roaming\u.exe" -s"#.into()],
+                ..Default::default()
+            }),
+            EventData::ServiceInstalled(ServiceInstall {
+                name: "svc".into(),
+                image_path: r"C:\Users\Public\s.exe".into(),
+                start_type: Some(2),
+                ..Default::default()
+            }),
+            EventData::WmiSubscription(WmiBinding {
+                namespace: r"root\subscription".into(),
+                filter: "f".into(),
+                consumer: "CommandLineEventConsumer=\"c\"".into(),
+            }),
+        ] {
+            let e = Event {
+                ts: 1,
+                pid: 2,
+                guid: ProcessGuid("g".into()),
+                data,
+            };
+            let s = serde_json::to_string(&e).unwrap();
+            assert!(
+                s.contains(&format!("\"type\":\"{}\"", e.kind().as_str())),
+                "{s}"
+            );
+            assert_eq!(serde_json::from_str::<Event>(&s).unwrap(), e);
+        }
     }
 
     #[test]

@@ -303,10 +303,11 @@ async fn dispatch(state_dir: PathBuf, cmd: Cmd) -> Result<()> {
             events_out,
             detect,
         } => {
-            let v = commands::sensors_test(&state_dir, seconds, events_out.as_deref(), detect, || {
-                eprintln!("KESTREL-SENSORS-READY collecting for {seconds}s");
-            })
-            .await?;
+            let v =
+                commands::sensors_test(&state_dir, seconds, events_out.as_deref(), detect, || {
+                    eprintln!("KESTREL-SENSORS-READY collecting for {seconds}s");
+                })
+                .await?;
             println!("{}", serde_json::to_string_pretty(&v)?);
             Ok(())
         }

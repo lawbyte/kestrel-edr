@@ -510,6 +510,7 @@ fn exclusions_never_silence_tamper_rules() {
                 .into(),
             value_name: "".into(),
             data: None,
+            op: Default::default(),
         },
     ));
     assert_eq!(rule_ids(&out), ["TP-03"], "{}", dump(&out));

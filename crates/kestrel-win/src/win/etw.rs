@@ -472,11 +472,15 @@ fn decode_dns(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
     let ts = ts_of(rec);
     let pid = rec.process_id();
     with_fields(rec, loc, |f| {
-        if f.u32(field::QUERY_STATUS).unwrap_or(1) != 0 {
+        // 0 = answered; 9003 (DNS_ERROR_RCODE_NAME_ERROR, NXDOMAIN) and 9501
+        // (DNS_INFO_NO_RECORDS) are kept with no answers: failed lookups are
+        // signal (DGA, dead C2), and seen on real hosts as 3008 events.
+        let status = f.u32(field::QUERY_STATUS).unwrap_or(1);
+        if !crate::etwparse::dns_status_is_reportable(status) {
             return None;
         }
         let results = f.string(field::QUERY_RESULTS).unwrap_or_default();
-        if results.is_empty() {
+        if status == 0 && results.is_empty() {
             return None;
         }
         Some(Raw::Dns {

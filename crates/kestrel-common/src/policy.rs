@@ -48,6 +48,40 @@ pub struct Policy {
     /// wide) instead of only for the offending image.
     #[serde(default)]
     pub ioc_block_host_wide: bool,
+    /// Optional sensor groups (general-malware coverage).
+    #[serde(default)]
+    pub sensors: SensorSettings,
+}
+
+/// Optional sensor groups. Defaults are on; each can be turned off per policy
+/// if it costs too much on a given fleet.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SensorSettings {
+    /// Kernel-File create/rename/delete aggregation on user-data and network
+    /// paths (RW-06/07/08) plus ransomware canary documents.
+    #[serde(default = "yes")]
+    pub file_activity: bool,
+    /// Plant ransomware canary documents in Documents/Desktop/Pictures roots.
+    #[serde(default = "yes")]
+    pub ransomware_canaries: bool,
+    /// Task Scheduler, Service Control Manager and WMI-Activity providers plus
+    /// the registry autorun watcher (PS-xx).
+    #[serde(default = "yes")]
+    pub persistence: bool,
+    /// Failed-open and dump-follow-up telemetry for lsass (CD-xx).
+    #[serde(default = "yes")]
+    pub credential_access: bool,
+}
+
+impl Default for SensorSettings {
+    fn default() -> Self {
+        SensorSettings {
+            file_activity: true,
+            ransomware_canaries: true,
+            persistence: true,
+            credential_access: true,
+        }
+    }
 }
 
 fn default_suspend_window() -> u64 {
@@ -106,6 +140,7 @@ impl Default for Policy {
             isolation_auto_release_hours: default_isolation_auto_release_hours(),
             ioc_block_ttl_secs: default_ioc_block_ttl_secs(),
             ioc_block_host_wide: false,
+            sensors: SensorSettings::default(),
         }
     }
 }
@@ -186,6 +221,23 @@ pub struct Hardening {
     pub asr_rules: bool,
     /// Chrome/Edge policy: RemoteDebuggingAllowed = false.
     pub browser_disable_remote_debugging: bool,
+    /// WDigest `UseLogonCredential` = 0 (no cleartext passwords in LSASS).
+    #[serde(default = "yes")]
+    pub wdigest_off: bool,
+    /// Defender ASR "Block credential stealing from LSASS"
+    /// (9e6c4e1f-7d60-472f-ba1a-a39ef669e4b2), added without touching other rules.
+    #[serde(default = "yes")]
+    pub asr_lsass: bool,
+    /// LSA protection (`RunAsPPL` = 2, no UEFI lock). Takes effect after a
+    /// reboot, which the agent never triggers; reported as "pending reboot".
+    #[serde(default)]
+    pub lsa_protection: bool,
+    /// Report (never toggle) the Microsoft vulnerable-driver blocklist state.
+    #[serde(default = "yes")]
+    pub report_vulnerable_driver_blocklist: bool,
+    /// Enable the `Microsoft-Windows-TaskScheduler/Operational` channel.
+    #[serde(default = "yes")]
+    pub task_scheduler_log: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,6 +262,11 @@ impl Default for Hardening {
             dpapi_debug_channel: true,
             asr_rules: true,
             browser_disable_remote_debugging: true,
+            wdigest_off: true,
+            asr_lsass: true,
+            lsa_protection: false,
+            report_vulnerable_driver_blocklist: true,
+            task_scheduler_log: true,
         }
     }
 }

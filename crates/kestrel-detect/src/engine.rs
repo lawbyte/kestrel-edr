@@ -79,6 +79,7 @@
 
 use crate::canary::{self, is_conditional_canary};
 use crate::catalog::*;
+use crate::families::{Ctx, Family, FamilyHit};
 use crate::paths::{
     benign_reader_for, glob_match, glob_match_path, is_browser_image, is_canary_ignored_reader,
     is_chromium_image, is_mozilla_image, is_trusted_owner, is_untrusted_location_or_signature,
@@ -374,50 +375,22 @@ const DOMAIN_OWNERS: &[(&str, &[&str])] = &[
     ("binance.org", &["binance.exe"]),
 ];
 
-fn builtin_meta() -> &'static HashMap<&'static str, RuleMeta> {
-    static M: OnceLock<HashMap<&'static str, RuleMeta>> = OnceLock::new();
-    M.get_or_init(|| {
-        builtin_catalog()
-            .into_iter()
-            .map(|m| {
-                let id: &'static str = match m.id.as_str() {
-                    "ST-01" => ST01,
-                    "ST-02" => ST02,
-                    "ST-03" => ST03,
-                    "ST-04" => ST04,
-                    "ST-05" => ST05,
-                    "ST-06" => ST06,
-                    "ST-07" => ST07,
-                    "ST-08" => ST08,
-                    "ST-09" => ST09,
-                    "ST-10" => ST10,
-                    "ST-11" => ST11,
-                    "ST-12" => ST12,
-                    "ST-13" => ST13,
-                    "ST-14" => ST14,
-                    "ST-15" => ST15,
-                    "ST-16" => ST16,
-                    "TP-01" => TP01,
-                    "TP-02" => TP02,
-                    "TP-03" => TP03,
-                    "TP-04" => TP04,
-                    _ => TP05,
-                };
-                (id, m)
-            })
-            .collect()
-    })
+fn builtin_meta() -> &'static HashMap<String, RuleMeta> {
+    static M: OnceLock<HashMap<String, RuleMeta>> = OnceLock::new();
+    M.get_or_init(|| catalog().into_iter().map(|m| (m.id.clone(), m)).collect())
 }
 
 pub(crate) fn catalog() -> Vec<RuleMeta> {
-    builtin_catalog()
+    let mut v = builtin_catalog();
+    v.extend(crate::families::catalog());
+    v
 }
 
 fn cat_index(c: DataCategory) -> usize {
     c as usize
 }
 
-fn is_lolbin(name: &str) -> bool {
+pub(crate) fn is_lolbin(name: &str) -> bool {
     LOLBINS.contains(&name)
 }
 
@@ -1032,6 +1005,8 @@ pub(crate) struct EngineState {
     canaries: Mutex<CanaryState>,
     out: Vec<Output>,
     last_evict: TimestampMs,
+    /// RW / CD / PS rule families (see `families`).
+    families: Vec<Box<dyn Family>>,
 }
 
 fn kind_bit(k: EventKind) -> u32 {
@@ -1080,6 +1055,7 @@ impl EngineState {
             canaries: Mutex::new(CanaryState::default()),
             out: vec![],
             last_evict: 0,
+            families: crate::families::all(),
         };
         s.set_sigma(sigma);
         s.update_policy(policy);
@@ -1295,6 +1271,87 @@ impl EngineState {
         self.agent_guids.contains(g)
     }
 
+    // ---- read-only accessors for rule families (`families::Ctx`) ----
+
+    pub(crate) fn rule_mode(&self, rule: &str) -> RuleMode {
+        self.mode(rule)
+    }
+
+    pub(crate) fn is_protected(&self, p: &ProcessInfo) -> bool {
+        self.protected(p)
+    }
+
+    pub(crate) fn is_agent_process(&self, p: &ProcessInfo) -> bool {
+        self.is_agent_guid(&p.guid)
+            || (!self.agent_image.is_empty()
+                && !p.image.is_empty()
+                && driveless(&p.image) == self.agent_image)
+    }
+
+    pub(crate) fn system_drive(&self) -> char {
+        self.system_drive
+    }
+
+    // ---- rule families ----
+
+    /// Run `f` on every family with a read-only context, then emit the hits.
+    /// Alerts emitted meanwhile (by ST/TP rules or the hits) are offered to
+    /// every family's `on_alert` once; hits from `on_alert` do not cascade.
+    fn run_families(
+        &mut self,
+        ev: &Event,
+        now: TimestampMs,
+        f: impl Fn(&mut dyn Family, &Ctx, &mut Vec<FamilyHit>),
+        alerts_from: usize,
+    ) {
+        let mut fams = std::mem::take(&mut self.families);
+        let mut hits = Vec::new();
+        {
+            let ctx = Ctx { st: self, now };
+            for fam in fams.iter_mut() {
+                f(fam.as_mut(), &ctx, &mut hits);
+            }
+        }
+        for h in hits {
+            self.emit_family(ev, h);
+        }
+        let alerts: Vec<Alert> = self.out[alerts_from.min(self.out.len())..]
+            .iter()
+            .filter_map(|o| match o {
+                Output::Alert(d) => Some(d.alert.clone()),
+                _ => None,
+            })
+            .collect();
+        if !alerts.is_empty() {
+            let mut hits = Vec::new();
+            {
+                let ctx = Ctx { st: self, now };
+                for a in &alerts {
+                    for fam in fams.iter_mut() {
+                        fam.on_alert(&ctx, a, &mut hits);
+                    }
+                }
+            }
+            for h in hits {
+                self.emit_family(ev, h);
+            }
+        }
+        // A family may have been added meanwhile only by `families::all()`.
+        self.families = fams;
+    }
+
+    fn emit_family(&mut self, ev: &Event, h: FamilyHit) {
+        let mut hit = Hit::new(h.rule, &h.guid, h.severity, h.summary);
+        hit.actions = h.actions;
+        hit.suspend = h.suspend;
+        hit.kill_at_expiry = h.kill_at_expiry;
+        hit.strong |= h.strong;
+        hit.extra_evidence = h.extra_evidence;
+        hit.dedup_key = h.dedup_key;
+        hit.process = h.process;
+        self.emit(ev, hit);
+    }
+
     fn proc_info(&self, e: &Event) -> ProcessInfo {
         self.table
             .get(&e.guid)
@@ -1348,7 +1405,7 @@ impl EngineState {
 
     /// Trusted Windows binary: System/Windows dir on the system volume, a
     /// **valid Microsoft** signature, not a LOLBin.
-    fn system_trusted(p: &ProcessInfo) -> bool {
+    pub(crate) fn system_trusted(p: &ProcessInfo) -> bool {
         matches!(p.path_class, PathClass::System | PathClass::Windows)
             && protect::microsoft_signed(p.signed, p.signer.as_deref())
             && !is_lolbin(&file_name_lower(&p.image))
@@ -1356,7 +1413,7 @@ impl EngineState {
 
     /// Untrusted actor for ST-07: unsigned/invalid, Temp/Downloads/external,
     /// user-writable without a valid signature, or a LOLBin / script host.
-    fn untrusted_actor(p: &ProcessInfo) -> bool {
+    pub(crate) fn untrusted_actor(p: &ProcessInfo) -> bool {
         if p.image.is_empty() {
             return true;
         }
@@ -1603,7 +1660,10 @@ impl EngineState {
             ),
         };
         let st = self.state(&hit.guid, ev.ts);
-        st.add_evidence(ev);
+        // Family tick hits carry a synthetic trigger (pid 0, empty guid).
+        if !(ev.pid == 0 && ev.guid.0.is_empty()) {
+            st.add_evidence(ev);
+        }
         let mut evidence: Vec<Event> = st.evidence.iter().cloned().collect();
         let data_at_risk = st.data_at_risk.clone();
         st.set_fired(&dedup_key, ev.ts);
@@ -1664,13 +1724,24 @@ impl EngineState {
                 key,
                 value_name,
                 data,
-            } => self.on_registry(e, key, value_name, data.as_deref()),
+                op,
+            } => {
+                if *op == RegistryOp::Set {
+                    self.on_registry(e, key, value_name, data.as_deref())
+                }
+            }
             EventData::ScriptBlock { content, .. } => self.on_script(e, content),
             EventData::Tamper { kind, detail } => self.on_tamper(e, *kind, detail),
+            // Handled by the rule families only.
+            EventData::FileActivity(_)
+            | EventData::TaskRegistered(_)
+            | EventData::ServiceInstalled(_)
+            | EventData::WmiSubscription(_) => {}
         }
         if self.sigma_kinds & kind_bit(e.kind()) != 0 {
             self.eval_sigma(e);
         }
+        self.run_families(e, e.ts, |f, ctx, out| f.on_event(ctx, e, out), 0);
         std::mem::take(&mut self.out)
     }
 
@@ -1723,6 +1794,9 @@ impl EngineState {
             for g in self.table.evict(now) {
                 self.states.remove(&g);
                 self.agent_guids.remove(&g);
+                for f in self.families.iter_mut() {
+                    f.forget(&g);
+                }
             }
             let table = &self.table;
             self.states.retain(|g, s| {
@@ -1733,6 +1807,17 @@ impl EngineState {
                 s.fired.retain(|(_, t)| now - *t < DEDUP_MS);
             }
         }
+        // Rule families. Tick hits have no triggering event: the subject is
+        // looked up in the table (families set `process` for exited ones) and
+        // the evidence comes from `extra_evidence`.
+        let tick_ev = Event {
+            ts: now,
+            pid: 0,
+            guid: ProcessGuid::default(),
+            data: EventData::ProcessStop { exit_code: None },
+        };
+        let from = self.out.len();
+        self.run_families(&tick_ev, now, |f, ctx, out| f.tick(ctx, out), from);
         std::mem::take(&mut self.out)
     }
 

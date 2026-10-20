@@ -385,6 +385,7 @@ impl Translator {
             target_guid: if known { Some(g) } else { None },
             target_image: self.image_of(target_pid).unwrap_or_default(),
             granted_access: access,
+            return_code: 0,
         }
     }
 
@@ -766,6 +767,7 @@ impl Translator {
                         key,
                         value_name,
                         data: render_reg_data(ty, &data),
+                        op: kestrel_common::RegistryOp::Set,
                     },
                 );
                 self.emit(ev);

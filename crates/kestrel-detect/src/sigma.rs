@@ -617,6 +617,7 @@ detection:
             target_guid: None,
             target_image: r"C:\Program Files\Google\Chrome\Application\chrome.exe".into(),
             granted_access: 0x143a,
+            return_code: 0,
         }));
         assert!(eval(src, &e, &p, None));
     }

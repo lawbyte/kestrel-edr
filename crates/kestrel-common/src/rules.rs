@@ -37,6 +37,12 @@ pub enum RuleCategory {
     Tripwire,
     Tamper,
     Custom,
+    /// RW-xx: ransomware preparation and impact.
+    Ransomware,
+    /// CD-xx: OS credential dumping (LSASS, SAM, NTDS, LSA).
+    CredentialDumping,
+    /// PS-xx: persistence (autoruns, tasks, services, WMI, COM, IFEO).
+    Persistence,
 }
 
 /// Catalog entry shown in the console's rule list.

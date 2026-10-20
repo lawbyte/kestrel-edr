@@ -54,7 +54,7 @@ const UNIT42_VIDAR: &str =
     "https://unit42.paloaltonetworks.com/vidar-stealer-xmrig-miner-campaign-analysis/";
 
 #[allow(clippy::too_many_arguments)]
-fn meta(
+pub(crate) fn meta(
     id: &str,
     name: &str,
     description: &str,

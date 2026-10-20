@@ -437,6 +437,7 @@ impl Core {
             script_content: true,
             sysmon: true,
             self_pid: std::process::id(),
+            groups: p.sensors.clone(),
             enrich_tx: Some(self.enrich_tx.clone()),
         }
     }

@@ -106,6 +106,34 @@ impl PrivacyFilter {
             | EventData::RemoteThread(t)
             | EventData::ThreadContext(t)
             | EventData::DebugAttach(t) => self.redact(&mut t.target_image),
+            EventData::FileActivity(f) => {
+                for p in f.sample_paths.iter_mut().chain(f.canary_hits.iter_mut()) {
+                    self.redact(p);
+                }
+                // A redacted sample says nothing; drop it rather than upload "[redacted]" x5.
+                f.sample_paths.retain(|p| p != REDACTED);
+            }
+            EventData::TaskRegistered(t) => {
+                for a in t.actions.iter_mut() {
+                    *a = redact_secrets(a);
+                    if !self.privacy.capture_cmdline {
+                        *a = truncate_cmdline(a);
+                    }
+                }
+                if let Some(u) = t.user.as_mut() {
+                    *u = self.user(u);
+                }
+            }
+            EventData::ServiceInstalled(s) => {
+                s.image_path = redact_secrets(&s.image_path);
+                if !self.privacy.capture_cmdline {
+                    s.image_path = truncate_cmdline(&s.image_path);
+                }
+            }
+            EventData::WmiSubscription(w) => {
+                w.consumer = redact_secrets(&w.consumer);
+                w.filter = redact_secrets(&w.filter);
+            }
             EventData::DnsQuery { .. }
             | EventData::NetConnect { .. }
             | EventData::ProcessStop { .. }

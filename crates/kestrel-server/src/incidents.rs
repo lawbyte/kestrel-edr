@@ -79,6 +79,22 @@ pub fn describe_action(a: &ResponseAction) -> String {
             None => "scanned running user-path executables".into(),
         },
         ResponseAction::CollectTriage => "collected a triage package".into(),
+        ResponseAction::RemoveAutorun {
+            location,
+            value_name,
+            restore_data,
+            ..
+        } => {
+            let what = match value_name {
+                Some(v) if !v.is_empty() => format!("{location}\\{v}"),
+                _ => location.clone(),
+            };
+            if restore_data.is_some() {
+                format!("restored the default value of {what}")
+            } else {
+                format!("removed persistence entry {what}")
+            }
+        }
     }
 }
 

@@ -400,6 +400,7 @@ pub async fn sensors_test(
         script_content: true,
         sysmon: false,
         self_pid: std::process::id(),
+        groups: kestrel_common::SensorSettings::default(),
         enrich_tx: None,
     };
     let handle = platform
@@ -452,8 +453,10 @@ pub async fn sensors_test(
         if let Some(w) = out.as_mut() {
             if total <= SENSORS_TEST_MAX_EVENTS {
                 serde_json::to_writer(&mut *w, &ev)?;
-                w.write_all(b"
-")?;
+                w.write_all(
+                    b"
+",
+                )?;
             }
         }
         if let Some(e) = engine.as_mut() {

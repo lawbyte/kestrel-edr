@@ -122,6 +122,22 @@ impl EventRow {
                 r.granted_access = t.granted_access;
             }
             EventData::ScriptBlock { .. } | EventData::Tamper { .. } => {}
+            EventData::FileActivity(f) => {
+                r.file_path = f.sample_paths.first().cloned().unwrap_or_default();
+                r.file_op = "activity".into();
+            }
+            EventData::TaskRegistered(t) => {
+                r.reg_key = t.name.clone();
+                r.cmdline = t.actions.join(" | ");
+            }
+            EventData::ServiceInstalled(sv) => {
+                r.reg_key = sv.name.clone();
+                r.image = sv.image_path.clone();
+            }
+            EventData::WmiSubscription(w) => {
+                r.reg_key = w.filter.clone();
+                r.cmdline = w.consumer.clone();
+            }
         }
         r
     }

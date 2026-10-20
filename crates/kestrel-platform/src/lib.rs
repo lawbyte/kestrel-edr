@@ -28,6 +28,8 @@ pub struct SensorConfig {
     pub sysmon: bool,
     /// Agent's own PID (sensors drop self-generated events).
     pub self_pid: u32,
+    /// Optional sensor groups from the policy (file activity, persistence, …).
+    pub groups: kestrel_common::SensorSettings,
     /// Late enrichment sink: hash / signature facts for processes whose
     /// `ProcessStart` was emitted before they were known (first-run budget
     /// exceeded, or a background revocation check demoted the signature).

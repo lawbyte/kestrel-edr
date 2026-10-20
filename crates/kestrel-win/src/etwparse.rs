@@ -186,6 +186,12 @@ pub fn render_reg_data(ty: u32, data: &[u8]) -> Option<String> {
 
 /// DNS-Client 3008 `QueryResults`: `"type:  5 cname.example;::ffff:1.2.3.4;2606:…;"`.
 /// Returns the IP answers (IPv4-mapped addresses unwrapped).
+/// DNS-Client 3008 `QueryStatus` values worth reporting: success, NXDOMAIN
+/// (9003) and "no records of this type" (9501).
+pub fn dns_status_is_reportable(status: u32) -> bool {
+    matches!(status, 0 | 9003 | 9501)
+}
+
 pub fn parse_dns_results(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     for part in s.split(';') {
@@ -220,20 +226,25 @@ pub const PROCESS_VM_WRITE: u32 = 0x0020;
 pub const PROCESS_DUP_HANDLE: u32 = 0x0040;
 pub const PROCESS_SET_INFORMATION: u32 = 0x0200;
 pub const PROCESS_SUSPEND_RESUME: u32 = 0x0800;
+/// Requests every right the caller can get (Audit-API reports desired access).
+pub const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
 pub const THREAD_SET_CONTEXT: u32 = 0x0010;
 pub const THREAD_GET_CONTEXT: u32 = 0x0008;
 pub const THREAD_SUSPEND_RESUME: u32 = 0x0002;
 
 /// Process-handle rights worth reporting (read/write memory, inject, dup
-/// handles, suspend). Pure query/synchronize opens are dropped at the source.
+/// handles, suspend, MAXIMUM_ALLOWED). Pure query/synchronize and
+/// set-information opens are dropped at the source: on a real workstation
+/// `0x1200` (query-limited + set-information, priority tuning by services)
+/// was ~98 % of all Audit-API OpenProcess events (~500/s).
 pub fn is_interesting_process_access(mask: u32) -> bool {
     mask & (PROCESS_CREATE_THREAD
         | PROCESS_VM_OPERATION
         | PROCESS_VM_READ
         | PROCESS_VM_WRITE
         | PROCESS_DUP_HANDLE
-        | PROCESS_SET_INFORMATION
-        | PROCESS_SUSPEND_RESUME)
+        | PROCESS_SUSPEND_RESUME
+        | MAXIMUM_ALLOWED)
         != 0
 }
 
@@ -537,6 +548,10 @@ mod tests {
             ]
         );
         assert!(parse_dns_results("").is_empty());
+        // Real 3008 for a missing name: status 9501, results hold only an SOA.
+        assert!(dns_status_is_reportable(9501) && dns_status_is_reportable(9003));
+        assert!(!dns_status_is_reportable(1460));
+        assert!(parse_dns_results("type: 6 elliott.ns.cloudflare.com;").is_empty());
     }
 
     #[test]
@@ -545,6 +560,9 @@ mod tests {
         assert!(is_interesting_process_access(0x143a));
         assert!(!is_interesting_process_access(0x1000));
         assert!(!is_interesting_process_access(0x100000 | 0x1000 | 0x400));
+        // Real-host noise: query-limited + set-information (priority tuning).
+        assert!(!is_interesting_process_access(0x1200));
+        assert!(is_interesting_process_access(0x0200_0000));
         assert_eq!(parse_hex_u32("0x1FFFFF"), Some(0x1fffff));
         assert!(is_interesting_thread_access(0x1fffff));
     }

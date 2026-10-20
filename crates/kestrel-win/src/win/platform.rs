@@ -454,6 +454,11 @@ impl Inner {
                 };
                 plain(scan::scan(&self.state_dir, &targets))
             }
+            // Implemented by the persistence-response work (autorun backup + removal).
+            ResponseAction::RemoveAutorun { .. } => plain((
+                false,
+                "remove_autorun is not supported by this agent build".into(),
+            )),
             ResponseAction::CollectTriage => {
                 let tracker = self.tracker_for(&self.boot.boot_id);
                 let procs = snapshot::snapshot(
