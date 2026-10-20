@@ -1493,19 +1493,9 @@ fn display_key(key: &str) -> String {
     k.to_string()
 }
 
-/// REG_DWORD / QWORD rendered as decimal (`1`), hex (`0x1`) or `dword:00000001`.
+/// REG_DWORD / QWORD in any rendering (see `util::reg_number`).
 fn parse_num(d: &str) -> Option<u64> {
-    let t = d.trim().to_ascii_lowercase();
-    if let Some(h) = t
-        .strip_prefix("dword:")
-        .or_else(|| t.strip_prefix("qword:"))
-    {
-        return u64::from_str_radix(h.trim(), 16).ok();
-    }
-    if let Some(h) = t.strip_prefix("0x") {
-        return u64::from_str_radix(h, 16).ok();
-    }
-    t.parse().ok()
+    crate::util::reg_number(d)
 }
 
 fn access_desc(mask: u32) -> String {

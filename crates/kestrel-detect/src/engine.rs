@@ -2961,7 +2961,7 @@ impl EngineState {
         // Tamper via registry
         let tp = if k.contains(r"\control\wmi\autologger\")
             && matches!(vn.as_str(), "start" | "enabled" | "enableproperty")
-            && d.trim() == "0"
+            && crate::util::reg_number(&d) == Some(0)
         {
             Some((TP01, "disabled an ETW AutoLogger session or provider"))
         } else if (k.contains(r"\software\microsoft\amsi")

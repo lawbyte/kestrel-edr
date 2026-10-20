@@ -372,6 +372,8 @@ impl Core {
             Some(o) => {
                 o.privacy.capture_dns != p.privacy.capture_dns
                     || o.privacy.capture_script_content != p.privacy.capture_script_content
+                    // Optional sensor groups (file activity, persistence, …).
+                    || o.sensors != p.sensors
             }
             None => true,
         };

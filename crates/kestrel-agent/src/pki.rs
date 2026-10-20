@@ -70,8 +70,13 @@ pub fn load_identity(state_dir: &Path) -> Result<(String, String)> {
     Ok((cert, key))
 }
 
-fn endpoint(cfg: &AgentConfig, identity: Option<(String, String)>) -> Result<Endpoint> {
+async fn endpoint(cfg: &AgentConfig, identity: Option<(String, String)>) -> Result<Endpoint> {
     let (host, port) = cfg.host_port()?;
+    // H10: while the host is isolated only the agent may resolve names (its
+    // own DNS queries); the OS resolver (DNS Client service) is blocked. So a
+    // server configured by name is resolved here and dialled by IP; the TLS
+    // name below is still the configured one.
+    let host = resolve_server_addr(&host, port).await.unwrap_or(host);
     let host_uri = if host.contains(':') {
         format!("[{host}]")
     } else {
@@ -93,10 +98,45 @@ fn endpoint(cfg: &AgentConfig, identity: Option<(String, String)>) -> Result<End
         .keep_alive_while_idle(true))
 }
 
+/// `host` as an IP literal if it is a name that resolves (OS resolver first,
+/// then the agent's own DNS query on Windows); `None` keeps the name.
+async fn resolve_server_addr(host: &str, port: u16) -> Option<String> {
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return None;
+    }
+    let os = tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::net::lookup_host((host.to_string(), port)),
+    )
+    .await;
+    if let Ok(Ok(mut addrs)) = os {
+        if let Some(a) = addrs.next() {
+            return Some(a.ip().to_string());
+        }
+    }
+    direct_resolve(host).await
+}
+
+#[cfg(all(windows, feature = "win-platform"))]
+async fn direct_resolve(host: &str) -> Option<String> {
+    let h = host.to_string();
+    tokio::task::spawn_blocking(move || kestrel_win::resolve_host_direct(&h))
+        .await
+        .ok()?
+        .first()
+        .map(|ip| ip.to_string())
+}
+
+#[cfg(not(all(windows, feature = "win-platform")))]
+async fn direct_resolve(_host: &str) -> Option<String> {
+    None
+}
+
 /// Server-auth-only channel (enrollment).
 pub async fn enroll_channel(cfg: &AgentConfig) -> Result<Channel> {
     install_crypto_provider();
-    endpoint(cfg, None)?
+    endpoint(cfg, None)
+        .await?
         .connect()
         .await
         .context("connecting to server")
@@ -106,7 +146,8 @@ pub async fn enroll_channel(cfg: &AgentConfig) -> Result<Channel> {
 pub async fn mtls_channel(state_dir: &Path, cfg: &AgentConfig) -> Result<Channel> {
     install_crypto_provider();
     let id = load_identity(state_dir)?;
-    endpoint(cfg, Some(id))?
+    endpoint(cfg, Some(id))
+        .await?
         .connect()
         .await
         .context("connecting to server")

@@ -272,6 +272,10 @@ async fn dispatch(state_dir: PathBuf, cmd: Cmd) -> Result<()> {
             commands::verify_uninstall(&state_dir, &token)?;
             if cfg!(windows) {
                 platform_win::delete_msi_setup_key();
+                let removed = platform_win::remove_ransomware_canaries(&state_dir);
+                if !removed.is_empty() {
+                    println!("Removed {} ransomware decoy file(s)", removed.len());
+                }
                 platform_win::uninstall_service().context("removing the service")?;
                 println!("Service {} removed", platform_win::SERVICE_NAME);
             }

@@ -299,3 +299,53 @@ mod tests {
         );
     }
 }
+
+/// Registry number data in any rendering a sensor may send: decimal (`1`),
+/// hex (`0x1`), `dword:00000001` / `qword:…`, or the Sysmon style
+/// `DWORD (0x00000001)` / `QWORD (0x00000001-0x00000000)` (high-low halves).
+pub(crate) fn reg_number(d: &str) -> Option<u64> {
+    let t = d.trim().to_ascii_lowercase();
+    if let Some(inner) = t
+        .strip_prefix("dword (")
+        .or_else(|| t.strip_prefix("qword ("))
+        .and_then(|r| r.strip_suffix(')'))
+    {
+        let mut parts = inner.split('-');
+        let hi = parts.next()?;
+        let parse = |h: &str| u64::from_str_radix(h.trim().trim_start_matches("0x"), 16).ok();
+        return match parts.next() {
+            // Sysmon renders QWORD as high-low.
+            Some(lo) => Some((parse(hi)? << 32) | parse(lo)?),
+            None => parse(hi),
+        };
+    }
+    if let Some(h) = t
+        .strip_prefix("dword:")
+        .or_else(|| t.strip_prefix("qword:"))
+    {
+        return u64::from_str_radix(h.trim().trim_start_matches("0x"), 16).ok();
+    }
+    if let Some(h) = t.strip_prefix("0x") {
+        return u64::from_str_radix(h, 16).ok();
+    }
+    t.parse().ok()
+}
+
+#[cfg(test)]
+mod reg_number_tests {
+    use super::reg_number;
+
+    #[test]
+    fn every_rendering() {
+        assert_eq!(reg_number("1"), Some(1));
+        assert_eq!(reg_number(" 0x200 "), Some(0x200));
+        assert_eq!(reg_number("dword:00000200"), Some(0x200));
+        assert_eq!(reg_number("DWORD (0x00000000)"), Some(0));
+        assert_eq!(reg_number("DWORD (0x00000004)"), Some(4));
+        assert_eq!(
+            reg_number("QWORD (0x00000001-0x00000002)"),
+            Some((1 << 32) | 2)
+        );
+        assert_eq!(reg_number("explorer.exe"), None);
+    }
+}

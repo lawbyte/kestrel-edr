@@ -477,13 +477,7 @@ fn hive_label(h: Hive) -> &'static str {
 }
 
 fn parse_number(s: &str) -> Option<u64> {
-    let t = s.trim().to_ascii_lowercase();
-    let t = t.strip_prefix("dword:").unwrap_or(&t);
-    if let Some(h) = t.strip_prefix("0x") {
-        u64::from_str_radix(h, 16).ok()
-    } else {
-        t.parse().ok()
-    }
+    crate::util::reg_number(s)
 }
 
 fn same_path(a: &str, b: &str) -> bool {

@@ -87,6 +87,12 @@ mod imp {
     pub fn delete_msi_setup_key() {
         kestrel_win::delete_setup_key()
     }
+
+    /// Remove the ransomware decoys the agent planted (only files whose
+    /// content is still exactly what was planted). Returns removed paths.
+    pub fn remove_ransomware_canaries(state_dir: &Path) -> Vec<String> {
+        kestrel_win::rcanary::remove_all(state_dir)
+    }
 }
 
 #[cfg(all(windows, not(feature = "win-platform")))]
@@ -165,6 +171,10 @@ mod imp {
     }
 
     pub fn delete_msi_setup_key() {}
+
+    pub fn remove_ransomware_canaries(_state_dir: &Path) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[cfg(not(windows))]
@@ -218,6 +228,10 @@ mod imp {
     }
 
     pub fn delete_msi_setup_key() {}
+
+    pub fn remove_ransomware_canaries(_state_dir: &Path) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 pub use imp::*;

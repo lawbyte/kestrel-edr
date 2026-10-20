@@ -316,19 +316,6 @@ pub fn verify_uninstall(state_dir: &Path, token: &str) -> Result<AgentConfig> {
     Ok(cfg)
 }
 
-/// `kestrel-agent sensors-test`: start only the platform sensors (Windows:
-/// ETW/event-log sessions via `WindowsPlatform::start_sensors`) for `seconds`
-/// and summarise what was observed. No server, no engine, no response — a CI
-/// smoke test that the sensors produce events on a real Windows host.
-///
-/// `ready` is called once the sensors are running (the smoke script waits for
-/// it before generating activity).
-///
-/// Optional, still read-only extras for lab work:
-/// * `events_out`: write every observed event as JSON lines (capped at
-///   [`SENSORS_TEST_MAX_EVENTS`]) — raw material for regression fixtures.
-/// * `detect`: run the detection engine on the stream with **every rule forced
-///   to Audit** and report the alerts. No action is ever executed.
 /// Upper bound on events written by `sensors-test --events-out`.
 pub const SENSORS_TEST_MAX_EVENTS: u64 = 500_000;
 
@@ -378,6 +365,19 @@ fn collect_alerts(alerts: &mut Vec<serde_json::Value>, outs: Vec<kestrel_detect:
     }
 }
 
+/// `kestrel-agent sensors-test`: start only the platform sensors (Windows:
+/// ETW/event-log sessions via `WindowsPlatform::start_sensors`) for `seconds`
+/// and summarise what was observed. No server, no engine, no response — a CI
+/// smoke test that the sensors produce events on a real Windows host.
+///
+/// `ready` is called once the sensors are running (the smoke script waits for
+/// it before generating activity).
+///
+/// Optional, still read-only extras for lab work:
+/// * `events_out`: write every observed event as JSON lines (capped at
+///   [`SENSORS_TEST_MAX_EVENTS`]) — raw material for regression fixtures.
+/// * `detect`: run the detection engine on the stream with **every rule forced
+///   to Audit** and report the alerts. No action is ever executed.
 pub async fn sensors_test(
     state_dir: &Path,
     seconds: u64,
