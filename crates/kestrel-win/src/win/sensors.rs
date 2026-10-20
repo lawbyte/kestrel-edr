@@ -2,10 +2,11 @@
 //! subscriptions and the watchdog that restarts stopped sessions and emits
 //! tamper events (TP-01 signals).
 
-use super::etw::{self, Counters, Raw, SensorOpts, Session, SessionKind, Sink};
+use super::etw::{self, Counters, FileState, Raw, SensorOpts, Session, SessionKind, Sink};
 use super::evtsub::{self, Subscription};
 use super::translate::{Shared, Translator};
 use crate::consts;
+use crate::fileagg::FileScope;
 use kestrel_common::{Event, TamperKind};
 use kestrel_platform::{SensorConfig, SensorHandle, SensorStats};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,9 +29,11 @@ impl SensorHandle for Sensors {
         SensorStats {
             etw_ok: c.sessions_ok.load(Ordering::Relaxed),
             // ETW EventsLost + events Kestrel had to drop (internal queue / agent channel full).
+            // + file-activity operations dropped by the aggregator's caps.
             events_lost: c.etw_events_lost.load(Ordering::Relaxed)
                 + c.raw_dropped.load(Ordering::Relaxed)
-                + c.out_dropped.load(Ordering::Relaxed),
+                + c.out_dropped.load(Ordering::Relaxed)
+                + c.file_agg_dropped.load(Ordering::Relaxed),
             buffers_lost: c.etw_buffers_lost.load(Ordering::Relaxed),
             events_total: c.emitted.load(Ordering::Relaxed),
             sysmon_present: c.sysmon_present.load(Ordering::Relaxed),
@@ -72,9 +75,25 @@ pub fn start(
         counters: counters.clone(),
         self_pid: cfg.self_pid,
     };
+    // lsass pid for the Audit-API failed-open filter (updated on ProcessStart).
+    counters
+        .lsass_pid
+        .store(find_lsass_pid().unwrap_or(0), Ordering::Relaxed);
+    let g = &cfg.groups;
+    let system_device = shared
+        .devmap
+        .read()
+        .ok()
+        .and_then(|m| m.device_for_drive(kestrel_common::system_drive()))
+        .unwrap_or_default();
+    let file_state = Arc::new(Mutex::new(FileState::new(FileScope::new(&system_device))));
     let opts = SensorOpts {
         dns: cfg.dns,
         script_content: cfg.script_content,
+        file_activity: g.file_activity,
+        persistence: g.persistence,
+        credential_access: g.credential_access,
+        file_state: file_state.clone(),
     };
 
     let mut threads = Vec::new();
@@ -88,10 +107,31 @@ pub fn start(
         );
     }
 
+    // Ransomware decoys: planted only by the installed service (LocalSystem),
+    // never by an interactive `sensors-test`; already-planted ones are
+    // always matched.
+    let mut decoys = Vec::new();
+    if g.file_activity {
+        decoys = if g.ransomware_canaries && super::rcanary::running_as_system() {
+            super::rcanary::plant(&shared.state_dir, &super::host::user_profiles())
+        } else {
+            super::rcanary::planted(&shared.state_dir)
+        };
+        let nt: Vec<String> = shared
+            .devmap
+            .read()
+            .map(|m| decoys.iter().filter_map(|p| m.to_nt_lower(p)).collect())
+            .unwrap_or_default();
+        if let Ok(mut st) = file_state.lock() {
+            st.agg.set_canaries(nt);
+        }
+        tracing::info!(decoys = decoys.len(), "ransomware decoys watched");
+    }
+
     // Start sessions now so configuration errors surface to the caller.
     let mut sessions: Vec<Session> = Vec::new();
     let mut errors = Vec::new();
-    for kind in [SessionKind::Core, SessionKind::Io] {
+    for kind in SessionKind::required(&opts) {
         match etw::start_session(kind, &sink, &opts) {
             Ok(s) => sessions.push(s),
             Err(e) => errors.push(format!("{}: {e}", kind.name())),
@@ -126,6 +166,25 @@ pub fn start(
     ));
     if !evtsub::enable_wfp_policy_audit() {
         tracing::warn!("could not enable WFP policy-change auditing (5446-5450)");
+    }
+
+    if g.persistence {
+        match super::regwatch::start(sink.clone(), stop.clone()) {
+            Ok(h) => threads.push(h),
+            Err(e) => tracing::warn!("registry watcher failed to start: {e}"),
+        }
+    }
+    if g.file_activity && !decoys.is_empty() {
+        match super::rcanary::start_poller(
+            decoys,
+            shared.devmap.clone(),
+            file_state.clone(),
+            sink.clone(),
+            stop.clone(),
+        ) {
+            Ok(h) => threads.push(h),
+            Err(e) => tracing::warn!("decoy poller failed to start: {e}"),
+        }
     }
 
     {
@@ -171,6 +230,12 @@ fn watchdog(
 ) {
     let counters = sink.counters.clone();
     let mut sysmon: Option<Subscription> = None;
+    let persist_subs: Vec<Subscription> = if opts.persistence {
+        evtsub::subscribe_persistence(sink.clone())
+    } else {
+        Vec::new()
+    };
+    let mut last_health = Instant::now();
     let mut wfp_sub: Option<Subscription> =
         evtsub::subscribe_wfp_audit(sink.clone(), wfp_keys.clone());
     let mut last_check = Instant::now() - Duration::from_secs(60);
@@ -179,7 +244,7 @@ fn watchdog(
     let mut last_lost_total = 0u64;
     let mut last_lost_tamper = Instant::now() - Duration::from_secs(3600);
     let mut backoff: std::collections::HashMap<&'static str, (Instant, u64)> = Default::default();
-    let required = [SessionKind::Core, SessionKind::Io];
+    let required = SessionKind::required(&opts);
 
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(500));
@@ -190,7 +255,7 @@ fn watchdog(
 
         // 1. Session liveness (ProcessTrace returned or QUERY fails → stopped).
         let mut all_ok = true;
-        for kind in required {
+        for &kind in &required {
             let idx = sessions.iter().position(|s| s.kind == kind);
             let alive = idx
                 .map(|i| {
@@ -274,6 +339,21 @@ fn watchdog(
         }
         last_lost_total = total;
 
+        if last_health.elapsed() >= Duration::from_secs(300) {
+            last_health = Instant::now();
+            tracing::info!(
+                raw_dropped = counters.raw_dropped.load(Ordering::Relaxed),
+                out_dropped = counters.out_dropped.load(Ordering::Relaxed),
+                file_agg_dropped = counters.file_agg_dropped.load(Ordering::Relaxed),
+                file_activity = counters.file_activity_emitted.load(Ordering::Relaxed),
+                reg_attributed = counters.reg_attributed.load(Ordering::Relaxed),
+                reg_unattributed = counters.reg_unattributed.load(Ordering::Relaxed),
+                reg_watch_keys = counters.reg_watch_keys.load(Ordering::Relaxed),
+                persist_events = counters.persist_events.load(Ordering::Relaxed),
+                "sensor health"
+            );
+        }
+
         // 3. Slow checks: provider still enabled on our sessions, Sysmon, DPAPI channel.
         if last_slow.elapsed() >= Duration::from_secs(30) {
             last_slow = Instant::now();
@@ -330,6 +410,7 @@ fn watchdog(
     // Orderly shutdown: drop subscriptions, stop sessions (by name as well).
     drop(sysmon);
     drop(wfp_sub);
+    drop(persist_subs);
     for mut s in sessions {
         s.stop();
     }
@@ -337,4 +418,24 @@ fn watchdog(
         c.stop();
     }
     counters.sessions_ok.store(false, Ordering::Relaxed);
+}
+
+/// lsass.exe in System32 whose parent is wininit.exe (falls back to the
+/// only lsass.exe when the parent cannot be matched).
+fn find_lsass_pid() -> Option<u32> {
+    let rows = super::snapshot::toolhelp_rows();
+    let wininit: Vec<u32> = rows
+        .iter()
+        .filter(|r| r.exe.eq_ignore_ascii_case("wininit.exe"))
+        .map(|r| r.pid)
+        .collect();
+    let lsass: Vec<&super::snapshot::Row> = rows
+        .iter()
+        .filter(|r| r.exe.eq_ignore_ascii_case("lsass.exe"))
+        .collect();
+    lsass
+        .iter()
+        .find(|r| wininit.contains(&r.ppid))
+        .or_else(|| (lsass.len() == 1).then(|| &lsass[0]))
+        .map(|r| r.pid)
 }

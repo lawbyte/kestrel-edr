@@ -8,7 +8,7 @@ use super::quarantine::Vault;
 use super::translate::Shared;
 use super::util::*;
 use super::wfp::Wfp;
-use super::{devmap, respond, scan, sensors, snapshot, tray_server, triage};
+use super::{autorun_resp, devmap, respond, scan, sensors, snapshot, tray_server, triage};
 use crate::canary::{self, CanaryRegistry};
 use crate::hostfacts::BootRecord;
 use crate::ntpath::{norm_key, DeviceMap};
@@ -59,6 +59,36 @@ fn resolve(host: &str) -> Vec<IpAddr> {
         .to_socket_addrs()
         .map(|it| it.map(|a| a.ip()).collect())
         .unwrap_or_default()
+}
+
+/// Resolve `host` with the agent's own stub resolver against the adapters'
+/// DNS servers (packets leave from this process, so the isolation DNS permit
+/// — agent app id only, H10 — applies). Used while isolated, when the DNS
+/// Client service (`getaddrinfo`) is cut off.
+pub fn resolve_host_direct(host: &str) -> Vec<IpAddr> {
+    let (_, dns) = host::adapters();
+    crate::dnswire::resolve_via(host, &dns, Duration::from_secs(2), 16)
+}
+
+/// Server-name resolution: while isolated the agent's own queries first
+/// (the OS resolver is blocked), otherwise the OS resolver first (hosts
+/// file, split DNS, DoH policy) with the direct query as fallback.
+fn resolve_server(host: &str, isolated: bool) -> Vec<IpAddr> {
+    if isolated {
+        let d = resolve_host_direct(host);
+        if d.is_empty() {
+            resolve(host)
+        } else {
+            d
+        }
+    } else {
+        let r = resolve(host);
+        if r.is_empty() {
+            resolve_host_direct(host)
+        } else {
+            r
+        }
+    }
 }
 
 impl WindowsPlatform {
@@ -197,7 +227,8 @@ fn background(inner: std::sync::Weak<Inner>, stop: Arc<AtomicBool>) {
 
 impl Inner {
     fn server_addrs(&self) -> (Vec<IpAddr>, Vec<String>) {
-        wfp_plan::parse_ips(&self.server_ips, resolve)
+        let isolated = self.wfp.isolated.load(Ordering::SeqCst);
+        wfp_plan::parse_ips(&self.server_ips, |h| resolve_server(h, isolated))
     }
 
     fn agent_exe() -> Option<String> {
@@ -454,11 +485,31 @@ impl Inner {
                 };
                 plain(scan::scan(&self.state_dir, &targets))
             }
-            // Implemented by the persistence-response work (autorun backup + removal).
-            ResponseAction::RemoveAutorun { .. } => plain((
-                false,
-                "remove_autorun is not supported by this agent build".into(),
-            )),
+            // Backup to the vault first, re-read, then remove (see autorun_resp).
+            ResponseAction::RemoveAutorun {
+                kind,
+                location,
+                value_name,
+                restore_data,
+            } => match &self.vault {
+                Ok(v) => autorun_resp::remove_autorun(
+                    &autorun_resp::Ctx {
+                        vault: v,
+                        origin,
+                        system_drive: self.system_drive,
+                        own_dirs: &self.own_dirs,
+                    },
+                    *kind,
+                    location,
+                    value_name.as_deref(),
+                    restore_data.as_deref(),
+                ),
+                Err(e) => (
+                    false,
+                    format!("{e}; autoruns are never removed without a backup"),
+                    None,
+                ),
+            },
             ResponseAction::CollectTriage => {
                 let tracker = self.tracker_for(&self.boot.boot_id);
                 let procs = snapshot::snapshot(
@@ -557,6 +608,7 @@ impl Platform for WindowsPlatform {
             devmap: i.devmap.clone(),
             canaries: i.canaries.clone(),
             counters: i.counters.clone(),
+            state_dir: i.state_dir.clone(),
         });
         let s = sensors::start(shared, cfg, tx, i.wfp.keys.clone())?;
         Ok(Box::new(s))

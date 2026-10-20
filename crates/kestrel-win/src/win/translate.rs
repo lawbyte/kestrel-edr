@@ -18,7 +18,9 @@ use crate::etwparse::*;
 use crate::evtxml::SysmonKind;
 use crate::filters;
 use crate::ntpath::{norm_key, DeviceMap};
+use crate::persist::{Dedup, Hints, PersistRecord};
 use crate::proctrack::ProcTracker;
+use crate::regdiff::{render_sysmon, RegJoin, PENDING_WAIT_MS};
 use kestrel_common::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
@@ -33,6 +35,11 @@ pub const CMDLINE_WAIT_MS: i64 = 1_000;
 const FILE_DEDUP_MS: i64 = 10_000;
 const DNS_TTL_MS: i64 = 15 * 60_000;
 const THREAD_OPEN_WINDOW_MS: i64 = 5_000;
+/// Persistence events wait this long (arrival time) for the creator's
+/// process-start / script / image-load events from the other sessions.
+const PERSIST_HOLD_MS: i64 = 1_500;
+const MAX_PENDING_REG: usize = 4096;
+const MAX_PENDING_PERSIST: usize = 1024;
 
 pub struct Shared {
     pub boot_id: String,
@@ -42,6 +49,26 @@ pub struct Shared {
     pub devmap: Arc<RwLock<DeviceMap>>,
     pub canaries: Arc<RwLock<HashSet<String>>>,
     pub counters: Arc<Counters>,
+    /// Agent state directory (ransomware decoy registry).
+    pub state_dir: std::path::PathBuf,
+}
+
+struct PendingReg {
+    deadline: i64,
+    ts: i64,
+    key: String,
+    value_name: String,
+    op: RegistryOp,
+    ty: u32,
+    data: Option<Vec<u8>>,
+}
+
+struct PendingPersist {
+    release_at: i64,
+    ts: i64,
+    logger_pid: u32,
+    record: PersistRecord,
+    task: Option<crate::taskxml::TaskInfo>,
 }
 
 struct Held {
@@ -67,6 +94,14 @@ pub struct Translator {
     held_pids: HashMap<u32, usize>,
     last_devmap_refresh: Instant,
     last_gc: Instant,
+    reg_join: RegJoin,
+    pending_reg: VecDeque<PendingReg>,
+    /// (ts, key lc, value lc) of registry events already emitted with a full
+    /// key from ETW (older builds) -- the watcher copy is then dropped.
+    reg_full_recent: VecDeque<(i64, String, String)>,
+    hints: Hints,
+    persist_dedup: Dedup,
+    pending_persist: VecDeque<PendingPersist>,
 }
 
 /// `kestrel_detect::paths::may_be_sensitive`, guarded: if the detection crate
@@ -126,6 +161,12 @@ impl Translator {
             held_pids: HashMap::new(),
             last_devmap_refresh: Instant::now(),
             last_gc: Instant::now(),
+            reg_join: RegJoin::new(),
+            pending_reg: VecDeque::new(),
+            reg_full_recent: VecDeque::new(),
+            hints: Hints::new(),
+            persist_dedup: Dedup::default(),
+            pending_persist: VecDeque::new(),
         }
     }
 
@@ -145,13 +186,18 @@ impl Translator {
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
-            self.release(now_ms());
+            let now = now_ms();
+            self.release(now);
+            self.flush_reg(now, false);
+            self.flush_persist(now, false);
             if self.last_gc.elapsed() > Duration::from_secs(10) {
                 self.gc();
             }
         }
         // Flush whatever is held.
         self.release(i64::MAX);
+        self.flush_reg(i64::MAX, true);
+        self.flush_persist(i64::MAX, true);
     }
 
     fn send(&mut self, ev: Event) {
@@ -266,6 +312,15 @@ impl Translator {
         self.thread_opens
             .retain(|_, (_, ts)| now - *ts < THREAD_OPEN_WINDOW_MS);
         self.cmdlines.retain(|_, (_, ts)| now - *ts < 30_000);
+        self.reg_join.expire(now);
+        self.hints.expire(now);
+        while self
+            .reg_full_recent
+            .front()
+            .is_some_and(|(t, _, _)| now - *t > 10_000)
+        {
+            self.reg_full_recent.pop_front();
+        }
         if self.file_objects.len() > 100_000 {
             self.file_objects.clear();
         }
@@ -373,6 +428,16 @@ impl Translator {
     }
 
     fn target(&mut self, target_pid: u32, access: u32, ts: i64) -> TargetProcess {
+        self.target_rc(target_pid, access, ts, 0)
+    }
+
+    fn target_rc(
+        &mut self,
+        target_pid: u32,
+        access: u32,
+        ts: i64,
+        return_code: u32,
+    ) -> TargetProcess {
         self.ensure_known(target_pid);
         let (g, known) = self
             .s
@@ -385,7 +450,7 @@ impl Translator {
             target_guid: if known { Some(g) } else { None },
             target_image: self.image_of(target_pid).unwrap_or_default(),
             granted_access: access,
-            return_code: 0,
+            return_code,
         }
     }
 
@@ -398,7 +463,7 @@ impl Translator {
                 return true;
             }
         }
-        may_be_sensitive(path)
+        may_be_sensitive(path) || filters::is_extra_sensitive(path)
     }
 
     pub fn handle(&mut self, r: Raw) {
@@ -460,6 +525,17 @@ impl Translator {
                     .or(token_integrity);
                 let waiting = cmdline.is_none();
                 let guid_for_watch = guid.clone();
+                self.hints.on_process_start(
+                    start_ts,
+                    pid,
+                    &image,
+                    cmdline.as_deref().unwrap_or(""),
+                );
+                if image.to_ascii_lowercase().ends_with(r"\system32\lsass.exe")
+                    && filters::is_critical_location(&image, kestrel_common::system_drive())
+                {
+                    self.s.counters.lsass_pid.store(pid, Ordering::Relaxed);
+                }
                 let ev = Event {
                     ts: start_ts,
                     pid,
@@ -498,6 +574,8 @@ impl Translator {
                         if let EventData::ProcessStart(p) = &mut h.ev.data {
                             if p.cmdline.is_empty() {
                                 p.cmdline = cmdline.clone();
+                                self.hints
+                                    .on_process_start(h.ev.ts, pid, &p.image, &cmdline);
                             }
                         }
                         h.waiting_cmdline = false;
@@ -548,6 +626,9 @@ impl Translator {
                 let path = self.dos(&image_nt);
                 if !filters::should_emit_image_load(&path) {
                     return;
+                }
+                if !self.actor_is_noise(pid) {
+                    self.hints.on_image_load(ts, pid, &path);
                 }
                 let facts = self
                     .s
@@ -706,12 +787,13 @@ impl Translator {
                 pid,
                 target_pid,
                 access,
+                return_code,
             } => {
                 if self.actor_is_noise(pid) {
                     return;
                 }
                 self.ensure_known(pid);
-                let t = self.target(target_pid, access, ts);
+                let t = self.target_rc(target_pid, access, ts, return_code);
                 let ev = self.base(ts, pid, EventData::ProcessAccess(t));
                 self.emit(ev);
             }
@@ -749,28 +831,115 @@ impl Translator {
                 let ev = self.base(ts, pid, EventData::ProcessAccess(t));
                 self.emit(ev);
             }
-            Raw::RegSet {
+            Raw::RegEtw {
                 ts,
                 pid,
+                key_object,
                 key,
                 value_name,
+                op,
                 ty,
                 data,
             } => {
-                if pid == self.s.self_pid {
+                self.reg_join.record(
+                    ts,
+                    pid,
+                    key_object,
+                    &value_name,
+                    op == RegistryOp::DeleteValue,
+                );
+                self.flush_reg(now, false);
+                if key.is_empty() || pid == self.s.self_pid {
                     return;
                 }
+                // Older builds: the event names the key; emit it directly.
+                if self.reg_full_recent.len() > 4096 {
+                    self.reg_full_recent.pop_front();
+                }
+                self.reg_full_recent.push_back((
+                    ts,
+                    key.to_ascii_lowercase(),
+                    value_name.to_ascii_lowercase(),
+                ));
+                self.ensure_known(pid);
                 let ev = self.base(
                     ts,
                     pid,
                     EventData::RegistrySet {
                         key,
                         value_name,
-                        data: render_reg_data(ty, &data),
-                        op: kestrel_common::RegistryOp::Set,
+                        data: if op == RegistryOp::Set {
+                            render_sysmon(ty, &data)
+                        } else {
+                            None
+                        },
+                        op,
                     },
                 );
                 self.emit(ev);
+            }
+            Raw::RegChange {
+                ts,
+                key,
+                value_name,
+                op,
+                ty,
+                data,
+            } => {
+                if self.pending_reg.len() >= MAX_PENDING_REG {
+                    // Bounded: emit everything pending instead of growing.
+                    self.flush_reg(i64::MAX, true);
+                }
+                self.pending_reg.push_back(PendingReg {
+                    deadline: now + PENDING_WAIT_MS,
+                    ts,
+                    key,
+                    value_name,
+                    op,
+                    ty,
+                    data,
+                });
+                self.flush_reg(now, false);
+            }
+            Raw::FileActivity { ts, pid, mut act } => {
+                if pid == self.s.self_pid {
+                    return;
+                }
+                act.sample_paths = act.sample_paths.iter().map(|p| self.dos(p)).collect();
+                act.canary_hits = act.canary_hits.iter().map(|p| self.dos(p)).collect();
+                if pid == 0 {
+                    // Decoy modified with no known opener: telemetry only.
+                    self.send(Event {
+                        ts,
+                        pid: 0,
+                        guid: ProcessGuid::default(),
+                        data: EventData::FileActivity(act),
+                    });
+                    return;
+                }
+                self.ensure_known(pid);
+                let ev = self.base(ts, pid, EventData::FileActivity(act));
+                self.emit(ev);
+            }
+            Raw::Persist {
+                ts,
+                logger_pid,
+                record,
+                task,
+            } => {
+                if self.persist_dedup.seen(&record.dedup_key(), ts) {
+                    return;
+                }
+                if self.pending_persist.len() >= MAX_PENDING_PERSIST {
+                    self.flush_persist(i64::MAX, true);
+                }
+                self.pending_persist.push_back(PendingPersist {
+                    release_at: now + PERSIST_HOLD_MS,
+                    ts,
+                    logger_pid,
+                    record,
+                    task,
+                });
             }
             Raw::Dns {
                 ts,
@@ -820,6 +989,7 @@ impl Translator {
                 if pid == self.s.self_pid {
                     return;
                 }
+                self.hints.on_script(ts, pid, &text);
                 let ev = self.base(
                     ts,
                     pid,
@@ -853,6 +1023,113 @@ impl Translator {
                 // Tamper events are never held.
                 self.send(ev);
             }
+        }
+    }
+
+    /// Emit registry-watcher changes that found their writer, and (when
+    /// `force` or past their deadline) those that did not, with pid 0.
+    fn flush_reg(&mut self, now: i64, force: bool) {
+        if self.pending_reg.is_empty() {
+            return;
+        }
+        let mut keep = VecDeque::with_capacity(self.pending_reg.len());
+        while let Some(p) = self.pending_reg.pop_front() {
+            let key_lc = p.key.to_ascii_lowercase();
+            let value_lc = p.value_name.to_ascii_lowercase();
+            if self
+                .reg_full_recent
+                .iter()
+                .any(|(t, k, v)| *k == key_lc && *v == value_lc && (t - p.ts).abs() < 5_000)
+            {
+                continue; // already emitted from ETW with the full key
+            }
+            let writer = self.reg_join.attribute(&p.key, &p.value_name, p.op, p.ts);
+            if writer.is_none() && !force && p.deadline > now {
+                keep.push_back(p);
+                continue;
+            }
+            let data = match p.op {
+                RegistryOp::Set => p.data.as_deref().and_then(|d| render_sysmon(p.ty, d)),
+                _ => None,
+            };
+            let ev_data = EventData::RegistrySet {
+                key: p.key,
+                value_name: p.value_name,
+                data,
+                op: p.op,
+            };
+            match writer {
+                Some(pid) if pid == self.s.self_pid => {}
+                Some(pid) => {
+                    self.s
+                        .counters
+                        .reg_attributed
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.ensure_known(pid);
+                    let ev = self.base(p.ts, pid, ev_data);
+                    self.emit(ev);
+                }
+                None => {
+                    self.reg_join.note_unattributed();
+                    self.s
+                        .counters
+                        .reg_unattributed
+                        .fetch_add(1, Ordering::Relaxed);
+                    // Unknown writer: pid 0 / empty guid -- telemetry only
+                    // (the engine never alerts on pid 0 as a subject).
+                    self.send(Event {
+                        ts: p.ts,
+                        pid: 0,
+                        guid: ProcessGuid::default(),
+                        data: ev_data,
+                    });
+                }
+            }
+        }
+        self.pending_reg = keep;
+    }
+
+    /// Emit held persistence events, attributed to the most recent creator
+    /// hint (schtasks / sc / PowerShell / taskschd.dll load) within 5 s,
+    /// else to the logging service process.
+    fn flush_persist(&mut self, now: i64, force: bool) {
+        while self
+            .pending_persist
+            .front()
+            .is_some_and(|p| force || p.release_at <= now)
+        {
+            let Some(p) = self.pending_persist.pop_front() else {
+                break;
+            };
+            let pid = self
+                .hints
+                .creator(p.record.kind(), p.ts)
+                .unwrap_or(p.logger_pid);
+            if pid == self.s.self_pid {
+                continue;
+            }
+            let data = match p.record {
+                PersistRecord::Task { name, op, user } => {
+                    let t = p.task.unwrap_or_default();
+                    EventData::TaskRegistered(TaskChange {
+                        name,
+                        op,
+                        user: user.or(t.user),
+                        actions: t.actions,
+                        hidden: t.hidden,
+                        triggers: t.triggers,
+                    })
+                }
+                PersistRecord::Service(s) => EventData::ServiceInstalled(s),
+                PersistRecord::Wmi(w) => EventData::WmiSubscription(w),
+            };
+            self.s
+                .counters
+                .persist_events
+                .fetch_add(1, Ordering::Relaxed);
+            self.ensure_known(pid);
+            let ev = self.base(p.ts, pid, data);
+            self.emit(ev);
         }
     }
 

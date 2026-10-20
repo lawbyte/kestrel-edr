@@ -39,6 +39,32 @@ impl DeviceMap {
         self.devices.is_empty()
     }
 
+    /// Lower-cased NT device for a drive (`'C'` → `\device\harddiskvolume3`).
+    pub fn device_for_drive(&self, drive: char) -> Option<String> {
+        let want = format!("{}:", drive.to_ascii_uppercase());
+        self.devices
+            .iter()
+            .find(|(_, d)| d.eq_ignore_ascii_case(&want))
+            .map(|(dev, _)| dev.clone())
+    }
+
+    /// Win32 path → lower-cased NT path (`C:\Users\x` →
+    /// `\device\harddiskvolume3\users\x`, `\\srv\share\x` →
+    /// `\device\mup\srv\share\x`). None when the drive is unknown.
+    pub fn to_nt_lower(&self, win32: &str) -> Option<String> {
+        let p = win32.replace('/', "\\");
+        let p = p.strip_prefix(r"\\?\").unwrap_or(&p);
+        if let Some(unc) = p.strip_prefix(r"\\") {
+            return Some(format!(r"\device\mup\{}", unc.to_ascii_lowercase()));
+        }
+        let b = p.as_bytes();
+        if b.len() >= 2 && b[1] == b':' {
+            let dev = self.device_for_drive(b[0] as char)?;
+            return Some(format!("{dev}{}", p[2..].to_ascii_lowercase()));
+        }
+        None
+    }
+
     /// Convert an NT path to a Win32 path. Returns the input unchanged when no
     /// rule applies (so callers never lose information). The boolean is false
     /// when the device prefix was unknown (caller may refresh the table).
@@ -156,6 +182,20 @@ mod tests {
         );
         // Prefix of a longer device must not match.
         assert!(!m.to_dos(r"\Device\HarddiskVolume1\x").1);
+        // Reverse direction.
+        assert_eq!(
+            m.device_for_drive('c').as_deref(),
+            Some(r"\device\harddiskvolume3")
+        );
+        assert_eq!(
+            m.to_nt_lower(r"C:\Users\A\Documents\X.docx").as_deref(),
+            Some(r"\device\harddiskvolume3\users\a\documents\x.docx")
+        );
+        assert_eq!(
+            m.to_nt_lower(r"\\Srv\Share\a.txt").as_deref(),
+            Some(r"\device\mup\srv\share\a.txt")
+        );
+        assert_eq!(m.to_nt_lower(r"Q:\x"), None);
         assert_eq!(m.to_dos(r"\Device\HarddiskVolume3").0, "C:");
     }
 

@@ -7,7 +7,7 @@
   to Audit; no response action is ever executed) and, while it runs, generates benign activity:
 
     * risk 3  network byte order   Test-NetConnection example.com:443 (compare with Resolve-DnsName)
-    * risk 2  registry KeyName     set + delete HKCU\Software\KestrelProbe\v (a throwaway key)
+    * risk 2  registry watcher     reg add + delete of a throwaway value in HKCU ...\CurrentVersion\Run
     * risk 4  DPAPI 16385          ProtectedData.Protect/Unprotect of a random blob (own data)
     * risk 6  short-lived cmdline  cmd /c echo kestrel-probe-<nonce>
     * risk 7  nslookup vs DNS      nslookup (expected: no dns_query) and Resolve-DnsName (expected: one)
@@ -56,10 +56,12 @@ $exIps = @(Resolve-DnsName example.com -Type A -DnsOnly -ErrorAction SilentlyCon
 $tnc = Test-NetConnection example.com -Port 443 -WarningAction SilentlyContinue
 $tncIp = "$($tnc.RemoteAddress)"
 
-# risk 2: registry KeyName form (throwaway HKCU key)
-New-Item -Path "HKCU:\Software\KestrelProbe" -Force | Out-Null
-Set-ItemProperty -Path "HKCU:\Software\KestrelProbe" -Name "v$nonce" -Value "probe"
-Remove-Item -Path "HKCU:\Software\KestrelProbe" -Recurse -Force
+# risk 2: registry watcher + writer attribution (throwaway value in HKCU Run,
+# removed again; reg.exe so the writer is a distinct, short-lived process)
+$runKey = 'HKCU\Software\Microsoft\Windows\CurrentVersion\Run'
+& reg.exe add $runKey /v "KestrelProbe$nonce" /t REG_SZ /d notepad.exe /f | Out-Null
+Start-Sleep -Seconds 3
+& reg.exe delete $runKey /v "KestrelProbe$nonce" /f | Out-Null
 
 # risk 4: DPAPI unprotect of our own blob (does 16385 arrive?)
 Add-Type -AssemblyName System.Security
@@ -100,9 +102,13 @@ $net = @($ev | Where-Object { $_.type -eq 'net_connect' -and $_.dst_port -eq 443
 $swapped = @($ev | Where-Object { $_.type -eq 'net_connect' -and $_.dst_port -eq 47873 })
 Verdict 'risk 3 network byte order' ($net.Count -gt 0 -and $swapped.Count -eq 0) "Test-NetConnection $tncIp:443 seen $($net.Count)x; example.com A=$($exIps -join ','); swapped-port events=$($swapped.Count)"
 
-$reg = @($ev | Where-Object { $_.type -eq 'registry_set' -and $_.value_name -eq "v$nonce" })
-$regKey = ($reg | Select-Object -First 1).key
-Verdict 'risk 2 registry KeyName absolute' ($reg.Count -gt 0 -and $regKey -match '^HK(U|CU)\\.*\\Software\\KestrelProbe$|^HKU\\S-1-5-[\d-]+\\Software\\KestrelProbe$') "key='$regKey'"
+$reg = @($ev | Where-Object { $_.type -eq 'registry_set' -and $_.value_name -eq "KestrelProbe$nonce" })
+$regSet = $reg | Where-Object { -not $_.op -or $_.op -eq 'set' } | Select-Object -First 1
+$regDel = $reg | Where-Object { $_.op -eq 'delete_value' } | Select-Object -First 1
+$regKey = $regSet.key
+Verdict 'risk 2 registry full key' ([bool]$regSet -and $regKey -match '^HKU\\S-1-[\d-]+\\Software\\Microsoft\\Windows\\CurrentVersion\\Run$') "key='$regKey' data='$($regSet.data)'"
+Verdict 'risk 2 registry writer attributed' ([bool]$regSet -and $regSet.pid -ne 0) "set pid=$($regSet.pid); delete pid=$($regDel.pid)"
+Verdict 'risk 2 registry delete seen' ([bool]$regDel) "delete_value events: $(@($reg | Where-Object { $_.op -eq 'delete_value' }).Count)"
 
 $dp = @($ev | Where-Object { $_.type -eq 'dpapi_unprotect' })
 Write-Host "    info: risk 4 dpapi_unprotect events: $($dp.Count) (channel enabled: $($r.stats.dpapi_channel_enabled))"

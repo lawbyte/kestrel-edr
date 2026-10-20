@@ -82,8 +82,14 @@ fn family_ok(layer: Layer, ip: &IpAddr) -> bool {
 
 /// Filters for host isolation: everything blocked except loopback, the
 /// Kestrel server(s) (only for the agent executable when `agent_exe` is
-/// given), the extra allow-list (any process), DHCP, and DNS to the
-/// configured resolvers.
+/// given), the extra allow-list (any process), DHCP, and DNS (TCP/UDP 53) to
+/// the configured resolvers **for the agent executable only** (H10).
+///
+/// Trade-off (intended): while isolated no other process — including the
+/// Windows DNS Client service that answers `getaddrinfo` — can resolve
+/// names, which closes DNS tunnelling out of an isolated host. The agent
+/// resolves the server name itself with [`crate::dnswire`]; analysts who
+/// need another service reachable add its IP to the allow-list.
 pub fn plan_isolation(
     servers: &[IpAddr],
     allow: &[IpAddr],
@@ -139,15 +145,22 @@ pub fn plan_isolation(
                 Cond::RemotePort(rp),
             ],
         });
-        if !layer.is_inbound() {
+        // H10: DNS only for the agent itself (it resolves the server with its
+        // own stub resolver, `crate::dnswire`, while isolated). Without a
+        // known agent image no DNS permit is added at all (fail closed).
+        if let (false, Some(exe)) = (layer.is_inbound(), agent_exe.filter(|e| !e.is_empty())) {
             for ip in dns {
                 if family_ok(layer, ip) {
                     v.push(FilterSpec {
-                        name: format!("Kestrel isolate: permit DNS {ip}"),
+                        name: format!("Kestrel isolate: permit agent DNS {ip}"),
                         layer,
                         action: Action::Permit,
                         weight: W_PERMIT,
-                        conditions: vec![Cond::RemoteAddr(*ip), Cond::RemotePort(53)],
+                        conditions: vec![
+                            Cond::RemoteAddr(*ip),
+                            Cond::RemotePort(53),
+                            Cond::AppPath(exe.to_string()),
+                        ],
                     });
                 }
             }
@@ -396,6 +409,16 @@ mod tests {
             && x.conditions == vec![Cond::RemoteAddr(ip("10.0.0.5"))]));
         assert!(f.iter().any(|x| x.layer == Layer::ConnectV6
             && x.conditions == vec![Cond::RemoteAddr(ip("fd00::5"))]));
+        // No agent image known → no DNS permit at all (fail closed, H10)
+        assert!(!f
+            .iter()
+            .any(|x| x.conditions.contains(&Cond::RemotePort(53))));
+        let f = plan_isolation(
+            &[ip("10.0.0.5"), ip("fd00::5")],
+            &[ip("10.0.0.9")],
+            &[ip("10.0.0.53")],
+            Some(r"C:\Program Files\Kestrel\kestrel-agent.exe"),
+        );
         // DNS only outbound
         assert!(f
             .iter()
@@ -432,6 +455,32 @@ mod tests {
         assert!(!f
             .iter()
             .any(|x| x.conditions == vec![Cond::RemoteAddr(ip("10.0.0.5"))]));
+        // DNS to the resolvers only for the agent executable (H10)
+        let dns: Vec<_> = f
+            .iter()
+            .filter(|x| x.conditions.contains(&Cond::RemotePort(53)))
+            .collect();
+        assert_eq!(dns.len(), 1);
+        assert_eq!(dns[0].layer, Layer::ConnectV4);
+        assert_eq!(
+            dns[0].conditions,
+            vec![
+                Cond::RemoteAddr(ip("10.0.0.53")),
+                Cond::RemotePort(53),
+                Cond::AppPath(exe.into())
+            ]
+        );
+        assert!(!f
+            .iter()
+            .any(|x| x.conditions.contains(&Cond::RemotePort(53))
+                && !x.conditions.contains(&Cond::AppPath(exe.into()))));
+        assert_eq!(
+            plan_isolation(&[ip("10.0.0.5")], &[], &[ip("10.0.0.53")], Some(""))
+                .iter()
+                .filter(|x| x.conditions.contains(&Cond::RemotePort(53)))
+                .count(),
+            0
+        );
         // analyst allow-list stays any-process
         assert!(f
             .iter()

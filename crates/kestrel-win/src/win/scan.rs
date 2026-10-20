@@ -1,172 +1,78 @@
-#![cfg_attr(not(feature = "yara"), allow(dead_code))]
 //! On-demand YARA-X scanning for the `Scan` action.
 //!
-//! Rules: a small embedded baseline (generic stealer traits) plus every
-//! `*.yar` / `*.yara` file in `<state>\rules\` — the agent writes custom YARA
-//! rules from its `RuleBundle` there (the `Platform` trait has no rule
-//! channel; see report).
+//! The YARA-X engine lives in the separate `kestrel-scan.exe` (crate
+//! `kestrel-scan`) installed next to the agent, so the always-running agent
+//! does not carry wasmtime. The agent writes the target list into its
+//! SYSTEM-only state directory and runs the scanner with a timeout; custom
+//! YARA rules from the `RuleBundle` are in `<state>\rules\`.
 
+use super::util::run_cmd;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-pub const MAX_SCAN_BYTES: u64 = 600 * 1024 * 1024;
-
-pub const BASELINE_RULES: &str = r#"
-rule Kestrel_Stealer_BrowserStoreStrings {
-  meta:
-    description = "PE referencing several browser credential stores and DPAPI"
-    author = "Kestrel EDR"
-  strings:
-    $a1 = "Login Data" ascii wide
-    $a2 = "Local State" ascii wide
-    $a3 = "Web Data" ascii wide
-    $a4 = "key4.db" ascii wide nocase
-    $a5 = "logins.json" ascii wide nocase
-    $a6 = "Network\\Cookies" ascii wide
-    $d1 = "CryptUnprotectData" ascii
-    $d2 = "encrypted_key" ascii wide
-    $d3 = "app_bound_encrypted_key" ascii wide
-  condition:
-    uint16(0) == 0x5A4D and 3 of ($a*) and 1 of ($d*)
-}
-
-rule Kestrel_Stealer_WalletAndMessengerTargets {
-  meta:
-    description = "PE referencing crypto-wallet extension ids and messenger session stores"
-    author = "Kestrel EDR"
-  strings:
-    $w1 = "nkbihfbeogaeaoehlefnkodbefgpgknn" ascii wide
-    $w2 = "bfnaelmomeimhlpmgjnjophhpkkoljpa" ascii wide
-    $w3 = "Local Extension Settings" ascii wide
-    $m1 = "\\Telegram Desktop\\tdata" ascii wide nocase
-    $m2 = "discord\\Local Storage\\leveldb" ascii wide nocase
-    $m3 = "ssfn" ascii wide
-  condition:
-    uint16(0) == 0x5A4D and (2 of ($w*)) and 1 of ($m*)
-}
-
-rule Kestrel_Exfil_DeadDrops {
-  meta:
-    description = "Executable or script with Telegram/Steam/Discord dead-drop or exfil endpoints"
-    author = "Kestrel EDR"
-  strings:
-    $t = "api.telegram.org/bot" ascii wide nocase
-    $s = "steamcommunity.com/profiles/" ascii wide nocase
-    $d = "discord.com/api/webhooks/" ascii wide nocase
-    $b = "bsc-dataseed" ascii wide nocase
-  condition:
-    2 of them
-}
-
-rule Kestrel_ClickFix_Script {
-  meta:
-    description = "Script content typical of paste-and-run (ClickFix) lures"
-    author = "Kestrel EDR"
-  strings:
-    $c1 = "I am not a robot" ascii wide nocase
-    $c2 = "verification" ascii wide nocase
-    $p1 = "-w h" ascii wide nocase
-    $p2 = "iex" ascii wide nocase
-    $p3 = "FromBase64String" ascii wide nocase
-    $p4 = "mshta" ascii wide nocase
-  condition:
-    filesize < 2MB and 1 of ($c*) and 2 of ($p*)
-}
-"#;
+/// A scan of up to 5000 files may take a while; never longer than this.
+const SCAN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 pub fn rules_dir(state_dir: &Path) -> PathBuf {
     state_dir.join("rules")
 }
 
-#[cfg(feature = "yara")]
-pub fn scan(state_dir: &Path, targets: &[String]) -> (bool, String) {
-    use std::time::Duration;
-    let mut compiler = yara_x::Compiler::new();
-    if let Err(e) = compiler.add_source(BASELINE_RULES) {
-        return (false, format!("baseline YARA rules failed to compile: {e}"));
-    }
-    let mut custom_errors = Vec::new();
-    let mut custom = 0;
-    if let Ok(rd) = std::fs::read_dir(rules_dir(state_dir)) {
-        for e in rd.flatten() {
-            let p = e.path();
-            let ext = p
-                .extension()
-                .map(|x| x.to_string_lossy().to_ascii_lowercase())
-                .unwrap_or_default();
-            if ext != "yar" && ext != "yara" {
-                continue;
-            }
-            match std::fs::read_to_string(&p) {
-                Ok(src) => {
-                    compiler.new_namespace(&format!("custom_{custom}"));
-                    match compiler.add_source(src.as_str()) {
-                        Ok(_) => custom += 1,
-                        Err(er) => custom_errors.push(format!("{}: {er}", p.display())),
-                    }
-                }
-                Err(er) => custom_errors.push(format!("{}: {er}", p.display())),
-            }
-        }
-    }
-    let rules = compiler.build();
-    let mut scanner = yara_x::Scanner::new(&rules);
-    scanner.set_timeout(Duration::from_secs(30));
-    let mut hits = Vec::new();
-    let mut errors = Vec::new();
-    let mut scanned = 0;
-    for t in targets {
-        match std::fs::metadata(t) {
-            Ok(m) if m.is_file() && m.len() <= MAX_SCAN_BYTES => {}
-            Ok(m) if m.is_file() => {
-                errors.push(format!(
-                    "{t}: skipped ({} MB > limit)",
-                    m.len() / (1024 * 1024)
-                ));
-                continue;
-            }
-            Ok(_) => continue,
-            Err(e) => {
-                errors.push(format!("{t}: {e}"));
-                continue;
-            }
-        }
-        scanned += 1;
-        match scanner.scan_file(t) {
-            Ok(r) => {
-                let names: Vec<String> = r
-                    .matching_rules()
-                    .map(|m| format!("{}:{}", m.namespace(), m.identifier()))
-                    .collect();
-                if !names.is_empty() {
-                    hits.push(format!("{t} → {}", names.join(", ")));
-                }
-            }
-            Err(e) => errors.push(format!("{t}: {e}")),
-        }
-    }
-    let mut detail =
-        format!("YARA-X scanned {scanned} file(s) with baseline + {custom} custom rule file(s): ");
-    if hits.is_empty() {
-        detail.push_str("no matches");
-    } else {
-        detail.push_str(&format!("{} match(es): {}", hits.len(), hits.join("; ")));
-    }
-    if !errors.is_empty() {
-        detail.push_str(&format!("; errors: {}", errors.join("; ")));
-    }
-    if !custom_errors.is_empty() {
-        detail.push_str(&format!("; rule errors: {}", custom_errors.join("; ")));
-    }
-    (true, detail)
+/// `kestrel-scan.exe` in the agent's own (Program Files, admin-only) folder.
+fn scanner_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let p = exe.parent()?.join("kestrel-scan.exe");
+    p.is_file().then_some(p)
 }
 
-#[cfg(not(feature = "yara"))]
-pub fn scan(_state_dir: &Path, _targets: &[String]) -> (bool, String) {
-    (
-        false,
-        "YARA scanning not available in this build (kestrel-win built without the `yara` feature)"
-            .into(),
-    )
+pub fn scan(state_dir: &Path, targets: &[String]) -> (bool, String) {
+    let Some(exe) = scanner_exe() else {
+        return (
+            false,
+            "YARA scanning unavailable: kestrel-scan.exe is not installed next to the agent".into(),
+        );
+    };
+    let list = state_dir.join("scan-targets.txt");
+    let body: String = targets
+        .iter()
+        .take(kestrel_scan::MAX_TARGETS)
+        .map(|t| {
+            format!(
+                "{t}
+"
+            )
+        })
+        .collect();
+    if let Err(e) = std::fs::write(&list, body) {
+        return (false, format!("writing {}: {e}", list.display()));
+    }
+    let rules = rules_dir(state_dir);
+    let (exe_s, rules_s, list_s) = (
+        exe.display().to_string(),
+        rules.display().to_string(),
+        list.display().to_string(),
+    );
+    let out = run_cmd(
+        &exe_s,
+        &["--rules-dir", &rules_s, "--targets-file", &list_s],
+        SCAN_TIMEOUT,
+    );
+    let _ = std::fs::remove_file(&list);
+    match out {
+        Ok(o) if o.code == 0 => {
+            match serde_json::from_str::<kestrel_scan::ScanReport>(o.stdout.trim()) {
+                Ok(r) => (true, r.render()),
+                Err(e) => (
+                    false,
+                    format!("kestrel-scan returned unreadable output: {e}"),
+                ),
+            }
+        }
+        Ok(o) => (
+            false,
+            format!("kestrel-scan failed (exit {}): {}", o.code, o.stderr.trim()),
+        ),
+        Err(e) => (false, format!("running kestrel-scan: {e}")),
+    }
 }
 
 /// Expand a directory target into files (non-recursive beyond depth 3).

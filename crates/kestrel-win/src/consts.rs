@@ -17,6 +17,10 @@ pub const SESSION_IO: &str = "Kestrel-IO";
 /// Private system-logger session (NT kernel logger semantics, Win8+) used only
 /// as a command-line source for short-lived processes.
 pub const SESSION_PROC_CMDLINE: &str = "Kestrel-ProcCmd";
+/// Kernel-File (1 s flush): sensitive-path opens + ransomware aggregation.
+pub const SESSION_FILE: &str = "Kestrel-File";
+/// Task Scheduler / SCM / WMI-Activity persistence providers.
+pub const SESSION_PERSIST: &str = "Kestrel-Persist";
 
 pub mod provider {
     /// Microsoft-Windows-Kernel-Process
@@ -38,6 +42,12 @@ pub mod provider {
     /// Classic kernel "Process" MOF class (EventTraceGuid for process events
     /// delivered by a system-logger session).
     pub const MOF_PROCESS: &str = "3D6FA8D0-FE05-11D0-9DDA-00C04FD7BA7C";
+    /// Microsoft-Windows-TaskScheduler (GUID from `Get-WinEvent -ListProvider`, build 26200)
+    pub const TASK_SCHEDULER: &str = "DE7B24EA-73C8-4A09-985D-5BDADCFA9017";
+    /// Service Control Manager (classic event-log provider; 7045 has no template)
+    pub const SCM: &str = "555908D1-A6D7-4695-8E1E-26931D2012F4";
+    /// Microsoft-Windows-WMI-Activity
+    pub const WMI_ACTIVITY: &str = "1418EF04-B0B4-4623-BF7E-D74AB47BBDAA";
 }
 
 /// Event ids per provider (manifest `value`).
@@ -51,6 +61,8 @@ pub mod eid {
     pub const FILE_CLOSE: u16 = 14;
     pub const FILE_READ: u16 = 15;
     pub const FILE_WRITE: u16 = 16;
+    pub const FILE_NAME_CREATE: u16 = 10;
+    pub const FILE_NAME_DELETE: u16 = 11;
     pub const FILE_DELETE_PATH: u16 = 26;
     pub const FILE_RENAME_PATH: u16 = 27;
     pub const FILE_CREATE_NEW: u16 = 30;
@@ -69,7 +81,9 @@ pub mod eid {
     pub const API_OPEN_PROCESS: u16 = 5;
     pub const API_OPEN_THREAD: u16 = 6;
     // Kernel-Registry
+    pub const REG_DELETE_KEY: u16 = 3;
     pub const REG_SET_VALUE: u16 = 5;
+    pub const REG_DELETE_VALUE: u16 = 6;
     // DNS-Client
     pub const DNS_QUERY_COMPLETED: u16 = 3008;
     // Crypto-DPAPI (Debug channel)
@@ -87,9 +101,21 @@ pub mod kw {
     pub const PROC_IMAGE: u64 = 0x40;
     pub const FILE_CREATE: u64 = 0x80;
     pub const FILE_READ: u64 = 0x100;
+    /// Manifest keyword masks verified with `wevtutil gp Microsoft-Windows-Kernel-File /ge /gm`
+    /// on build 26200: 26 DeletePath = 0x400, 27 RenamePath = 0x800 (also 28
+    /// SetLinkPath), 30 CreateNewFile = 0x1000, 10/11 NameCreate/Delete = 0x10,
+    /// 16 Write = 0x200 (never enabled: volume).
+    pub const FILE_FILENAME: u64 = 0x10;
+    pub const FILE_WRITE: u64 = 0x200;
+    pub const FILE_DELETE_PATH: u64 = 0x400;
+    pub const FILE_RENAME_SETLINK_PATH: u64 = 0x800;
+    pub const FILE_CREATE_NEW_FILE: u64 = 0x1000;
     pub const NET_IPV4: u64 = 0x10;
     pub const NET_IPV6: u64 = 0x20;
     pub const REG_SET_VALUE: u64 = 0x100;
+    /// Kernel-Registry keywords (manifest, build 26200): DeleteValueKey 0x200, DeleteKey 0x4000.
+    pub const REG_DELETE_VALUE: u64 = 0x200;
+    pub const REG_DELETE_KEY: u64 = 0x4000;
     /// Providers whose events carry no keyword (Audit-API, DNS-Client) or
     /// whose keyword for the wanted event is not documented (DPAPI 16385):
     /// enable everything and narrow with an event-id filter.
@@ -111,6 +137,9 @@ pub mod field {
     pub const FILE_NAME: &str = "FileName";
     pub const FILE_PATH: &str = "FilePath";
     pub const CREATE_OPTIONS: &str = "CreateOptions";
+    pub const FILE_KEY: &str = "FileKey";
+    pub const INFO_CLASS: &str = "InfoClass";
+    pub const ISSUING_THREAD_ID: &str = "IssuingThreadId";
     // Kernel-Network
     pub const NET_PID: &str = "PID";
     pub const NET_SIZE: &str = "size";
@@ -126,6 +155,7 @@ pub mod field {
     pub const RETURN_CODE: &str = "ReturnCode";
     // Kernel-Registry SetValueKey
     pub const KEY_NAME: &str = "KeyName";
+    pub const KEY_OBJECT: &str = "KeyObject";
     pub const VALUE_NAME: &str = "ValueName";
     pub const REG_TYPE: &str = "Type";
     pub const CAPTURED_DATA: &str = "CapturedData";
@@ -186,6 +216,9 @@ pub mod channel {
     pub const DPAPI_DEBUG: &str = "Microsoft-Windows-Crypto-DPAPI/Debug";
     pub const SYSMON: &str = "Microsoft-Windows-Sysmon/Operational";
     pub const SECURITY: &str = "Security";
+    pub const SYSTEM: &str = "System";
+    pub const TASK_SCHEDULER: &str = "Microsoft-Windows-TaskScheduler/Operational";
+    pub const WMI_ACTIVITY: &str = "Microsoft-Windows-WMI-Activity/Operational";
 }
 
 /// Agent identity in WFP. Fixed GUIDs so state survives reinstall/reboot and

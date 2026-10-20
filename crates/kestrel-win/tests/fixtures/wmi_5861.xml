@@ -1,0 +1,17 @@
+<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='Microsoft-Windows-WMI-Activity' Guid='{1418ef04-b0b4-4623-bf7e-d74ab47bbdaa}'/><EventID>5861</EventID><Version>0</Version><Level>0</Level><Task>0</Task><Opcode>0</Opcode><Keywords>0x4000000000000000</Keywords><TimeCreated SystemTime='2026-10-21T08:00:00.0000000Z'/><EventRecordID>1</EventRecordID><Correlation/><Execution ProcessID='3104' ThreadID='4012'/><Channel>Microsoft-Windows-WMI-Activity/Operational</Channel><Computer>LABPC</Computer><Security UserID='S-1-5-18'/></System><UserData><Operation_ESStoConsumerBinding xmlns='http://manifests.microsoft.com/win/2006/windows/WMI'><Namespace>//./root/subscription</Namespace><ESS>KestrelProbeFilter</ESS><CONSUMER>CommandLineEventConsumer="KestrelProbeConsumer"</CONSUMER><PossibleCause>Binding EventFilter: 
+instance of __EventFilter
+{
+	CreatorSID = {1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0};
+	EventNamespace = "root\\cimv2";
+	Name = "KestrelProbeFilter";
+	Query = "SELECT * FROM __InstanceModificationEvent WITHIN 60 WHERE TargetInstance ISA 'Win32_PerfFormattedData_PerfOS_System'";
+	QueryLanguage = "WQL";
+};
+Perm. Consumer: 
+instance of CommandLineEventConsumer
+{
+	CommandLineTemplate = "C:\\Windows\\System32\\cmd.exe /c exit";
+	CreatorSID = {1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0};
+	Name = "KestrelProbeConsumer";
+};
+</PossibleCause></Operation_ESStoConsumerBinding></UserData></Event>

@@ -200,6 +200,19 @@ pub enum EntryState {
     Deleted,
 }
 
+/// What a vault entry holds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryKind {
+    /// A quarantined file (restorable with `RestoreFile`).
+    #[default]
+    File,
+    /// A `RemoveAutorun` backup (JSON [`crate::autorun_plan::AutorunBackup`]);
+    /// `original_path` is a label, never a filesystem path, so `RestoreFile`
+    /// refuses it.
+    AutorunBackup,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuarantineEntry {
     pub id: String,
@@ -221,6 +234,8 @@ pub struct QuarantineEntry {
     /// requires the same owner class (H8).
     #[serde(default)]
     pub parent_owner: Option<String>,
+    #[serde(default)]
+    pub kind: EntryKind,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -239,6 +254,7 @@ impl QuarantineIndex {
     pub fn find_held(&self, path: &str, sha256: &str) -> Option<&QuarantineEntry> {
         self.entries.iter().find(|e| {
             e.state == EntryState::Held
+                && e.kind == EntryKind::File
                 && e.sha256.eq_ignore_ascii_case(sha256)
                 && e.original_path.eq_ignore_ascii_case(path)
         })
@@ -311,11 +327,20 @@ mod tests {
             created_at: 0,
             state: EntryState::Held,
             note: String::new(),
+            kind: EntryKind::File,
         });
         assert!(idx.find_held(r"c:\users\a\downloads\x.exe", "ab").is_some());
         idx.get_mut("q1").unwrap().state = EntryState::Restored;
         assert!(idx.find_held(r"c:\users\a\downloads\x.exe", "ab").is_none());
         let j = serde_json::to_string(&idx).unwrap();
         assert!(j.contains("\"restored\""));
+        // Older index files (no `kind`) load as file entries.
+        let old = r#"{"entries":[{"id":"q2","original_path":"C:\\x","sha256":"cd","size":1,"created_at":0,"state":"held"}]}"#;
+        let mut idx: QuarantineIndex = serde_json::from_str(old).unwrap();
+        assert_eq!(idx.get("q2").unwrap().kind, EntryKind::File);
+        assert!(idx.find_held(r"c:\x", "CD").is_some());
+        // An autorun backup is never matched as "already quarantined".
+        idx.get_mut("q2").unwrap().kind = EntryKind::AutorunBackup;
+        assert!(idx.find_held(r"c:\x", "CD").is_none());
     }
 }

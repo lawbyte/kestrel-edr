@@ -5,17 +5,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-default = ["yara"]
-# YARA-X scanning for the `Scan` response action (Windows only; pulls in wasmtime).
-yara = ["dep:yara-x"]
-
 # Platform-independent dependencies: the pure planning / parsing / crypto
 # helpers in this crate compile and are unit-tested on Linux.
 [dependencies]
 kestrel-common = { path = "../kestrel-common" }
 kestrel-platform = { path = "../kestrel-platform" }
 kestrel-detect = { path = "../kestrel-detect" }
+# Scan report types + process protocol only (the YARA-X engine is in kestrel-scan.exe).
+kestrel-scan = { path = "../kestrel-scan", default-features = false }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -32,7 +29,18 @@ roxmltree = "0.21"
 [target.'cfg(windows)'.dependencies]
 ferrisetw = "1.2"
 windows-service = "0.8"
-yara-x = { version = "1.22", optional = true, default-features = false, features = ["pe-module", "hash-module", "math-module", "string-module", "dotnet-module", "fast-regexp", "constant-folding", "exact-atoms"] }
+# COM clients (Task Scheduler 2.0, WMI) for RemoveAutorun and hardening status.
+# Same version ferrisetw already pulls in (no new crate in the tree).
+windows = { version = "0.57", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Rpc",
+    "Win32_System_TaskScheduler",
+    "Win32_System_Variant",
+    "Win32_System_Wmi",
+] }
 windows-sys = { version = "0.61", features = [
     "Wdk_Foundation",
     "Wdk_Storage_FileSystem",

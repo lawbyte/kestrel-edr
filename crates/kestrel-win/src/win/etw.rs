@@ -2,9 +2,18 @@
 //!
 //! Sessions:
 //! * `Kestrel-Core` (flush 1 s): Kernel-Process (1,2,5), Kernel-Audit-API-Calls
-//!   (2,4,5,6), Kernel-Registry (5 SetValueKey), Crypto-DPAPI (16385).
-//! * `Kestrel-IO` (flush 5 s): Kernel-File (12 Create [+15 Read]), Kernel-Network
-//!   (10,12,13,26,28,29,42,58), DNS-Client (3008), PowerShell (4104).
+//!   (2,4,5,6), Kernel-Registry (5 SetValueKey, 6 DeleteValueKey — writer
+//!   attribution for the registry watcher), Crypto-DPAPI (16385).
+//! * `Kestrel-IO` (flush 5 s): Kernel-Network (10,12,13,26,28,29,42,58),
+//!   DNS-Client (3008), PowerShell (4104).
+//! * `Kestrel-File` (flush 1 s): Kernel-File 12 Create [+15 Read] for the
+//!   sensitive-path filter and, with `policy.sensors.file_activity`,
+//!   26 DeletePath / 27 RenamePath / 30 CreateNewFile aggregated per process
+//!   **in the callback** ([`crate::fileagg`]) into `FileActivity` summaries.
+//! * `Kestrel-Persist` (flush 1 s, `policy.sensors.persistence`):
+//!   TaskScheduler (106,140,141), Service Control Manager (7045), WMI-Activity
+//!   (5861). Event-log subscriptions on the same channels are the fallback
+//!   (see `evtsub`); the translator de-duplicates.
 //! * `Kestrel-ProcCmd` (system-logger mode, optional): classic kernel process
 //!   events, used only as a command-line source for processes that exit
 //!   before the agent can query them.
@@ -23,17 +32,21 @@ use super::util::*;
 use crate::consts::{self, eid, field, kw, provider};
 use crate::etwparse::*;
 use crate::evtxml::SysmonCross;
+use crate::fileagg::{FileAgg, FileScope};
+use crate::persist::{record_from_fields, PersistRecord};
+use crate::taskxml::TaskInfo;
 use ferrisetw::parser::Parser;
 use ferrisetw::provider::{kernel_providers, EventFilter, Provider};
 use ferrisetw::trace::{
     stop_trace_by_name, KernelTrace, LoggingMode, TraceProperties, TraceTrait, UserTrace,
 };
 use ferrisetw::{EventRecord, SchemaLocator};
-use kestrel_common::{Integrity, TamperKind};
+use kestrel_common::{FileActivity, Integrity, RegistryOp, TamperKind};
+use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::ERROR_SUCCESS;
 use windows_sys::Win32::System::Diagnostics::Etw::{
@@ -113,6 +126,8 @@ pub enum Raw {
         pid: u32,
         target_pid: u32,
         access: u32,
+        /// NTSTATUS; non-zero only for opens of lsass (failed attempts).
+        return_code: u32,
     },
     OpenThread {
         ts: i64,
@@ -129,13 +144,41 @@ pub enum Raw {
         pid: u32,
         target_pid: u32,
     },
-    RegSet {
+    /// Kernel-Registry 5 / 6. `key` is empty on current builds (measured);
+    /// used for writer attribution, and emitted directly when it is not.
+    RegEtw {
         ts: i64,
         pid: u32,
+        key_object: u64,
+        /// Normalised key, or "" when the event carries none.
         key: String,
         value_name: String,
+        op: RegistryOp,
         ty: u32,
         data: Vec<u8>,
+    },
+    /// Change seen by the registry watcher (writer unknown yet).
+    RegChange {
+        ts: i64,
+        key: String,
+        value_name: String,
+        op: RegistryOp,
+        ty: u32,
+        data: Option<Vec<u8>>,
+    },
+    /// Ransomware sensor summary (paths are lower-cased NT paths).
+    FileActivity {
+        ts: i64,
+        pid: u32,
+        act: FileActivity,
+    },
+    /// Task / service / WMI persistence event (creator not yet attributed).
+    Persist {
+        ts: i64,
+        /// Process that logged the event (Schedule svchost, services.exe, WMI host).
+        logger_pid: u32,
+        record: PersistRecord,
+        task: Option<TaskInfo>,
     },
     Dns {
         ts: i64,
@@ -176,6 +219,51 @@ pub struct Counters {
     pub etw_buffers_lost: AtomicU64,
     pub sessions_ok: AtomicBool,
     pub sysmon_present: AtomicBool,
+    /// Current lsass pid (0 = unknown); failed opens are reported only for it.
+    pub lsass_pid: AtomicU32,
+    /// File-activity operations dropped by the aggregator's memory caps.
+    pub file_agg_dropped: AtomicU64,
+    pub file_activity_emitted: AtomicU64,
+    /// Registry watcher changes joined to an ETW writer / emitted with pid 0.
+    pub reg_attributed: AtomicU64,
+    pub reg_unattributed: AtomicU64,
+    /// Watched registry keys currently open.
+    pub reg_watch_keys: AtomicU64,
+    /// Task / service / WMI events emitted (after de-duplication).
+    pub persist_events: AtomicU64,
+}
+
+/// Kernel-File callback state shared with the canary poller.
+pub struct FileState {
+    pub agg: FileAgg,
+    /// Ransomware canary (NT, lower-case) → last (pid, ts) that opened it.
+    openers: HashMap<String, (u32, i64)>,
+}
+
+impl FileState {
+    pub fn new(scope: FileScope) -> Self {
+        FileState {
+            agg: FileAgg::new(scope),
+            openers: HashMap::new(),
+        }
+    }
+
+    /// Last non-Kestrel process that opened `nt` within 2 minutes of `ts`.
+    pub fn last_opener(&self, nt: &str, ts: i64) -> Option<u32> {
+        self.openers
+            .get(nt)
+            .filter(|(_, t)| ts - *t < 120_000)
+            .map(|(p, _)| *p)
+    }
+
+    fn note_open(&mut self, nt: &str, pid: u32, ts: i64) {
+        if self.agg.is_canary(nt) {
+            if self.openers.len() > 4096 {
+                self.openers.clear();
+            }
+            self.openers.insert(nt.to_string(), (pid, ts));
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -313,19 +401,97 @@ fn decode_process(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
     }
 }
 
-fn decode_file(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
+/// Kernel-File decoder. Create (12) goes to the translator (sensitive-path
+/// filter) and, like 26/27/30, feeds the per-process ransomware aggregator
+/// right here in the callback thread; summaries are sent as
+/// [`Raw::FileActivity`].
+fn decode_file(
+    rec: &EventRecord,
+    loc: &SchemaLocator,
+    sink: &Sink,
+    state: Option<&Mutex<FileState>>,
+) -> Option<Raw> {
     let ts = ts_of(rec);
     let pid = rec.process_id();
-    match rec.event_id() {
-        eid::FILE_CREATE => with_fields(rec, loc, |f| {
+    // Aggregate only real user processes (pid 4 = System / SMB server writes).
+    let agg = state.filter(|_| pid != sink.self_pid && pid != 4 && pid != 0);
+    let emit = |e: Option<crate::fileagg::AggEmit>| {
+        if let Some(e) = e {
+            sink.counters
+                .file_activity_emitted
+                .fetch_add(1, Ordering::Relaxed);
+            sink.send(Raw::FileActivity {
+                ts: e.ts,
+                pid: e.pid,
+                act: e.activity,
+            });
+        }
+    };
+    let id = rec.event_id();
+    match id {
+        eid::FILE_CREATE => {
+            let (fo, name, co) = with_fields(rec, loc, |f| {
+                Some((
+                    f.u64(field::FILE_OBJECT).unwrap_or(0),
+                    f.string(field::FILE_NAME)?,
+                    f.u32(field::CREATE_OPTIONS).unwrap_or(0),
+                ))
+            })?;
+            if let Some(st) = agg {
+                let nt = name.to_ascii_lowercase();
+                if let Ok(mut st) = st.lock() {
+                    st.note_open(&nt, pid, ts);
+                    let before = st.agg.dropped;
+                    let e = st
+                        .agg
+                        .on_create(ts, pid, fo, &nt, co >> 24, is_directory_open(co));
+                    sink.counters
+                        .file_agg_dropped
+                        .fetch_add(st.agg.dropped - before, Ordering::Relaxed);
+                    drop(st);
+                    emit(e);
+                }
+            }
             Some(Raw::FileCreate {
                 ts,
                 pid,
-                file_object: f.u64(field::FILE_OBJECT).unwrap_or(0),
-                name_nt: f.string(field::FILE_NAME)?,
-                create_options: f.u32(field::CREATE_OPTIONS).unwrap_or(0),
+                file_object: fo,
+                name_nt: name,
+                create_options: co,
             })
-        }),
+        }
+        eid::FILE_CREATE_NEW | eid::FILE_DELETE_PATH | eid::FILE_RENAME_PATH => {
+            let st = agg?;
+            let (fo, path) = with_fields(rec, loc, |f| {
+                let path = if id == eid::FILE_CREATE_NEW {
+                    f.string(field::FILE_NAME)
+                } else {
+                    f.string(field::FILE_PATH)
+                };
+                Some((
+                    f.u64(field::FILE_OBJECT).unwrap_or(0),
+                    path.unwrap_or_default(),
+                ))
+            })?;
+            let nt = path.to_ascii_lowercase();
+            let e = st.lock().ok().and_then(|mut st| {
+                let before = st.agg.dropped;
+                let e = match id {
+                    eid::FILE_CREATE_NEW => st.agg.on_create_new(ts, pid, fo, &nt),
+                    eid::FILE_DELETE_PATH => st.agg.on_delete(ts, pid, fo, &nt),
+                    _ => st.agg.on_rename(ts, pid, fo, &nt),
+                };
+                if ts % 64 == 0 {
+                    st.agg.gc(ts);
+                }
+                sink.counters
+                    .file_agg_dropped
+                    .fetch_add(st.agg.dropped - before, Ordering::Relaxed);
+                e
+            });
+            emit(e);
+            None
+        }
         eid::FILE_READ if FILE_READ_EVENTS => with_fields(rec, loc, |f| {
             Some(Raw::FileRead {
                 ts,
@@ -382,17 +548,30 @@ fn decode_network(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
     })
 }
 
-fn decode_audit_api(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
+/// Kernel-Audit-API-Calls. `lsass_pid` (0 = unknown) and `failed_lsass`
+/// (policy `sensors.credential_access`) select the failed opens that are
+/// kept: only attempts on lsass (e.g. blocked by LSA protection).
+fn decode_audit_api(
+    rec: &EventRecord,
+    loc: &SchemaLocator,
+    lsass_pid: u32,
+    failed_lsass: bool,
+) -> Option<Raw> {
     let ts = ts_of(rec);
     let pid = rec.process_id();
     match rec.event_id() {
         eid::API_OPEN_PROCESS => with_fields(rec, loc, |f| {
-            if f.u32(field::RETURN_CODE).unwrap_or(0) != 0 {
+            let return_code = f.u32(field::RETURN_CODE).unwrap_or(0);
+            let target_pid = f.u32(field::TARGET_PROCESS_ID)?;
+            // 0xFFFFFFFF: sentinel for an unresolved target.
+            if target_pid == u32::MAX || target_pid == pid {
                 return None;
             }
-            let target_pid = f.u32(field::TARGET_PROCESS_ID)?;
+            if return_code != 0 && !(failed_lsass && lsass_pid != 0 && target_pid == lsass_pid) {
+                return None;
+            }
             let access = f.u32(field::DESIRED_ACCESS)?;
-            if target_pid == pid || !is_interesting_process_access(access) {
+            if !is_interesting_process_access(access) {
                 return None;
             }
             Some(Raw::OpenProcess {
@@ -400,6 +579,7 @@ fn decode_audit_api(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
                 pid,
                 target_pid,
                 access,
+                return_code,
             })
         }),
         eid::API_OPEN_THREAD => with_fields(rec, loc, |f| {
@@ -440,8 +620,13 @@ fn decode_audit_api(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
     }
 }
 
+/// Kernel-Registry SetValueKey (5) / DeleteValueKey (6). On build 26200
+/// `KeyName` and `CapturedData` are empty, so these mostly serve writer
+/// attribution for the registry watcher (pid, KeyObject, ValueName). Events
+/// whose `KeyName` is present but outside the curated set are dropped.
 fn decode_registry(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
-    if rec.event_id() != eid::REG_SET_VALUE {
+    let id = rec.event_id();
+    if id != eid::REG_SET_VALUE && id != eid::REG_DELETE_VALUE {
         return None;
     }
     let ts = ts_of(rec);
@@ -450,18 +635,76 @@ fn decode_registry(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
         if f.u32(field::STATUS).unwrap_or(0) != 0 {
             return None;
         }
-        let key = normalize_reg_key(&f.string(field::KEY_NAME)?);
-        if !is_interesting_reg_key(&key) {
-            return None;
-        }
-        Some(Raw::RegSet {
+        let raw_key = f.string(field::KEY_NAME).unwrap_or_default();
+        let key = if raw_key.is_empty() {
+            String::new()
+        } else {
+            let k = normalize_reg_key(&raw_key);
+            if !is_interesting_reg_key(&k) {
+                return None;
+            }
+            k
+        };
+        let set = id == eid::REG_SET_VALUE;
+        Some(Raw::RegEtw {
             ts,
             pid,
+            key_object: f.u64(field::KEY_OBJECT).unwrap_or(0),
             key,
             value_name: f.string(field::VALUE_NAME).unwrap_or_default(),
-            ty: f.u32(field::REG_TYPE).unwrap_or(0),
-            data: f.bytes(field::CAPTURED_DATA).unwrap_or_default(),
+            op: if set {
+                RegistryOp::Set
+            } else {
+                RegistryOp::DeleteValue
+            },
+            ty: if set {
+                f.u32(field::REG_TYPE).unwrap_or(0)
+            } else {
+                0
+            },
+            data: if set {
+                f.bytes(field::CAPTURED_DATA).unwrap_or_default()
+            } else {
+                Vec::new()
+            },
         })
+    })
+}
+
+/// TaskScheduler 106/140/141, SCM 7045, WMI-Activity 5861 (field names from
+/// the manifests on build 26200; see [`crate::persist`]). The task XML /
+/// service key is read here (own low-volume session thread).
+fn decode_persist(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
+    use crate::persist::eid as p;
+    let id = rec.event_id();
+    let names: &[&str] = match id {
+        p::TASK_REGISTERED => &["TaskName", "UserContext"],
+        p::TASK_UPDATED | p::TASK_DELETED => &["TaskName", "UserName"],
+        p::SCM_SERVICE_INSTALLED => &[
+            "ServiceName",
+            "ImagePath",
+            "ServiceType",
+            "StartType",
+            "AccountName",
+        ],
+        p::WMI_ESS_TO_CONSUMER_BINDING => &["Namespace", "ESS", "CONSUMER", "PossibleCause"],
+        _ => return None,
+    };
+    let fields: HashMap<String, String> = with_fields(rec, loc, |f| {
+        Some(
+            names
+                .iter()
+                .filter_map(|n| f.string(n).map(|v| (n.to_string(), v)))
+                .collect(),
+        )
+    })?;
+    let mut record = record_from_fields(id, &fields)?;
+    let task = super::persist::enrich(&mut record);
+    Some(Raw::Persist {
+        ts: ts_of(rec),
+        logger_pid: rec.process_id(),
+        record,
+        task,
     })
 }
 
@@ -545,6 +788,8 @@ fn decode_mof_process(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
 pub enum SessionKind {
     Core,
     Io,
+    File,
+    Persist,
     ProcCmd,
 }
 
@@ -553,8 +798,18 @@ impl SessionKind {
         match self {
             SessionKind::Core => consts::SESSION_CORE,
             SessionKind::Io => consts::SESSION_IO,
+            SessionKind::File => consts::SESSION_FILE,
+            SessionKind::Persist => consts::SESSION_PERSIST,
             SessionKind::ProcCmd => consts::SESSION_PROC_CMDLINE,
         }
+    }
+    /// Sessions the watchdog keeps alive for this configuration.
+    pub fn required(opts: &SensorOpts) -> Vec<SessionKind> {
+        let mut v = vec![SessionKind::Core, SessionKind::Io, SessionKind::File];
+        if opts.persistence {
+            v.push(SessionKind::Persist);
+        }
+        v
     }
     fn providers(&self, opts: &SensorOpts) -> Vec<&'static str> {
         match self {
@@ -564,8 +819,14 @@ impl SessionKind {
                 provider::KERNEL_REGISTRY,
                 provider::CRYPTO_DPAPI,
             ],
+            SessionKind::File => vec![provider::KERNEL_FILE],
+            SessionKind::Persist => vec![
+                provider::TASK_SCHEDULER,
+                provider::SCM,
+                provider::WMI_ACTIVITY,
+            ],
             SessionKind::Io => {
-                let mut v = vec![provider::KERNEL_FILE, provider::KERNEL_NETWORK];
+                let mut v = vec![provider::KERNEL_NETWORK];
                 if opts.dns {
                     v.push(provider::DNS_CLIENT);
                 }
@@ -579,10 +840,18 @@ impl SessionKind {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone)]
 pub struct SensorOpts {
     pub dns: bool,
     pub script_content: bool,
+    /// `policy.sensors.file_activity`: Kernel-File 26/27/30 + aggregation.
+    pub file_activity: bool,
+    /// `policy.sensors.persistence`: Kestrel-Persist session.
+    pub persistence: bool,
+    /// `policy.sensors.credential_access`: failed lsass opens.
+    pub credential_access: bool,
+    /// Aggregator state (shared with the canary poller).
+    pub file_state: Arc<Mutex<FileState>>,
 }
 
 fn props(flush_secs: u64, buffers: u32) -> TraceProperties {
@@ -602,7 +871,7 @@ fn prov(
     level: u8,
     ids: Vec<u16>,
     sink: &Sink,
-    dec: fn(&EventRecord, &SchemaLocator) -> Option<Raw>,
+    dec: impl Fn(&EventRecord, &SchemaLocator) -> Option<Raw> + Send + Sync + 'static,
 ) -> Provider {
     let s = sink.clone();
     Provider::by_guid(guid)
@@ -653,24 +922,31 @@ pub fn start_session(kind: SessionKind, sink: &Sink, opts: &SensorOpts) -> anyho
                     sink,
                     decode_process,
                 ))
-                .enable(prov(
-                    provider::KERNEL_AUDIT_API,
-                    kw::ALL,
-                    5,
-                    vec![
-                        eid::API_TERMINATE_PROCESS,
-                        eid::API_SET_CONTEXT_THREAD,
-                        eid::API_OPEN_PROCESS,
-                        eid::API_OPEN_THREAD,
-                    ],
-                    sink,
-                    decode_audit_api,
-                ))
+                .enable({
+                    let counters = sink.counters.clone();
+                    let failed_lsass = opts.credential_access;
+                    prov(
+                        provider::KERNEL_AUDIT_API,
+                        kw::ALL,
+                        5,
+                        vec![
+                            eid::API_TERMINATE_PROCESS,
+                            eid::API_SET_CONTEXT_THREAD,
+                            eid::API_OPEN_PROCESS,
+                            eid::API_OPEN_THREAD,
+                        ],
+                        sink,
+                        move |rec, loc| {
+                            let lsass = counters.lsass_pid.load(Ordering::Relaxed);
+                            decode_audit_api(rec, loc, lsass, failed_lsass)
+                        },
+                    )
+                })
                 .enable(prov(
                     provider::KERNEL_REGISTRY,
-                    kw::REG_SET_VALUE,
+                    kw::REG_SET_VALUE | kw::REG_DELETE_VALUE,
                     5,
-                    vec![eid::REG_SET_VALUE],
+                    vec![eid::REG_SET_VALUE, eid::REG_DELETE_VALUE],
                     sink,
                     decode_registry,
                 ))
@@ -693,28 +969,89 @@ pub fn start_session(kind: SessionKind, sink: &Sink, opts: &SensorOpts) -> anyho
                 })?;
             Running::User(t)
         }
-        SessionKind::Io => {
-            let file_kw = if FILE_READ_EVENTS {
-                kw::FILE_CREATE | kw::FILE_READ
-            } else {
-                kw::FILE_CREATE
-            };
-            let file_ids = if FILE_READ_EVENTS {
-                vec![eid::FILE_CREATE, eid::FILE_READ]
-            } else {
-                vec![eid::FILE_CREATE]
-            };
-            let mut b = UserTrace::new()
+        SessionKind::File => {
+            let mut file_kw = kw::FILE_CREATE;
+            let mut file_ids = vec![eid::FILE_CREATE];
+            if FILE_READ_EVENTS {
+                file_kw |= kw::FILE_READ;
+                file_ids.push(eid::FILE_READ);
+            }
+            if opts.file_activity {
+                // Never 0x20 (all I/O) or 0x200 (Write): volume.
+                file_kw |=
+                    kw::FILE_DELETE_PATH | kw::FILE_RENAME_SETLINK_PATH | kw::FILE_CREATE_NEW_FILE;
+                file_ids.extend([
+                    eid::FILE_DELETE_PATH,
+                    eid::FILE_RENAME_PATH,
+                    eid::FILE_CREATE_NEW,
+                ]);
+            }
+            let state = opts.file_activity.then(|| opts.file_state.clone());
+            let s2 = sink.clone();
+            let (t, h) = UserTrace::new()
                 .named(name.clone())
-                .set_trace_properties(props(5, 128))
+                .set_trace_properties(props(1, 128))
                 .enable(prov(
                     provider::KERNEL_FILE,
                     file_kw,
                     5,
                     file_ids,
                     sink,
-                    decode_file,
+                    move |rec, loc| decode_file(rec, loc, &s2, state.as_deref()),
                 ))
+                .start()
+                .map_err(|e| anyhow::anyhow!("start {name}: {e:?}"))?;
+            std::thread::Builder::new()
+                .name(format!("etw-{name}"))
+                .spawn(move || {
+                    let _ = UserTrace::process_from_handle(h);
+                    a2.store(false, Ordering::SeqCst);
+                })?;
+            Running::User(t)
+        }
+        SessionKind::Persist => {
+            use crate::persist::eid as p;
+            let (t, h) = UserTrace::new()
+                .named(name.clone())
+                .set_trace_properties(props(1, 8))
+                .enable(prov(
+                    provider::TASK_SCHEDULER,
+                    kw::ALL,
+                    5,
+                    vec![p::TASK_REGISTERED, p::TASK_UPDATED, p::TASK_DELETED],
+                    sink,
+                    decode_persist,
+                ))
+                .enable(prov(
+                    provider::WMI_ACTIVITY,
+                    kw::ALL,
+                    5,
+                    vec![p::WMI_ESS_TO_CONSUMER_BINDING],
+                    sink,
+                    decode_persist,
+                ))
+                .enable(prov(
+                    provider::SCM,
+                    kw::ALL,
+                    5,
+                    vec![p::SCM_SERVICE_INSTALLED],
+                    sink,
+                    decode_persist,
+                ))
+                .start()
+                .map_err(|e| anyhow::anyhow!("start {name}: {e:?}"))?;
+            std::thread::Builder::new()
+                .name(format!("etw-{name}"))
+                .spawn(move || {
+                    let _ = UserTrace::process_from_handle(h);
+                    a2.store(false, Ordering::SeqCst);
+                })?;
+            Running::User(t)
+        }
+        SessionKind::Io => {
+            let mut b = UserTrace::new()
+                .named(name.clone())
+                .set_trace_properties(props(5, 128))
                 .enable(prov(
                     provider::KERNEL_NETWORK,
                     kw::NET_IPV4 | kw::NET_IPV6,
@@ -917,10 +1254,20 @@ pub fn provider_enabled_for(guid_str: &str, logger_id: u16) -> Option<bool> {
 /// Providers whose disablement on our session is checked by the watchdog
 /// (kernel providers are always registered, so absence is meaningful).
 pub fn watched_providers(kind: SessionKind, opts: &SensorOpts) -> Vec<&'static str> {
+    // Manifest providers that may be unregistered at times (PowerShell not
+    // running, …) are not checked; neither are the persistence providers.
     kind.providers(opts)
         .into_iter()
         .filter(|p| {
-            *p != provider::POWERSHELL && *p != provider::DNS_CLIENT && *p != provider::CRYPTO_DPAPI
+            !matches!(
+                *p,
+                provider::POWERSHELL
+                    | provider::DNS_CLIENT
+                    | provider::CRYPTO_DPAPI
+                    | provider::TASK_SCHEDULER
+                    | provider::SCM
+                    | provider::WMI_ACTIVITY
+            )
         })
         .collect()
 }

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.6" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <SecurityDescriptor>D:AI(A;;FA;;;BA)(A;;FA;;;SY)(A;;FRFX;;;LS)(A;;FR;;;AU)</SecurityDescriptor>
+    <Source>$(@%systemroot%\system32\defragsvc.dll,-800)</Source>
+    <Author>$(@%systemroot%\system32\defragsvc.dll,-801)</Author>
+    <Description>$(@%systemroot%\system32\defragsvc.dll,-802)</Description>
+    <URI>\Microsoft\Windows\Defrag\ScheduledDefrag</URI>
+  </RegistrationInfo>
+  <Principals>
+    <Principal id="LocalSystem">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>true</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>
+    <MaintenanceSettings>
+      <Period>P7D</Period>
+      <Deadline>P1M</Deadline>
+    </MaintenanceSettings>
+  </Settings>
+  <Triggers />
+  <Actions Context="LocalSystem">
+    <Exec>
+      <Command>%windir%\system32\defrag.exe</Command>
+      <Arguments>-c -h -o -$</Arguments>
+    </Exec>
+  </Actions>
+</Task>

@@ -22,17 +22,25 @@
 //! the cache is filled for the next start / for `snapshot_processes`.
 
 pub mod applocker;
+pub mod autorun_plan;
 pub mod canary;
 pub mod consts;
+pub mod dnswire;
 pub mod etwparse;
 pub mod evtxml;
+pub mod fileagg;
 pub mod filters;
+pub mod hardening_plan;
 pub mod hostfacts;
 pub mod jsonc;
 pub mod ntpath;
+pub mod persist;
 pub mod proctrack;
 pub mod qpolicy;
+pub mod rcanary;
+pub mod regdiff;
 pub mod sddl;
+pub mod taskxml;
 pub mod tray;
 pub mod vault;
 pub mod wfp_plan;
@@ -42,11 +50,11 @@ pub mod zipw;
 mod win;
 
 #[cfg(windows)]
-pub use win::platform::WindowsPlatform;
+pub use win::msihandoff::{delete_setup_key, take_enroll_token};
+#[cfg(windows)]
+pub use win::platform::{resolve_host_direct, WindowsPlatform};
 #[cfg(windows)]
 pub use win::service::{install_service, run_service, uninstall_service};
-#[cfg(windows)]
-pub use win::msihandoff::{delete_setup_key, take_enroll_token};
 #[cfg(windows)]
 pub use win::statedir::{secure_state_dir, StateDirResult};
 #[cfg(windows)]

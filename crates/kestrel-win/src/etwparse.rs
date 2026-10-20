@@ -39,8 +39,10 @@ pub fn le_ptr(b: &[u8]) -> Option<u64> {
 /// UTF-16LE bytes → String, stopping at the first NUL.
 pub fn utf16le(b: &[u8]) -> String {
     let units: Vec<u16> = b
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .take_while(|&u| u != 0)
         .collect();
     String::from_utf16_lossy(&units)
@@ -106,14 +108,30 @@ pub fn is_directory_open(create_options: u32) -> bool {
 // ---------------------------------------------------------------- registry
 
 /// `\REGISTRY\MACHINE\SOFTWARE\…` → `HKLM\SOFTWARE\…`, `\REGISTRY\USER\S-…` → `HKU\S-…`.
+/// The per-user classes hive `\REGISTRY\USER\<SID>_Classes\…` (and
+/// `HKU\<SID>_Classes\…`) becomes `HKU\<SID>\Software\Classes\…`.
 pub fn normalize_reg_key(key: &str) -> String {
     let lower = key.to_ascii_lowercase();
+    let mut out = key.to_string();
     for (nt, short) in [(r"\registry\machine", "HKLM"), (r"\registry\user", "HKU")] {
         if lower.starts_with(nt) {
-            return format!("{short}{}", &key[nt.len()..]);
+            out = format!("{short}{}", &key[nt.len()..]);
+            break;
         }
     }
-    key.to_string()
+    if let Some(rest) = out.strip_prefix(r"HKU\") {
+        let (sid, tail) = rest.split_once('\\').unwrap_or((rest, ""));
+        let n = sid.len();
+        if n > 8 && sid.is_char_boundary(n - 8) && sid[n - 8..].eq_ignore_ascii_case("_classes") {
+            let sid = &sid[..n - 8];
+            return if tail.is_empty() {
+                format!(r"HKU\{sid}\Software\Classes")
+            } else {
+                format!(r"HKU\{sid}\Software\Classes\{tail}")
+            };
+        }
+    }
+    out
 }
 
 /// Registry keys whose value writes are emitted as `RegistrySet` (ClickFix
@@ -140,7 +158,49 @@ pub fn is_interesting_reg_key(key: &str) -> bool {
         let tail = tail.split('\\').next().unwrap_or("");
         return matches!(tail, "" | "once" | "onceex" | "services" | "servicesonce");
     }
-    false
+    is_watched_reg_key(key)
+}
+
+/// Is `key` (normalised) inside one of the registry watcher's curated keys
+/// ([`crate::regdiff::WATCH_TABLE`]) within the spec's depth? Used for
+/// builds whose Kernel-Registry events still carry an absolute `KeyName`.
+pub fn is_watched_reg_key(key: &str) -> bool {
+    use crate::regdiff::{Hive, WATCH_TABLE};
+    let k = key.to_ascii_lowercase();
+    let (hive, rel): (Hive, &str) = if let Some(r) = k.strip_prefix(r"hklm\") {
+        (Hive::Machine, r)
+    } else if let Some(r) = k.strip_prefix(r"hku\") {
+        let Some((_sid, tail)) = r.split_once('\\') else {
+            return false;
+        };
+        match tail.strip_prefix(r"software\classes\") {
+            Some(c) => (Hive::UserClasses, c),
+            None => (Hive::User, tail),
+        }
+    } else {
+        return false;
+    };
+    // Kernel names use ControlSet00N rather than CurrentControlSet.
+    let ccs = rel
+        .strip_prefix(r"system\controlset001\")
+        .map(|r| format!(r"system\currentcontrolset\{r}"));
+    let rel = ccs.as_deref().unwrap_or(rel);
+    WATCH_TABLE.iter().any(|s| {
+        if s.hive != hive {
+            return false;
+        }
+        let p = s.path.to_ascii_lowercase();
+        if rel == p {
+            return true;
+        }
+        match rel
+            .strip_prefix(p.as_str())
+            .and_then(|t| t.strip_prefix('\\'))
+        {
+            Some(t) => t.split('\\').count() <= s.depth as usize,
+            None => false,
+        }
+    })
 }
 
 pub const REG_SZ: u32 = 1;
@@ -159,8 +219,10 @@ pub fn render_reg_data(ty: u32, data: &[u8]) -> Option<String> {
         REG_SZ | REG_EXPAND_SZ => utf16le(data),
         REG_MULTI_SZ => {
             let units: Vec<u16> = data
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes(*c))
                 .collect();
             units
                 .split(|&u| u == 0)
@@ -514,6 +576,29 @@ mod tests {
         ));
         assert!(!is_interesting_reg_key(
             r"HKU\S-1\Software\Google\Chrome\PreferenceMACs"
+        ));
+        // _Classes hive → HKU\<SID>\Software\Classes
+        assert_eq!(
+            normalize_reg_key(
+                r"\REGISTRY\USER\S-1-5-21-1-2-3-1001_Classes\CLSID\{X}\InprocServer32"
+            ),
+            r"HKU\S-1-5-21-1-2-3-1001\Software\Classes\CLSID\{X}\InprocServer32"
+        );
+        assert_eq!(
+            normalize_reg_key(r"HKU\S-1-5-21-9_Classes"),
+            r"HKU\S-1-5-21-9\Software\Classes"
+        );
+        assert!(is_interesting_reg_key(
+            r"HKU\S-1-5-21-9\Software\Classes\CLSID\{X}\InprocServer32"
+        ));
+        assert!(is_interesting_reg_key(
+            r"HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest"
+        ));
+        assert!(is_interesting_reg_key(
+            r"HKLM\SYSTEM\ControlSet001\Services\evil\Parameters"
+        ));
+        assert!(!is_interesting_reg_key(
+            r"HKLM\SYSTEM\CurrentControlSet\Services\bam\State\UserSettings\S-1"
         ));
     }
 

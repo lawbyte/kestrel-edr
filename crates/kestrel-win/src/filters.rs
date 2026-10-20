@@ -19,7 +19,56 @@ pub const INTERESTING_DLLS: &[&str] = &[
     "chrome_elf.dll",
     "winscard.dll",
     "samlib.dll",
+    // COM task creation (persistence attribution, PS-05).
+    "taskschd.dll",
 ];
+
+/// Extra paths the Kernel-File source filter keeps on top of
+/// `kestrel_detect::paths::may_be_sensitive` (credential dumping and
+/// persistence): Startup folders, `System32\Tasks\`, memory dumps in user /
+/// temp / CrashDumps locations, copies of the SAM / SECURITY / SYSTEM hives
+/// (including shadow-copy paths), `ntds.dit`, DPAPI master keys and the
+/// Credentials / Vault stores, and the mimikatz SSP / memssp log names.
+/// Input: Win32 path (any case).
+pub fn is_extra_sensitive(path: &str) -> bool {
+    let p = path.replace('/', "\\").to_ascii_lowercase();
+    let name = file_name_lower(&p);
+    const CONTAINS: &[&str] = &[
+        r"\microsoft\windows\start menu\programs\startup\",
+        r"\windows\system32\tasks\",
+        r"\windows\syswow64\tasks\",
+        r"\appdata\roaming\microsoft\protect\",
+        r"\appdata\local\microsoft\credentials\",
+        r"\appdata\roaming\microsoft\credentials\",
+        r"\appdata\local\microsoft\vault\",
+        r"\programdata\microsoft\vault\",
+        r"\system32\microsoft\protect\",
+    ];
+    if CONTAINS.iter().any(|c| p.contains(c)) {
+        return true;
+    }
+    if matches!(name.as_str(), "ntds.dit" | "mimilsa.log" | "kiwissp.log") {
+        return true;
+    }
+    // Hive copies: \config\SAM on any volume (incl. HarddiskVolumeShadowCopyN)
+    // and the usual `reg save` output names elsewhere.
+    let hive_names = ["sam", "security", "system"];
+    if p.contains(r"\config\") && hive_names.contains(&name.as_str()) {
+        return true;
+    }
+    if let Some((stem, ext)) = name.rsplit_once('.') {
+        if hive_names.contains(&stem) && matches!(ext, "save" | "hiv" | "bak" | "dmp" | "reg") {
+            return true;
+        }
+        if matches!(ext, "dmp" | "mdmp" | "dump") {
+            return name.starts_with("lsass")
+                || p.contains(r"\users\")
+                || p.contains(r"\windows\temp\")
+                || p.contains(r"\crashdumps\");
+        }
+    }
+    false
+}
 
 /// Image loads are the noisiest Kernel-Process event; emit only loads from
 /// outside Windows/Program Files plus the interesting DLL list anywhere.
@@ -84,6 +133,39 @@ mod tests {
             r"C:\Users\a\AppData\Local\Temp\x\MpClient.dll"
         ));
         assert!(should_emit_image_load(r"C:\Windows\System32\dbghelp.dll"));
+        assert!(should_emit_image_load(r"C:\Windows\System32\dbgcore.dll"));
+        assert!(should_emit_image_load(r"C:\Windows\System32\taskschd.dll"));
+    }
+
+    #[test]
+    fn extra_sensitive_paths() {
+        for p in [
+            r"C:\Users\labuser\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\x.lnk",
+            r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\y.bat",
+            r"C:\Windows\System32\Tasks\KestrelProbe",
+            r"C:\Users\labuser\AppData\Local\Temp\lsass.dmp",
+            r"C:\Users\labuser\AppData\Local\CrashDumps\notepad.exe.1234.dmp",
+            r"C:\Windows\Temp\x.mdmp",
+            r"D:\out\lsass_0917.dmp",
+            r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Windows\System32\config\SAM",
+            r"C:\Windows\System32\config\SECURITY",
+            r"C:\temp\system.save",
+            r"C:\Windows\NTDS\ntds.dit",
+            r"C:\Users\labuser\AppData\Roaming\Microsoft\Protect\S-1-5-21-1\abc",
+            r"C:\Users\labuser\AppData\Local\Microsoft\Credentials\DFBE70A7",
+            r"C:\Users\labuser\AppData\Local\Microsoft\Vault\4BF4C442\x.vcrd",
+            r"C:\Windows\System32\mimilsa.log",
+        ] {
+            assert!(is_extra_sensitive(p), "{p}");
+        }
+        for p in [
+            r"C:\Windows\System32\kernel32.dll",
+            r"C:\ProgramData\Microsoft\Windows\WER\ReportQueue\x\memory.dmp",
+            r"C:\Users\labuser\Documents\system.docx",
+            r"C:\Windows\System32\config\systemprofile\x.txt",
+        ] {
+            assert!(!is_extra_sensitive(p), "{p}");
+        }
     }
 
     #[test]

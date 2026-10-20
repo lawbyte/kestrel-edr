@@ -18,7 +18,11 @@ use windows_sys::Win32::System::EventLog::{
 
 enum Kind {
     Sysmon,
-    Security { our_keys: Arc<RwLock<Vec<String>>> },
+    Security {
+        our_keys: Arc<RwLock<Vec<String>>>,
+    },
+    /// TaskScheduler / System 7045 / WMI-Activity fallback (ETW is primary).
+    Persist,
 }
 
 struct Ctx {
@@ -85,6 +89,18 @@ unsafe extern "system" fn callback(action: i32, ctx: *const c_void, event: EVT_H
     let ctx = &*(ctx as *const Ctx);
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let Some(xml) = render_xml(event) else { return };
+        if matches!(ctx.kind, Kind::Persist) {
+            if let Some(mut p) = crate::persist::parse_persist_xml(&xml) {
+                let task = super::persist::enrich(&mut p.record);
+                ctx.sink.send(Raw::Persist {
+                    ts: p.ts.unwrap_or_else(kestrel_common::now_ms),
+                    logger_pid: p.logger_pid.unwrap_or(0),
+                    record: p.record,
+                    task,
+                });
+            }
+            return;
+        }
         let Some(ev) = parse_event_xml(&xml) else {
             return;
         };
@@ -94,6 +110,7 @@ unsafe extern "system" fn callback(action: i32, ctx: *const c_void, event: EVT_H
                     ctx.sink.send(Raw::Sysmon(c));
                 }
             }
+            Kind::Persist => {}
             Kind::Security { our_keys } => {
                 let keys = our_keys.read().map(|k| k.clone()).unwrap_or_default();
                 if let Some(detail) = wfp_tamper(
@@ -147,6 +164,38 @@ pub fn subscribe_sysmon(sink: Sink) -> Option<Subscription> {
             kind: Kind::Sysmon,
         },
     )
+}
+
+/// Persistence fallbacks: TaskScheduler/Operational 106/140/141 (channel is
+/// disabled by default — the `task_scheduler_log` hardening control enables
+/// it), System 7045 (Service Control Manager), WMI-Activity/Operational 5861.
+/// Returns the subscriptions that could be opened.
+pub fn subscribe_persistence(sink: Sink) -> Vec<Subscription> {
+    let mut v = Vec::new();
+    for (channel, query) in [
+        (
+            consts::channel::TASK_SCHEDULER,
+            "*[System[(EventID=106 or EventID=140 or EventID=141)]]",
+        ),
+        (
+            consts::channel::SYSTEM,
+            "*[System[Provider[@Name='Service Control Manager'] and EventID=7045]]",
+        ),
+        (consts::channel::WMI_ACTIVITY, "*[System[EventID=5861]]"),
+    ] {
+        match subscribe(
+            channel,
+            query,
+            Ctx {
+                sink: sink.clone(),
+                kind: Kind::Persist,
+            },
+        ) {
+            Some(s) => v.push(s),
+            None => tracing::info!("event-log subscription to {channel} unavailable"),
+        }
+    }
+    v
 }
 
 /// Security 5446-5450 (requires WFP policy-change auditing;

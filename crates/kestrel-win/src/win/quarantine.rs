@@ -13,11 +13,16 @@
 //!   through the handle to `<name>.<id>.kestrel-quarantined`, execute is
 //!   denied and the renamed file is scheduled for deletion at reboot.
 //! * Restore goes only to the recorded path, re-validated (see [`Vault::restore`]).
+//! * `RemoveAutorun` backups (registry value, task XML, service config, WMI
+//!   MOF) are sealed the same way ([`Vault::store_backup`]) as entries of kind
+//!   `autorun_backup`; `RestoreFile` refuses them, `DeleteQuarantined` works.
 
 use super::safefs;
 use super::util::*;
 use crate::qpolicy;
-use crate::vault::{decrypt_stream, encrypt_stream, EntryState, QuarantineEntry, QuarantineIndex};
+use crate::vault::{
+    decrypt_stream, encrypt_stream, EntryKind, EntryState, QuarantineEntry, QuarantineIndex,
+};
 use kestrel_platform::ActionOrigin;
 use std::ffi::c_void;
 use std::io;
@@ -241,6 +246,7 @@ impl Vault {
             state: EntryState::Held,
             note: note.clone(),
             parent_owner,
+            kind: EntryKind::File,
         };
         let mut idx = self.index.lock().map_err(|_| "index lock poisoned")?;
         idx.entries.push(entry);
@@ -297,6 +303,55 @@ impl Vault {
         )
     }
 
+    /// Seal an in-memory backup (a `RemoveAutorun` original) into the vault.
+    /// `label` is recorded as the entry's `original_path` (never a real path:
+    /// the entry kind makes `restore` refuse it). Returns the vault id.
+    /// The blob is written and the index saved **before** the caller changes
+    /// anything, so a failed backup means no removal.
+    pub fn store_backup(&self, label: &str, data: &[u8]) -> Result<String, String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let blob = self.blob_path(&id);
+        let tmp = blob.with_extension("partial");
+        let mut prefix = [0u8; 8];
+        getrandom::getrandom(&mut prefix).map_err(|e| e.to_string())?;
+        let sealed = {
+            let out =
+                std::fs::File::create(&tmp).map_err(|e| format!("vault write failed: {e}"))?;
+            match encrypt_stream(&self.key, prefix, data, std::io::BufWriter::new(out)) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(format!("encryption failed: {e}"));
+                }
+            }
+        };
+        if let Err(e) = std::fs::rename(&tmp, &blob) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("vault rename failed: {e}"));
+        }
+        let entry = QuarantineEntry {
+            id: id.clone(),
+            original_path: label.to_string(),
+            sha256: sealed.sha256,
+            size: sealed.plaintext_len,
+            acl_sddl: None,
+            attributes: 0,
+            created_at: kestrel_common::now_ms(),
+            state: EntryState::Held,
+            note: "autorun backup".into(),
+            parent_owner: None,
+            kind: EntryKind::AutorunBackup,
+        };
+        let mut idx = self.index.lock().map_err(|_| "index lock poisoned")?;
+        idx.entries.push(entry);
+        if let Err(e) = self.save(&idx) {
+            idx.entries.retain(|x| x.id != id);
+            let _ = std::fs::remove_file(&blob);
+            return Err(format!("index write failed: {e}"));
+        }
+        Ok(id)
+    }
+
     /// Restore a held item to its **recorded** original path only (H8):
     /// never into %SystemRoot% / Program Files; the parent directory must
     /// still exist, contain no junction / link on its path, resolve to itself
@@ -311,6 +366,12 @@ impl Vault {
             .ok_or_else(|| format!("unknown quarantine id {id}"))?;
         if e.state != EntryState::Held {
             return Err(format!("quarantine item {id} is {:?}, not held", e.state));
+        }
+        if e.kind != EntryKind::File {
+            return Err(format!(
+                "quarantine item {id} is an autorun backup ({}), not a file; it cannot be restored with restore_file",
+                e.original_path
+            ));
         }
         qpolicy::restore_allowed(&e.original_path, system_drive)?;
         let dest = std::path::Path::new(&e.original_path);

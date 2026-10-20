@@ -258,12 +258,13 @@ mod tests {
         // What the MSI sets (MsiLockPermissionsEx SDDL).
         assert!(handoff_key_trusted("O:SYG:SYD:P(A;;KA;;;SY)(A;;KA;;;BA)").is_ok());
         // Inherited HKLM\SOFTWARE read for Users leaks the token.
-        assert!(handoff_key_trusted("O:BAG:SYD:AI(A;ID;KA;;;SY)(A;ID;KA;;;BA)(A;ID;KR;;;BU)").is_err());
+        assert!(
+            handoff_key_trusted("O:BAG:SYD:AI(A;ID;KA;;;SY)(A;ID;KA;;;BA)(A;ID;KR;;;BU)").is_err()
+        );
         // Planted by a standard user.
-        assert!(handoff_key_trusted(
-            "O:S-1-5-21-1-2-3-1001G:SYD:P(A;;KA;;;SY)(A;;KA;;;BA)"
-        )
-        .is_err());
+        assert!(
+            handoff_key_trusted("O:S-1-5-21-1-2-3-1001G:SYD:P(A;;KA;;;SY)(A;;KA;;;BA)").is_err()
+        );
         assert!(handoff_key_trusted("O:SYG:SYD:NO_ACCESS_CONTROL").is_err());
     }
 

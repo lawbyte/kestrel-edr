@@ -9,11 +9,20 @@
 //!   downgrading a rule that is already Block/Warn), as the policy intends.
 //!
 //! The returned map is control id → *protective control actually in effect*.
+//! Credential-protection controls ([`crate::hardening_plan`] has the sources):
+//! `wdigest_off`, `lsa_protection` (RunAsPPL=2, never rebooted; in effect
+//! only once lsass really runs as PPL), `asr_lsass` (Add-MpPreference, other
+//! rules untouched), `vulnerable_driver_blocklist` (report only) and
+//! `task_scheduler_log`. Tri-state information is carried by extra keys
+//! present only when true: `lsa_protection_pending_reboot`,
+//! `lsa_protection_unknown`, `asr_lsass_not_applicable`,
+//! `vulnerable_driver_blocklist_unknown`.
 
 use super::evtsub;
 use super::util::*;
 use crate::applocker::{self, Edit, Want};
 use crate::consts::{asr, channel, reg};
+use crate::hardening_plan as hp;
 use crate::hostfacts::is_defender_name;
 use crate::jsonc;
 use kestrel_common::{Hardening, HardeningMode};
@@ -26,7 +35,7 @@ use windows_sys::Win32::System::Registry::{
     RegLoadKeyW, RegUnLoadKeyW, HKEY_LOCAL_MACHINE, HKEY_USERS,
 };
 
-pub const CONTROLS: [&str; 8] = [
+pub const CONTROLS: [&str; 12] = [
     "block_mshta",
     "block_user_path_exec",
     "disable_run_dialog",
@@ -35,6 +44,10 @@ pub const CONTROLS: [&str; 8] = [
     "dpapi_debug_channel",
     "asr_rules",
     "browser_disable_remote_debugging",
+    "wdigest_off",
+    "asr_lsass",
+    "lsa_protection",
+    "task_scheduler_log",
 ];
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -254,11 +267,188 @@ impl Hardener {
             rd(reg::CHROME_POLICIES) && rd(reg::EDGE_POLICIES),
         );
 
+        self.credential_controls(h, defender, &mut st, &mut out);
+
         for c in CONTROLS {
             out.entry(c.to_string()).or_insert(false);
         }
         self.save(&st);
         out
+    }
+
+    /// WDigest, LSA protection, ASR LSASS, vulnerable-driver blocklist
+    /// (report only) and the TaskScheduler Operational channel. Same
+    /// Audit/Enforce semantics as above. Extra status flags (inserted only
+    /// when true): `lsa_protection_pending_reboot`, `lsa_protection_unknown`,
+    /// `asr_lsass_not_applicable`, `vulnerable_driver_blocklist_unknown`.
+    fn credential_controls(
+        &self,
+        h: &Hardening,
+        defender: bool,
+        st: &mut HState,
+        out: &mut BTreeMap<String, bool>,
+    ) {
+        let enforce = h.mode == HardeningMode::Enforce;
+        let build = hp::parse_build(&super::host::os_info().build);
+
+        // --- WDigest UseLogonCredential = 0
+        let wdigest = || {
+            reg_open(HKEY_LOCAL_MACHINE, hp::WDIGEST_KEY, false)
+                .and_then(|k| reg_get_dword(&k, hp::WDIGEST_VALUE))
+        };
+        if enforce {
+            if h.wdigest_off {
+                if wdigest() != Some(0) {
+                    match reg_create(HKEY_LOCAL_MACHINE, hp::WDIGEST_KEY)
+                        .and_then(|k| reg_set_dword(&k, hp::WDIGEST_VALUE, 0))
+                    {
+                        Ok(()) => {
+                            st.notes.remove("wdigest_off");
+                        }
+                        Err(e) => {
+                            st.notes.insert("wdigest_off".into(), e.to_string());
+                        }
+                    }
+                }
+                st.applied.insert("wdigest_off".into());
+            } else if st.applied.remove("wdigest_off") && wdigest() == Some(0) {
+                // Back to the OS default (absent = 0 on 8.1+): no security change.
+                if let Some(k) = reg_open(HKEY_LOCAL_MACHINE, hp::WDIGEST_KEY, true) {
+                    reg_delete_value(&k, hp::WDIGEST_VALUE);
+                }
+            }
+        }
+        out.insert(
+            "wdigest_off".into(),
+            hp::wdigest_in_effect(wdigest(), build),
+        );
+
+        // --- LSA protection (RunAsPPL = 2; never rebooted by Kestrel)
+        let run_as_ppl = || {
+            reg_open(HKEY_LOCAL_MACHINE, hp::LSA_KEY, false)
+                .and_then(|k| reg_get_dword(&k, hp::RUN_AS_PPL))
+        };
+        if enforce {
+            if h.lsa_protection {
+                match hp::lsa_write(run_as_ppl(), build) {
+                    hp::LsaWrite::Keep => {}
+                    hp::LsaWrite::Write2 => {
+                        match reg_open(HKEY_LOCAL_MACHINE, hp::LSA_KEY, true)
+                            .ok_or_else(|| "cannot open the Lsa key".to_string())
+                            .and_then(|k| {
+                                reg_set_dword(&k, hp::RUN_AS_PPL, 2).map_err(|e| e.to_string())
+                            }) {
+                            Ok(()) => {
+                                st.applied.insert("lsa_protection".into());
+                                st.notes.insert(
+                                    "lsa_protection".into(),
+                                    "RunAsPPL=2 set; takes effect at the next reboot".into(),
+                                );
+                            }
+                            Err(e) => {
+                                st.notes.insert("lsa_protection".into(), e);
+                            }
+                        }
+                    }
+                    hp::LsaWrite::Unsupported => {
+                        st.notes.insert(
+                            "lsa_protection".into(),
+                            format!("RunAsPPL=2 needs Windows 11 22H2+ (build {build}); the UEFI-locked value 1 is never set automatically"),
+                        );
+                    }
+                }
+            } else if st.applied.remove("lsa_protection") && run_as_ppl() == Some(2) {
+                // Only undo what Kestrel set (2); never touch an admin's 1.
+                if let Some(k) = reg_open(HKEY_LOCAL_MACHINE, hp::LSA_KEY, true) {
+                    reg_delete_value(&k, hp::RUN_AS_PPL);
+                }
+            }
+        }
+        let lsa = hp::lsa_status(lsass_ppl_running(), run_as_ppl(), build);
+        out.insert("lsa_protection".into(), lsa.in_effect);
+        if lsa.pending_reboot {
+            out.insert("lsa_protection_pending_reboot".into(), true);
+        }
+        if lsa.unknown {
+            out.insert("lsa_protection_unknown".into(), true);
+        }
+
+        // --- ASR LSASS rule (Add semantics: other rules untouched)
+        if hp::asr_lsass_applicable(defender, lsa.in_effect) {
+            let cur = asr_current();
+            let action = cur
+                .as_ref()
+                .ok()
+                .and_then(|m| m.get(asr::LSASS).copied())
+                .unwrap_or(asr::ACTION_OFF);
+            let mut changed = false;
+            if enforce {
+                if h.asr_lsass {
+                    if cur.is_ok() && action != asr::ACTION_BLOCK {
+                        changed = true;
+                        match asr_add(&[asr::LSASS], "Enabled") {
+                            Ok(()) => {
+                                st.applied.insert("asr_lsass".into());
+                                st.notes.remove("asr_lsass");
+                            }
+                            Err(e) => {
+                                st.notes.insert("asr_lsass".into(), e);
+                            }
+                        }
+                    }
+                } else if st.applied.remove("asr_lsass") && !h.asr_rules {
+                    changed = true;
+                    let _ = asr_remove(asr::LSASS);
+                }
+            }
+            let now = if changed {
+                asr_current().ok().and_then(|m| m.get(asr::LSASS).copied())
+            } else {
+                cur.ok().and_then(|m| m.get(asr::LSASS).copied())
+            };
+            out.insert("asr_lsass".into(), now == Some(asr::ACTION_BLOCK));
+        } else {
+            // Microsoft: not applicable with LSA protection on / another AV.
+            out.insert("asr_lsass".into(), false);
+            out.insert("asr_lsass_not_applicable".into(), true);
+        }
+
+        // --- Vulnerable driver blocklist (report only, never toggled)
+        if h.report_vulnerable_driver_blocklist {
+            match hp::driver_blocklist(hvci_services_running().as_deref()) {
+                Some(on) => {
+                    out.insert("vulnerable_driver_blocklist".into(), on);
+                }
+                None => {
+                    out.insert("vulnerable_driver_blocklist".into(), false);
+                    out.insert("vulnerable_driver_blocklist_unknown".into(), true);
+                }
+            }
+        }
+
+        // --- TaskScheduler Operational channel (persistence telemetry)
+        if enforce {
+            if h.task_scheduler_log {
+                // Only record (and later revert) what Kestrel itself enabled.
+                if evtsub::channel_enabled(hp::TASK_SCHEDULER_OPERATIONAL) != Some(true) {
+                    match evtsub::set_channel_enabled(hp::TASK_SCHEDULER_OPERATIONAL, true) {
+                        Ok(()) => {
+                            st.applied.insert("task_scheduler_log".into());
+                            st.notes.remove("task_scheduler_log");
+                        }
+                        Err(e) => {
+                            st.notes.insert("task_scheduler_log".into(), e.to_string());
+                        }
+                    }
+                }
+            } else if st.applied.remove("task_scheduler_log") {
+                let _ = evtsub::set_channel_enabled(hp::TASK_SCHEDULER_OPERATIONAL, false);
+            }
+        }
+        out.insert(
+            "task_scheduler_log".into(),
+            evtsub::channel_enabled(hp::TASK_SCHEDULER_OPERATIONAL).unwrap_or(false),
+        );
     }
 
     fn write_local_policy(&self, xml: &str) -> Result<(), String> {
@@ -555,7 +745,12 @@ fn asr_apply(enforce: bool) -> Result<(), String> {
     if ids.is_empty() {
         return Ok(());
     }
-    let action = if enforce { "Enabled" } else { "AuditMode" };
+    asr_add(&ids, if enforce { "Enabled" } else { "AuditMode" })
+}
+
+/// `Add-MpPreference` (never `Set-`): adds/updates only the given rule ids,
+/// leaving every other ASR rule as configured.
+fn asr_add(ids: &[&str], action: &str) -> Result<(), String> {
     let list = ids
         .iter()
         .map(|i| ps_quote(i))
@@ -582,4 +777,63 @@ fn asr_in_effect() -> bool {
             .all(|id| m.get(*id).copied() == Some(asr::ACTION_BLOCK)),
         Err(_) => false,
     }
+}
+
+/// `Remove-MpPreference` for one rule Kestrel added (only on revert).
+fn asr_remove(id: &str) -> Result<(), String> {
+    let script = format!(
+        "$ErrorActionPreference='Stop'; Remove-MpPreference -AttackSurfaceReductionRules_Ids @({})",
+        ps_quote(id)
+    );
+    let o = run_powershell(&script, PS_TIMEOUT).map_err(|e| format!("Remove-MpPreference: {e}"))?;
+    if o.code != 0 {
+        return Err(format!("Remove-MpPreference failed: {}", o.stderr.trim()));
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------ LSA / HVCI status
+
+/// Does `%SystemRoot%\System32\lsass.exe` run as PPL (LSA signer) now?
+/// `GetProcessInformation(ProcessProtectionLevelInfo)` needs only
+/// `PROCESS_QUERY_LIMITED_INFORMATION`, which PPL processes still grant.
+/// `None` when lsass cannot be found / queried.
+fn lsass_ppl_running() -> Option<bool> {
+    use windows_sys::Win32::System::Threading::{
+        GetProcessInformation, ProcessProtectionLevelInfo, PROCESS_PROTECTION_LEVEL_INFORMATION,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROTECTION_LEVEL_LSA_LIGHT,
+    };
+    let want =
+        crate::qpolicy::normalize_for_compare(&format!(r"{}\System32\lsass.exe", system_root()));
+    let rows = super::snapshot::toolhelp_rows();
+    let row = rows
+        .iter()
+        .find(|r| r.exe.eq_ignore_ascii_case("lsass.exe"))?;
+    let h = open_process(row.pid, PROCESS_QUERY_LIMITED_INFORMATION)?;
+    let img = process_image(&h)?;
+    if crate::qpolicy::normalize_for_compare(&super::safefs::long_path(&img)) != want {
+        return None;
+    }
+    let mut info = PROCESS_PROTECTION_LEVEL_INFORMATION { ProtectionLevel: 0 };
+    let ok = unsafe {
+        GetProcessInformation(
+            h.raw(),
+            ProcessProtectionLevelInfo,
+            &mut info as *mut _ as *mut core::ffi::c_void,
+            std::mem::size_of::<PROCESS_PROTECTION_LEVEL_INFORMATION>() as u32,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    Some(info.ProtectionLevel == PROTECTION_LEVEL_LSA_LIGHT)
+}
+
+/// `Win32_DeviceGuard.SecurityServicesRunning` (WMI, COM — no PowerShell).
+fn hvci_services_running() -> Option<Vec<u32>> {
+    let _com = super::com::ComInit::new().ok()?;
+    let svc = super::com::wmi_connect(hp::DEVICE_GUARD_NS).ok()?;
+    let objs = super::com::wmi_query(&svc, "SELECT * FROM Win32_DeviceGuard", 1).ok()?;
+    let mof = super::com::object_text(objs.first()?).ok()?;
+    crate::autorun_plan::mof_u32_list(&mof, "SecurityServicesRunning")
 }
