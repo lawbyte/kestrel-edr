@@ -56,8 +56,16 @@ enum Cmd {
     Status,
     /// Stop and remove the agent service (requires the uninstall token).
     Uninstall {
-        #[arg(long, env = "KESTREL_UNINSTALL_TOKEN", hide_env_values = true)]
-        token: String,
+        #[arg(
+            long,
+            env = "KESTREL_UNINSTALL_TOKEN",
+            hide_env_values = true,
+            required_unless_present = "token_stdin"
+        )]
+        token: Option<String>,
+        /// Read the uninstall token from the first line of stdin (used by the MSI).
+        #[arg(long)]
+        token_stdin: bool,
         /// Also delete the state directory (keys, outbox, logs).
         #[arg(long)]
         purge: bool,
@@ -140,29 +148,42 @@ struct ServerArgs {
     #[arg(long, env = "KESTREL_CA")]
     ca: String,
     /// Enrollment token. Avoid on shared hosts: command lines are visible to
-    /// every process-creation sensor; the MSI uses `--token-from-msi`.
+    /// every process-creation sensor; prefer `--token-stdin` (the MSI does).
     #[arg(
         long,
         env = "KESTREL_ENROLL_TOKEN",
         hide_env_values = true,
-        required_unless_present = "token_from_msi"
+        required_unless_present = "token_stdin"
     )]
     token: Option<String>,
-    /// Take the enrollment token the MSI stored in a SYSTEM/Administrators-only
-    /// registry key (and delete it), so it never appears on a command line (M6).
-    #[arg(long, hide = true)]
-    token_from_msi: bool,
+    /// Read the enrollment token from the first line of stdin (M6: never on a
+    /// command line; the MSI custom action pipes it in).
+    #[arg(long)]
+    token_stdin: bool,
     /// TLS name to verify on the server certificate (default: host from --server).
     #[arg(long)]
     server_name: Option<String>,
 }
 
+/// First line of stdin, trimmed; an empty line is an error.
+fn read_stdin_token() -> Result<String> {
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("reading the token from stdin")?;
+    let t = line.trim().to_string();
+    if t.is_empty() {
+        bail!("no token on stdin");
+    }
+    Ok(t)
+}
+
 impl ServerArgs {
     fn install_opts(&self) -> Result<InstallOpts> {
-        let token = match (&self.token, self.token_from_msi) {
-            (_, true) => platform_win::take_msi_enroll_token()?,
+        let token = match (&self.token, self.token_stdin) {
+            (_, true) => read_stdin_token()?,
             (Some(t), false) => t.clone(),
-            (None, false) => bail!("--token or --token-from-msi is required"),
+            (None, false) => bail!("--token or --token-stdin is required"),
         };
         Ok(InstallOpts {
             server: self.server.clone(),
@@ -318,10 +339,18 @@ async fn dispatch(state_dir: PathBuf, cmd: Cmd) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Uninstall { token, purge } => {
+        Cmd::Uninstall {
+            token,
+            token_stdin,
+            purge,
+        } => {
+            let token = match (token, token_stdin) {
+                (_, true) => read_stdin_token()?,
+                (Some(t), false) => t,
+                (None, false) => bail!("--token or --token-stdin is required"),
+            };
             commands::verify_uninstall(&state_dir, &token)?;
             if cfg!(windows) {
-                platform_win::delete_msi_setup_key();
                 let removed = platform_win::remove_ransomware_canaries(&state_dir);
                 if !removed.is_empty() {
                     println!("Removed {} ransomware decoy file(s)", removed.len());

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kestrel-common", "crates/kestrel-detect", "crates/kestrel-platform", "crates/kestrel-win", "crates/kestrel-scan", "crates/kestrel-agent", "crates/kestrel-server"]
+members = ["crates/kestrel-common", "crates/kestrel-detect", "crates/kestrel-platform", "crates/kestrel-win", "crates/kestrel-scan", "crates/kestrel-msica", "crates/kestrel-agent", "crates/kestrel-server"]
 
 [workspace.package]
 version = "0.1.0"

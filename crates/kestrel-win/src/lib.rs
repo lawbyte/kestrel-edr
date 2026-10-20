@@ -50,8 +50,6 @@ pub mod zipw;
 mod win;
 
 #[cfg(windows)]
-pub use win::msihandoff::{delete_setup_key, take_enroll_token};
-#[cfg(windows)]
 pub use win::platform::{resolve_host_direct, WindowsPlatform};
 #[cfg(windows)]
 pub use win::service::{install_service, run_service, uninstall_service};

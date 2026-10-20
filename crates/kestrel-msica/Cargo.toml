@@ -1,0 +1,15 @@
+[package]
+name = "kestrel-msica"
+description = "MSI custom actions for the Kestrel installer: pass enrollment / uninstall tokens to kestrel-agent on stdin (never on a command line)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_ApplicationInstallationAndServicing",
+] }
