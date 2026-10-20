@@ -5,3 +5,9 @@ linker = "x86_64-w64-mingw32-gcc"
 # Cross-check / build the Windows agent from Linux (std built from source; see docs/BUILDING.md)
 win = "build -Zbuild-std=std,panic_abort --target x86_64-pc-windows-gnu"
 wincheck = "check -Zbuild-std=std,panic_abort --target x86_64-pc-windows-gnu"
+
+# Native Windows builds: link the C runtime statically. A clean Windows has no
+# VCRUNTIME140.dll (it only comes with Visual Studio / the VC++ redistributable),
+# and the agent must start on any supported machine without extra installs.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

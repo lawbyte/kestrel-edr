@@ -5,3 +5,7 @@ linker = "x86_64-w64-mingw32-gcc"
 
 [alias]
 wincheck = "check -Zbuild-std=std,panic_abort --target x86_64-pc-windows-gnu"
+
+# Native Windows builds: static C runtime (no VCRUNTIME140.dll on clean machines).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
