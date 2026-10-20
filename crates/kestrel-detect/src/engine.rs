@@ -1264,6 +1264,19 @@ impl EngineState {
             && driveless(&info.image) == self.agent_image
         {
             self.agent_guids.insert(info.guid.clone());
+            return;
+        }
+        // Processes the agent starts itself (hardening checks via PowerShell,
+        // auditpol, the YARA scanner, msiexec for updates) and their children
+        // are the agent's own work: on a real host they tripped SigmaHQ
+        // "encoded PowerShell" rules on every hardening pass. Only the agent
+        // (SYSTEM, admin-only install folder) can make itself their parent.
+        let parent = info
+            .parent_guid
+            .clone()
+            .or_else(|| self.table.parent_of(info).map(|p| p.guid.clone()));
+        if parent.is_some_and(|g| self.agent_guids.contains(&g)) {
+            self.agent_guids.insert(info.guid.clone());
         }
     }
 

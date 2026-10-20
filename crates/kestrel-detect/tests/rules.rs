@@ -1478,3 +1478,86 @@ fn process_table_through_engine() {
     assert!(e.process_info(&g("b")).is_none());
     assert!(e.process_info(&g("a")).is_some());
 }
+
+/// Real-host regression (VM, 2026-10-21): the agent's own hardening checks run
+/// `powershell.exe -EncodedCommand …`; SigmaHQ encoded-PowerShell rules fired
+/// on every hardening pass. Children (and grandchildren) of the agent are the
+/// agent's own work; the same command from a user shell still alerts.
+#[test]
+fn agent_children_are_not_subjects() {
+    const ENC: &str = r#"
+title: Encoded PowerShell (lab)
+id: 11111111-2222-3333-4444-555555555555
+logsource: { category: process_creation, product: windows }
+detection:
+  sel:
+    Image|endswith: '\powershell.exe'
+    CommandLine|contains: ' -EncodedCommand '
+  condition: sel
+level: high
+"#;
+    let bundle = RuleBundle {
+        version: 2,
+        rules: vec![sigma_def("SIG-11111111", ENC)],
+    };
+    let mut e = Engine::new(host(), Policy::default(), bundle).unwrap();
+    let ps = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
+    let cmd = "powershell.exe -NoProfile -EncodedCommand ZQBjAGgAbwAgADEA";
+    e.process(&start(
+        0,
+        "agent",
+        50,
+        common::AGENT,
+        "kestrel-agent.exe service",
+        None,
+        SignatureState::Valid,
+        None,
+    ));
+    let out = e.process(&start(
+        10,
+        "hard",
+        51,
+        ps,
+        cmd,
+        Some(("agent", 50)),
+        SignatureState::Valid,
+        Some("Microsoft Windows"),
+    ));
+    assert!(rule_ids(&out).is_empty(), "agent child: {}", dump(&out));
+    let out = e.process(&start(
+        20,
+        "grand",
+        52,
+        ps,
+        cmd,
+        Some(("hard", 51)),
+        SignatureState::Valid,
+        Some("Microsoft Windows"),
+    ));
+    assert!(
+        rule_ids(&out).is_empty(),
+        "agent grandchild: {}",
+        dump(&out)
+    );
+    e.process(&start(
+        30,
+        "cmd",
+        60,
+        r"C:\Windows\System32\cmd.exe",
+        "cmd.exe",
+        None,
+        SignatureState::Valid,
+        Some("Microsoft Windows"),
+    ));
+    let out = e.process(&start(
+        40,
+        "user",
+        61,
+        ps,
+        cmd,
+        Some(("cmd", 60)),
+        SignatureState::Valid,
+        Some("Microsoft Windows"),
+    ));
+    assert_eq!(rule_ids(&out), ["SIG-11111111"], "{}", dump(&out));
+}
