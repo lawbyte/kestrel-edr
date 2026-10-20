@@ -1561,3 +1561,45 @@ level: high
     ));
     assert_eq!(rule_ids(&out), ["SIG-11111111"], "{}", dump(&out));
 }
+
+/// Lab VM (2026-10-21): SigmaHQ `bdc64095` ("unsigned dbghelp/dbgcore
+/// load", `Signed: 'false'`) fired on every System32 dbghelp.dll load, whose
+/// signature the sensor had not verified. Unknown must not read as unsigned.
+#[test]
+fn sigma_unverified_signature_is_not_unsigned() {
+    const R: &str = r#"
+title: Unsigned dbghelp (lab)
+id: 22222222-2222-3333-4444-555555555555
+logsource: { category: image_load, product: windows }
+detection:
+  selection:
+    ImageLoaded|endswith: '\dbghelp.dll'
+    Signed: 'false'
+  condition: selection
+level: high
+"#;
+    let bundle = RuleBundle {
+        version: 2,
+        rules: vec![sigma_def("SIG-22222222", R)],
+    };
+    let mut e = Engine::new(host(), Policy::default(), bundle).unwrap();
+    e.process(&start(
+        0,
+        "tel",
+        80,
+        r"C:\Windows\System32\CompatTelRunner.exe",
+        "CompatTelRunner.exe",
+        None,
+        SignatureState::Valid,
+        Some("Microsoft Windows"),
+    ));
+    let load = |signed| EventData::ImageLoad {
+        path: r"C:\Windows\System32\dbghelp.dll".into(),
+        signer: None,
+        signed,
+    };
+    let out = e.process(&ev(10, "tel", 80, load(SignatureState::Unknown)));
+    assert!(rule_ids(&out).is_empty(), "{}", dump(&out));
+    let out = e.process(&ev(20, "tel", 80, load(SignatureState::Unsigned)));
+    assert_eq!(rule_ids(&out), ["SIG-22222222"], "{}", dump(&out));
+}

@@ -490,12 +490,21 @@ fn integrity_str(i: Integrity) -> &'static str {
     }
 }
 
-fn sig_status(s: SignatureState) -> &'static str {
+fn sig_status(s: SignatureState) -> Option<&'static str> {
     match s {
-        SignatureState::Unknown => "Unknown",
-        SignatureState::Unsigned => "Unsigned",
-        SignatureState::Valid => "Valid",
-        SignatureState::Invalid => "Invalid",
+        SignatureState::Unknown => None,
+        SignatureState::Unsigned => Some("Unsigned"),
+        SignatureState::Valid => Some("Valid"),
+        SignatureState::Invalid => Some("Invalid"),
+    }
+}
+
+/// Sysmon `Signed`; `None` for an unverified image (never matches).
+fn signed_str(s: SignatureState) -> Option<&'static str> {
+    match s {
+        SignatureState::Unknown => None,
+        SignatureState::Valid => Some("true"),
+        SignatureState::Unsigned | SignatureState::Invalid => Some("false"),
     }
 }
 
@@ -523,26 +532,17 @@ impl SigmaEvent<'_> {
                 .and_then(|p| p.sha256.as_deref())
                 .and_then(|h| so(format!("SHA256={}", h.to_ascii_uppercase()))),
             ("sha256", _) => p.and_then(|p| p.sha256.as_deref()).and_then(s),
-            ("Signed", EventData::ImageLoad { signed, .. }) => {
-                s(if *signed == SignatureState::Valid {
-                    "true"
-                } else {
-                    "false"
-                })
-            }
-            ("Signed", _) => p
-                .map(|p| {
-                    if p.signed == SignatureState::Valid {
-                        "true"
-                    } else {
-                        "false"
-                    }
-                })
-                .and_then(s),
+            // Unknown (not verified yet, or not verified at all for most DLL
+            // loads) is "not collected": it must never satisfy `Signed: 'false'`
+            // (in the lab VM every System32 dbghelp.dll load matched).
+            ("Signed", EventData::ImageLoad { signed, .. }) => signed_str(*signed).and_then(s),
+            ("Signed", _) => p.and_then(|p| signed_str(p.signed)).and_then(s),
             ("Signature", EventData::ImageLoad { signer, .. }) => signer.as_deref().and_then(s),
             ("Signature", _) => p.and_then(|p| p.signer.as_deref()).and_then(s),
-            ("SignatureStatus", EventData::ImageLoad { signed, .. }) => s(sig_status(*signed)),
-            ("SignatureStatus", _) => p.map(|p| sig_status(p.signed)).and_then(s),
+            ("SignatureStatus", EventData::ImageLoad { signed, .. }) => {
+                sig_status(*signed).and_then(s)
+            }
+            ("SignatureStatus", _) => p.and_then(|p| sig_status(p.signed)).and_then(s),
             ("TargetFilename", EventData::FileAccess { path, .. }) => s(path),
             ("DestinationIp", EventData::NetConnect { dst_ip, .. }) => s(dst_ip),
             ("DestinationPort", EventData::NetConnect { dst_port, .. }) => {

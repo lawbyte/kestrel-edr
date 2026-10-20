@@ -1249,6 +1249,9 @@ pub const CANARY_IGNORED_READERS: &[&str] = &[
     "searchprotocolhost.exe",
     "searchindexer.exe",
     "searchfilterhost.exe",
+    // Optimize Drives (defrag / TRIM / slab consolidation) opens every file to
+    // move its clusters; seen reading a decoy profile in the lab VM.
+    "defrag.exe",
     "msmpeng.exe",
     "mpdefendercoreservice.exe",
     "nissrv.exe",
@@ -1270,11 +1273,39 @@ pub const CANARY_IGNORED_READERS: &[&str] = &[
 /// either a Microsoft-signed image on [`CANARY_IGNORED_READERS`], or an
 /// allow-listed security / indexer / backup / management product
 /// ([`BENIGN_READERS`]) whose signer matches.
+/// Windows services that open files for storage maintenance and run inside
+/// the shared `svchost.exe` (so the image name alone says nothing): the
+/// Optimize Drives service (`svchost.exe -k defragsvc`). Microsoft-signed, at
+/// its exact System32 location on the system volume.
+pub fn is_os_file_maintenance_host(proc_: &ProcessInfo) -> bool {
+    if proc_.signed != SignatureState::Valid
+        || !proc_
+            .signer
+            .as_deref()
+            .is_some_and(crate::protect::is_microsoft_signer)
+        || proc_.path_class != kestrel_common::PathClass::System
+        || !file_name(&proc_.image).eq_ignore_ascii_case("svchost.exe")
+    {
+        return false;
+    }
+    let cmd = proc_.cmdline.to_ascii_lowercase();
+    let mut args = cmd.split_whitespace();
+    while let Some(a) = args.next() {
+        if a == "-k" {
+            return args.next() == Some("defragsvc");
+        }
+    }
+    false
+}
+
 pub fn is_canary_ignored_reader(proc_: &ProcessInfo) -> bool {
     if is_untrusted_location_or_signature(proc_) || proc_.signed != SignatureState::Valid {
         return false;
     }
     let name = file_name(&proc_.image).to_ascii_lowercase();
+    if is_os_file_maintenance_host(proc_) {
+        return true;
+    }
     if CANARY_IGNORED_READERS.contains(&name.as_str())
         && proc_
             .signer

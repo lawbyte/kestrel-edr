@@ -852,3 +852,57 @@ fn st04_trusted_parent_connection_is_not_attributed_to_child() {
         ["ST-04"]
     );
 }
+
+/// Lab VM (2026-10-21): the Optimize Drives service (`svchost.exe -k
+/// defragsvc`) opened a decoy Chrome profile; it is a Windows maintenance
+/// host, not a thief. Another svchost group, or a look-alike outside
+/// System32, still trips ST-16.
+#[test]
+fn defragsvc_reading_a_decoy_is_ignored() {
+    let mut e = engine(Policy::default());
+    let decoy = e
+        .canaries(r"C:\Users\alice")
+        .into_iter()
+        .find(|s| s.path.ends_with("Login Data"))
+        .expect("decoy Login Data")
+        .path;
+    e.arm_canary(&decoy);
+    let svchost = r"C:\Windows\System32\svchost.exe";
+    let ms = Some("Microsoft Windows Publisher");
+    e.process(&start(
+        0,
+        "defrag",
+        70,
+        svchost,
+        r"C:\Windows\system32\svchost.exe -k defragsvc",
+        None,
+        SignatureState::Valid,
+        ms,
+    ));
+    let out = e.process(&read(10, "defrag", 70, &decoy));
+    assert!(rule_ids(&out).is_empty(), "{}", dump(&out));
+    e.process(&start(
+        20,
+        "other",
+        71,
+        svchost,
+        r"C:\Windows\system32\svchost.exe -k netsvcs -p",
+        None,
+        SignatureState::Valid,
+        ms,
+    ));
+    let out = e.process(&read(30, "other", 71, &decoy));
+    assert_eq!(rule_ids(&out), ["ST-16"], "{}", dump(&out));
+    e.process(&start(
+        40,
+        "fake",
+        72,
+        r"C:\Users\alice\AppData\Local\Temp\svchost.exe",
+        "svchost.exe -k defragsvc",
+        None,
+        SignatureState::Unsigned,
+        None,
+    ));
+    let out = e.process(&read(50, "fake", 72, &decoy));
+    assert_eq!(rule_ids(&out), ["ST-16"], "{}", dump(&out));
+}

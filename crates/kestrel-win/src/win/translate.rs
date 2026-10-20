@@ -38,6 +38,10 @@ const THREAD_OPEN_WINDOW_MS: i64 = 5_000;
 /// Persistence events wait this long (arrival time) for the creator's
 /// process-start / script / image-load events from the other sessions.
 const PERSIST_HOLD_MS: i64 = 1_500;
+/// A pid created this recently whose ProcessStart has not arrived is "early".
+const EARLY_START_MS: i64 = 3_000;
+/// How long events of an early pid wait for its ProcessStart.
+const EARLY_HOLD_MS: i64 = 2_000;
 const MAX_PENDING_REG: usize = 4096;
 const MAX_PENDING_PERSIST: usize = 1024;
 
@@ -92,6 +96,11 @@ pub struct Translator {
     cmdlines: HashMap<u32, (String, i64)>,
     held: VecDeque<Held>,
     held_pids: HashMap<u32, usize>,
+    /// Pids first seen through another event within [`EARLY_START_MS`] of
+    /// their creation, whose ProcessStart has not arrived yet (the sessions
+    /// flush independently). Their events wait for it so the engine never
+    /// judges a process it does not know (pid → hold deadline).
+    early_pids: HashMap<u32, i64>,
     last_devmap_refresh: Instant,
     last_gc: Instant,
     reg_join: RegJoin,
@@ -159,6 +168,7 @@ impl Translator {
             cmdlines: HashMap::new(),
             held: VecDeque::new(),
             held_pids: HashMap::new(),
+            early_pids: HashMap::new(),
             last_devmap_refresh: Instant::now(),
             last_gc: Instant::now(),
             reg_join: RegJoin::new(),
@@ -212,6 +222,23 @@ impl Translator {
     }
 
     fn emit(&mut self, ev: Event) {
+        if let EventData::ProcessStart(_) = &ev.data {
+            if self.early_pids.remove(&ev.pid).is_some() && self.place_before_early(&ev) {
+                return;
+            }
+        } else if let Some(&until) = self.early_pids.get(&ev.pid) {
+            let pid = ev.pid;
+            *self.held_pids.entry(pid).or_default() += 1;
+            self.held.push_back(Held {
+                ev,
+                pid,
+                deadline: until,
+                waiting_cmdline: true,
+                waiting_facts: None,
+                facts_deadline: 0,
+            });
+            return;
+        }
         let hold_parent = match &ev.data {
             EventData::ProcessStart(p) => self.held_pids.contains_key(&p.ppid),
             _ => false,
@@ -234,15 +261,55 @@ impl Translator {
 
     fn hold_start(&mut self, ev: Event, now: i64, cmdline: bool, facts: Option<String>) {
         let pid = ev.pid;
+        self.early_pids.remove(&pid);
         *self.held_pids.entry(pid).or_default() += 1;
-        self.held.push_back(Held {
+        let h = Held {
             ev,
             pid,
             deadline: now + CMDLINE_WAIT_MS,
             waiting_cmdline: cmdline,
             facts_deadline: now + super::enrich::FIRST_RUN_BUDGET_MS,
             waiting_facts: facts,
-        });
+        };
+        // Ahead of any events of this pid that arrived before its start.
+        match self.held.iter().position(|x| x.pid == pid) {
+            Some(i) => {
+                self.held.insert(i, h);
+                self.release_early_waits(pid);
+            }
+            None => self.held.push_back(h),
+        }
+    }
+
+    /// A ProcessStart for a pid whose earlier events are held: queue the start
+    /// in front of them and let them go once it does. False if none are held.
+    fn place_before_early(&mut self, ev: &Event) -> bool {
+        let Some(i) = self.held.iter().position(|x| x.pid == ev.pid) else {
+            return false;
+        };
+        *self.held_pids.entry(ev.pid).or_default() += 1;
+        self.held.insert(
+            i,
+            Held {
+                ev: ev.clone(),
+                pid: ev.pid,
+                deadline: 0,
+                waiting_cmdline: false,
+                waiting_facts: None,
+                facts_deadline: 0,
+            },
+        );
+        self.release_early_waits(ev.pid);
+        true
+    }
+
+    /// Events of `pid` held only for its (now arrived) ProcessStart.
+    fn release_early_waits(&mut self, pid: u32) {
+        for h in self.held.iter_mut() {
+            if h.pid == pid && !matches!(h.ev.data, EventData::ProcessStart(_)) {
+                h.waiting_cmdline = false;
+            }
+        }
     }
 
     /// Patch enrichment facts into a held ProcessStart.
@@ -302,6 +369,7 @@ impl Translator {
             t.gc(now);
         }
         self.flows.expire(now);
+        self.early_pids.retain(|_, until| *until > now);
         self.dns.retain(|_, m| {
             m.retain(|_, (_, ts)| now - *ts < DNS_TTL_MS);
             !m.is_empty()
@@ -370,7 +438,7 @@ impl Translator {
     }
 
     /// Ensure an unknown live pid gets registered (missed start event).
-    fn ensure_known(&self, pid: u32) {
+    fn ensure_known(&mut self, pid: u32) {
         if pid == 0 || pid == 4 {
             return;
         }
@@ -384,13 +452,13 @@ impl Translator {
             return;
         }
         if let Some(lp) = live_proc(pid) {
+            let created = filetime_to_ms(lp.create_ft);
             if let Ok(mut t) = self.s.tracker.write() {
-                t.on_start(
-                    pid,
-                    filetime_to_ms(lp.create_ft),
-                    lp.image.as_deref().unwrap_or(""),
-                    0,
-                );
+                t.on_start(pid, created, lp.image.as_deref().unwrap_or(""), 0);
+            }
+            let now = now_ms();
+            if now - created <= EARLY_START_MS {
+                self.early_pids.insert(pid, now + EARLY_HOLD_MS);
             }
         }
     }
