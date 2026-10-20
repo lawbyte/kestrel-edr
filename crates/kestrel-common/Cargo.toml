@@ -1,0 +1,12 @@
+[package]
+name = "kestrel-common"
+description = "Shared types for Kestrel EDR: telemetry events, alerts, policy, response actions, wire messages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,65 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Kestrel",
+  "mainBinaryName": "kestrel-tray",
+  "version": "0.1.0",
+  "identifier": "id.lbyte.kestrel.tray",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Kestrel",
+        "width": 420,
+        "height": 600,
+        "minWidth": 380,
+        "minHeight": 520,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "resizable": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true,
+        "shadow": true,
+        "center": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "nsis"],
+    "publisher": "Kestrel EDR",
+    "copyright": "Apache-2.0",
+    "category": "Utility",
+    "shortDescription": "Kestrel protection status for employees",
+    "longDescription": "Shows whether Kestrel EDR is protecting this PC, what it blocked, and how to reach your IT team.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "webviewInstallMode": { "type": "embedBootstrapper" },
+      "wix": {
+        "upgradeCode": "6f1d8c2e-3b4a-4f5e-9a7b-6b6573747261",
+        "language": "en-US"
+      },
+      "nsis": {
+        "installMode": "perMachine",
+        "displayLanguageSelector": false
+      }
+    }
+  },
+  "plugins": {}
+}

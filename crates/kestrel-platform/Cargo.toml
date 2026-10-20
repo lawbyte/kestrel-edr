@@ -1,0 +1,13 @@
+[package]
+name = "kestrel-platform"
+description = "OS abstraction the Kestrel agent core runs on (implemented by kestrel-win and by the simulator)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kestrel-common = { path = "../kestrel-common" }
+detect = { package = "kestrel-detect", path = "../kestrel-detect" }
+tokio = { version = "1", features = ["sync"] }
+anyhow.workspace = true
+async-trait = "0.1"

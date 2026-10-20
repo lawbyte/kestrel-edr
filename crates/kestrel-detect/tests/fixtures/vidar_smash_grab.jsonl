@@ -1,0 +1,14 @@
+{"ts": 1759999400000, "pid": 4100, "guid": "explorer-bob", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "explorer.exe", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 8800, "guid": "vidar-1", "type": "process_start", "ppid": 4100, "image": "C:\\Users\\bob\\Downloads\\NeoHub_Setup.exe", "cmdline": "\"C:\\Users\\bob\\Downloads\\NeoHub_Setup.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "invalid", "parent_guid": "explorer-bob", "signer": "githab.com", "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "motw_zone": 3}
+{"ts": 1760000000400, "pid": 8800, "guid": "vidar-1", "type": "file_access", "path": "C:\\Users\\bob\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000000420, "pid": 8800, "guid": "vidar-1", "type": "file_access", "path": "C:\\Users\\bob\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000000450, "pid": 8800, "guid": "vidar-1", "type": "file_access", "path": "C:\\Users\\bob\\AppData\\Roaming\\Mozilla\\Firefox\\Profiles\\k2j3.default-release\\key4.db", "op": "read"}
+{"ts": 1760000000460, "pid": 8800, "guid": "vidar-1", "type": "file_access", "path": "C:\\Users\\bob\\AppData\\Roaming\\Mozilla\\Firefox\\Profiles\\k2j3.default-release\\logins.json", "op": "read"}
+{"ts": 1760000000500, "pid": 8800, "guid": "vidar-1", "type": "file_access", "path": "C:\\Users\\bob\\AppData\\Roaming\\Telegram Desktop\\tdata\\key_datas", "op": "read"}
+{"ts": 1760000000520, "pid": 8800, "guid": "vidar-1", "type": "file_access", "path": "C:\\Users\\bob\\AppData\\Roaming\\discord\\Local Storage\\leveldb\\000005.ldb", "op": "read"}
+{"ts": 1760000000560, "pid": 8800, "guid": "vidar-1", "type": "file_access", "path": "C:\\Users\\bob\\AppData\\Roaming\\Exodus\\exodus.wallet\\seed.seco", "op": "read"}
+{"ts": 1760000000600, "pid": 8800, "guid": "vidar-1", "type": "file_access", "path": "C:\\Users\\bob\\.aws\\credentials", "op": "read"}
+{"ts": 1760000000640, "pid": 8800, "guid": "vidar-1", "type": "file_access", "path": "C:\\Users\\bob\\AppData\\Roaming\\FileZilla\\recentservers.xml", "op": "read"}
+{"ts": 1760000000900, "pid": 8800, "guid": "vidar-1", "type": "dns_query", "qname": "steamcommunity.com", "answers": ["23.45.6.7"]}
+{"ts": 1760000001000, "pid": 8800, "guid": "vidar-1", "type": "net_connect", "proto": "tcp", "dst_ip": "23.45.6.7", "dst_port": 443, "src_port": 50000}
+{"ts": 1760000002500, "pid": 8800, "guid": "vidar-1", "type": "net_connect", "proto": "tcp", "dst_ip": "95.217.10.20", "dst_port": 443, "src_port": 50500}

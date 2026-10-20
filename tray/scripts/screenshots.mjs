@@ -1,0 +1,68 @@
+// Screenshots of the mock UI at 420x600 in light and dark.
+// Usage: npm run build:mock && npm run screenshots
+import { chromium } from "playwright";
+import { spawn } from "node:child_process";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const out = join(root, "screenshots");
+const port = 4174;
+const server = spawn("npx", ["vite", "preview", "--outDir", "dist-mock", "--port", String(port), "--strictPort"], { cwd: root, stdio: "ignore" });
+const base = `http://localhost:${port}/`;
+
+async function waitForServer() {
+  for (let i = 0; i < 60; i++) {
+    try {
+      if ((await fetch(base)).ok) return;
+    } catch {}
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error("preview server did not start");
+}
+
+const shots = [
+  // [name, query, after(page)]
+  ["status-attention", "tab=status&state=attention"],
+  ["status-protected", "tab=status&state=protected"],
+  ["status-isolated", "tab=status&state=isolated"],
+  ["status-degraded", "tab=status&state=degraded"],
+  ["status-offline", "tab=status&state=offline"],
+  ["status-unavailable", "tab=status&state=unavailable"],
+  ["status-quickcheck-running", "tab=status&state=protected", async (p) => { await p.getByRole("button", { name: "Run check" }).click(); await p.waitForTimeout(700); }],
+  ["status-quickcheck-done", "tab=status&state=protected", async (p) => { await p.getByRole("button", { name: "Run check" }).click(); await p.getByRole("status").waitFor(); await p.waitForTimeout(200); }],
+  ["activity", "tab=activity"],
+  ["activity-expanded", "tab=activity", async (p) => { await p.locator(".card__head").first().click(); await p.waitForTimeout(100); }],
+  ["activity-review-dialog", "tab=activity", async (p) => { await p.getByRole("button", { name: "Request review" }).first().click(); await p.locator("textarea").fill("This is the installer for SAP GUI from our vendor's portal. Finance needs it for month-end close."); await p.waitForTimeout(150); }],
+  ["activity-empty", "tab=activity&empty=1"],
+  ["activity-push-banner", "tab=activity&state=protected&push=0.4", async (p) => { await p.waitForTimeout(900); }],
+  ["help", "tab=help"],
+  ["help-notice", "tab=help", async (p) => { await p.locator("#h-notice").scrollIntoViewIfNeeded(); await p.waitForTimeout(100); }],
+];
+
+try {
+  await waitForServer();
+  // CHROMIUM_PATH lets you reuse an existing Chromium when `npx playwright install` is blocked.
+  const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
+  const only = process.argv[2];
+  for (const theme of ["light", "dark"]) {
+    const ctx = await browser.newContext({ viewport: { width: 420, height: 600 }, deviceScaleFactor: 2, colorScheme: theme, reducedMotion: "reduce" });
+    const page = await ctx.newPage();
+    for (const [name, q, after] of shots) {
+      if (only && !name.includes(only)) continue;
+      await page.goto(`${base}?${q}&theme=${theme}`);
+      await page.waitForSelector(".app");
+      await page.waitForTimeout(450);
+      await page.mouse.move(0, 599);
+      if (after) await after(page);
+      await page.mouse.move(0, 599);
+      const file = join(out, `${name}-${theme}.png`);
+      await page.screenshot({ path: file });
+      console.log("wrote", file);
+    }
+    await ctx.close();
+  }
+  await browser.close();
+} finally {
+  server.kill();
+}

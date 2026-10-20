@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Main window: read events from the backend; all agent access goes through app commands.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

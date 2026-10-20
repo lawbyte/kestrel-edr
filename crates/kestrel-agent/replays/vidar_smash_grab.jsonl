@@ -1,0 +1,48 @@
+{"ts":1792062000000,"pid":6320,"guid":"88a2d470927eb4f5e8be54f432cf849d","type":"file_access","path":"C:\\Users\\j.doe\\Downloads\\Adobe_Photoshop_2026_Full_Crack.zip","op":"create"}
+{"ts":1792062041000,"pid":5124,"guid":"b19483f83df0ca6de6a91076988d24bd","type":"file_access","path":"C:\\Users\\j.doe\\Downloads\\Adobe_Photoshop_2026_Full_Crack\\Setup.exe","op":"create"}
+{"ts":1792062052300,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"process_start","ppid":5124,"parent_guid":"b19483f83df0ca6de6a91076988d24bd","image":"C:\\Users\\j.doe\\Downloads\\Adobe_Photoshop_2026_Full_Crack\\Setup.exe","cmdline":"\"C:\\Users\\j.doe\\Downloads\\Adobe_Photoshop_2026_Full_Crack\\Setup.exe\"","user":"CORP\\j.doe","integrity":"medium","session_id":1,"signer":"Adobe Inc.","signed":"invalid","sha256":"3e5d8a91c07f4b26d18e9c3f5a7b0e2d4c6f8a1b3d5e7f9012a4c6e8b0d2f4a6","motw_zone":3,"file_size":787480576}
+{"ts":1792062053900,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"dns_query","qname":"api.telegram.org","answers":["149.154.167.220"]}
+{"ts":1792062053940,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"net_connect","proto":"tcp","dst_ip":"149.154.167.220","dst_port":443,"src_port":56857,"dst_host":"api.telegram.org","bytes_sent":588}
+{"ts":1792062055100,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"net_connect","proto":"tcp","dst_ip":"203.0.113.19","dst_port":443,"src_port":57023,"bytes_sent":930}
+{"ts":1792062056000,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\ProgramData\\XGBKJDHJKFHIJKDH","op":"create"}
+{"ts":1792062056150,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"net_connect","proto":"tcp","dst_ip":"203.0.113.19","dst_port":443,"src_port":57173,"bytes_sent":1402}
+{"ts":1792062056200,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\ProgramData\\XGBKJDHJKFHIJKDH\\sqlite3.dll","op":"create"}
+{"ts":1792062056280,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\ProgramData\\XGBKJDHJKFHIJKDH\\freebl3.dll","op":"create"}
+{"ts":1792062056360,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\ProgramData\\XGBKJDHJKFHIJKDH\\mozglue.dll","op":"create"}
+{"ts":1792062056440,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\ProgramData\\XGBKJDHJKFHIJKDH\\msvcp140.dll","op":"create"}
+{"ts":1792062056520,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\ProgramData\\XGBKJDHJKFHIJKDH\\nss3.dll","op":"create"}
+{"ts":1792062056600,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\ProgramData\\XGBKJDHJKFHIJKDH\\softokn3.dll","op":"create"}
+{"ts":1792062056680,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\ProgramData\\XGBKJDHJKFHIJKDH\\vcruntime140.dll","op":"create"}
+{"ts":1792062057100,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"image_load","path":"C:\\ProgramData\\XGBKJDHJKFHIJKDH\\mozglue.dll","signer":"Mozilla Corporation","signed":"invalid"}
+{"ts":1792062057130,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"image_load","path":"C:\\ProgramData\\XGBKJDHJKFHIJKDH\\nss3.dll","signer":"Mozilla Corporation","signed":"invalid"}
+{"ts":1792062057160,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"image_load","path":"C:\\ProgramData\\XGBKJDHJKFHIJKDH\\sqlite3.dll","signed":"unsigned"}
+{"ts":1792062057400,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\Users\\j.doe\\AppData\\Local\\Google\\Chrome\\User Data\\Local State","op":"read"}
+{"ts":1792062057428,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\Users\\j.doe\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data","op":"read"}
+{"ts":1792062057456,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"dpapi_unprotect","description":"Google Chrome"}
+{"ts":1792062057471,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\Users\\j.doe\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Network\\Cookies","op":"read"}
+{"ts":1792062057499,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\Users\\j.doe\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Web Data","op":"read"}
+{"ts":1792062057527,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\Users\\j.doe\\AppData\\Local\\Google\\Chrome\\User Data\\Profile 1\\Login Data","op":"read"}
+{"ts":1792062057555,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\Users\\j.doe\\AppData\\Roaming\\Mozilla\\Firefox\\Profiles\\x8k2m1qa.default-release\\logins.json","op":"read"}
+{"ts":1792062057583,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\Users\\j.doe\\AppData\\Roaming\\Mozilla\\Firefox\\Profiles\\x8k2m1qa.default-release\\key4.db","op":"read"}
+{"ts":1792062057611,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\Users\\j.doe\\AppData\\Roaming\\Mozilla\\Firefox\\Profiles\\x8k2m1qa.default-release\\cookies.sqlite","op":"read"}
+{"ts":1792062057639,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\Users\\j.doe\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Login Data","op":"read"}
+{"ts":1792062057667,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"dpapi_unprotect","description":"Microsoft Edge"}
+{"ts":1792062057682,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\Users\\j.doe\\AppData\\Roaming\\Exodus\\exodus.wallet\\seed.seco","op":"read"}
+{"ts":1792062057710,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\Users\\j.doe\\AppData\\Roaming\\Electrum\\wallets\\default_wallet","op":"read"}
+{"ts":1792062057738,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\Users\\j.doe\\AppData\\Roaming\\Telegram Desktop\\tdata\\key_datas","op":"read"}
+{"ts":1792062057766,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\Users\\j.doe\\AppData\\Roaming\\Telegram Desktop\\tdata\\D877F783D5D3EF8C\\maps","op":"read"}
+{"ts":1792062057794,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\Users\\j.doe\\AppData\\Roaming\\discord\\Local Storage\\leveldb\\000005.ldb","op":"read"}
+{"ts":1792062057822,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\Users\\j.doe\\AppData\\Roaming\\FileZilla\\recentservers.xml","op":"read"}
+{"ts":1792062057850,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\Users\\j.doe\\AppData\\Roaming\\FileZilla\\sitemanager.xml","op":"read"}
+{"ts":1792062057878,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\Users\\j.doe\\.aws\\credentials","op":"read"}
+{"ts":1792062057906,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\Users\\j.doe\\.ssh\\id_ed25519","op":"read"}
+{"ts":1792062057934,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\Program Files (x86)\\Steam\\config\\loginusers.vdf","op":"read"}
+{"ts":1792062058262,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"file_access","path":"C:\\ProgramData\\XGBKJDHJKFHIJKDH\\8E3K2LQZ.zip","op":"write"}
+{"ts":1792062059062,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"net_connect","proto":"tcp","dst_ip":"203.0.113.19","dst_port":443,"src_port":57589,"bytes_sent":5874213}
+{"ts":1792062059862,"pid":11020,"guid":"a3b075069b5b3c011eeeefbfc26b7244","type":"process_start","ppid":10244,"parent_guid":"057a58fbc46027bba057e481acd9b139","image":"C:\\Windows\\System32\\cmd.exe","cmdline":"\"C:\\Windows\\System32\\cmd.exe\" /c timeout /t 10 & rd /s /q \"C:\\ProgramData\\XGBKJDHJKFHIJKDH\" & del /f /q \"C:\\Users\\j.doe\\Downloads\\Adobe_Photoshop_2026_Full_Crack\\Setup.exe\" & exit","user":"CORP\\j.doe","integrity":"medium","session_id":1,"signer":"Microsoft Windows","signed":"valid","sha256":"07442caeec7e9ea8cff838f97a11f3c721e8b344d288c4848a8bbaa7470fb229"}
+{"ts":1792062059912,"pid":11064,"guid":"51a596576342f720ee5edd9e68ed54ba","type":"process_start","ppid":11020,"parent_guid":"a3b075069b5b3c011eeeefbfc26b7244","image":"C:\\Windows\\System32\\timeout.exe","cmdline":"timeout  /t 10","user":"CORP\\j.doe","integrity":"medium","session_id":1,"signer":"Microsoft Windows","signed":"valid","sha256":"a61650cf77725f311bacd45f403d52a8d2330855c877c50c7941bdb2b3b95134"}
+{"ts":1792062059962,"pid":10244,"guid":"057a58fbc46027bba057e481acd9b139","type":"process_stop","exit_code":0}
+{"ts":1792062069922,"pid":11064,"guid":"51a596576342f720ee5edd9e68ed54ba","type":"process_stop","exit_code":0}
+{"ts":1792062069962,"pid":11020,"guid":"a3b075069b5b3c011eeeefbfc26b7244","type":"file_access","path":"C:\\ProgramData\\XGBKJDHJKFHIJKDH\\nss3.dll","op":"delete"}
+{"ts":1792062070002,"pid":11020,"guid":"a3b075069b5b3c011eeeefbfc26b7244","type":"file_access","path":"C:\\Users\\j.doe\\Downloads\\Adobe_Photoshop_2026_Full_Crack\\Setup.exe","op":"delete"}
+{"ts":1792062070062,"pid":11020,"guid":"a3b075069b5b3c011eeeefbfc26b7244","type":"process_stop","exit_code":0}

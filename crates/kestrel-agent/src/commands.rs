@@ -1,0 +1,395 @@
+//! CLI command implementations (kept in the library so tests can drive them).
+
+use anyhow::{bail, Context, Result};
+use kestrel_common::tray::{TrayRequest, TrayResponse};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::agent::{self, Tuning};
+use crate::config::{self, AgentConfig};
+use crate::sim::{SimOptions, SimPlatform};
+use crate::store::{self, Store};
+
+#[derive(Debug, Clone, Default)]
+pub struct InstallOpts {
+    pub server: String,
+    pub ca: String,
+    pub token: String,
+    pub tags: Vec<String>,
+    pub server_name: Option<String>,
+    pub uninstall_token: Option<String>,
+    pub hostname: Option<String>,
+}
+
+/// Write `agent.toml` for a new install. Keeps an existing device's identity
+/// only when the server is unchanged.
+///
+/// The uninstall token is issued by the server at enrollment (M5,
+/// `EnrollResponse.uninstall_token`, stored as an Argon2id hash). An explicit
+/// `uninstall_token` (CLI / env, for servers that do not issue one) is still
+/// honoured; otherwise an existing hash from a previous install is kept until
+/// the server sends a new token. Callers must have secured the state directory
+/// first ([`crate::platform_win::secure_state_dir`]): a pre-existing
+/// `agent.toml` is only read when the directory was trustworthy.
+pub fn write_install_config(state_dir: &Path, o: &InstallOpts) -> Result<AgentConfig> {
+    config::split_host_port(&o.server)?;
+    let ca_pem = config::load_ca_arg(&o.ca)?;
+    let prev = AgentConfig::load(state_dir).ok();
+    let mut cfg = AgentConfig {
+        server: o.server.trim().to_string(),
+        server_name: o.server_name.clone().filter(|s| !s.is_empty()),
+        ca_pem,
+        device_id: None,
+        uninstall_token_hash: None,
+        pending_enroll_token: Some(o.token.trim().to_string()).filter(|t| !t.is_empty()),
+        tags: o.tags.clone(),
+        hostname: o.hostname.clone(),
+    };
+    if let Some(p) = &prev {
+        if p.server == cfg.server && p.ca_pem == cfg.ca_pem {
+            cfg.device_id = p.device_id;
+            cfg.uninstall_token_hash = p.uninstall_token_hash.clone();
+        }
+    }
+    if let Some(t) = o
+        .uninstall_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        cfg.set_uninstall_token(t)?;
+    }
+    cfg.save(state_dir)?;
+    Ok(cfg)
+}
+
+/// File holding a locally generated uninstall token (only when the server
+/// did not issue one). Lives in the SYSTEM/Administrators-only state dir and
+/// is removed as soon as a server-issued token replaces it.
+pub const LOCAL_UNINSTALL_TOKEN_FILE: &str = "uninstall-token.txt";
+
+/// After an install-time enrollment attempt: make sure an uninstall token
+/// exists. Never prints the token (MSI custom-action output can reach the
+/// MSI log); a locally generated one is written to
+/// [`LOCAL_UNINSTALL_TOKEN_FILE`] instead. Returns that file's path when a
+/// local token had to be generated.
+pub fn ensure_uninstall_token(state_dir: &Path) -> Result<Option<PathBuf>> {
+    let mut cfg = AgentConfig::load(state_dir)?;
+    if cfg.uninstall_token_hash.is_some() {
+        return Ok(None);
+    }
+    let t = config::random_token();
+    cfg.set_uninstall_token(&t)?;
+    let path = state_dir.join(LOCAL_UNINSTALL_TOKEN_FILE);
+    config::write_secret(
+        &path,
+        format!(
+            "{t}\n# Kestrel uninstall token generated locally because the server did not issue one.\n# It is replaced by the server-issued token at the next enrollment.\n"
+        )
+        .as_bytes(),
+    )?;
+    cfg.save(state_dir)?;
+    Ok(Some(path))
+}
+
+/// Enroll using the token in the config (or `token`), updating the config.
+pub async fn enroll(
+    state_dir: &Path,
+    token: Option<&str>,
+    hostname: &str,
+    os: kestrel_common::wire::OsInfo,
+) -> Result<uuid::Uuid> {
+    let mut cfg = AgentConfig::load(state_dir)?;
+    let token = match token {
+        Some(t) => t.to_string(),
+        None => cfg
+            .pending_enroll_token
+            .clone()
+            .context("no enrollment token given")?,
+    };
+    let er = crate::pki::enroll(state_dir, &mut cfg, &token, hostname, os).await?;
+    cfg.save(state_dir)?;
+    if !er.uninstall_token.trim().is_empty() {
+        let _ = std::fs::remove_file(state_dir.join(LOCAL_UNINSTALL_TOKEN_FILE));
+    }
+    Ok(er.device_id)
+}
+
+/// Best-effort hostname for enrollment before a platform exists.
+pub fn local_hostname() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+        })
+        .unwrap_or_else(|| "unknown-host".into())
+}
+
+/// Status JSON: tray status from the running agent + last heartbeat health from the DB.
+pub async fn status(state_dir: &Path) -> Result<serde_json::Value> {
+    let cfg = AgentConfig::load(state_dir).ok();
+    let live = crate::tray::query(state_dir, &TrayRequest::Status).await;
+    let db = Store::open(state_dir).ok();
+    let health: Option<kestrel_common::wire::AgentHealth> = db
+        .as_ref()
+        .and_then(|s| s.kv_get_json(store::KV_LAST_HEALTH).ok().flatten());
+    let last_hb = db
+        .as_ref()
+        .and_then(|s| s.kv_get_i64(store::KV_LAST_HEARTBEAT));
+    let policy: Option<kestrel_common::Policy> = db
+        .as_ref()
+        .and_then(|s| s.kv_get_json(store::KV_POLICY).ok().flatten());
+    let depth = db.as_ref().and_then(|s| s.depth().ok());
+    let (running, tray_status, err) = match live {
+        Ok(TrayResponse::Status(s)) => (true, Some(s), None),
+        Ok(other) => (true, None, Some(format!("unexpected response: {other:?}"))),
+        Err(e) => (false, None, Some(format!("{e:#}"))),
+    };
+    Ok(serde_json::json!({
+        "agent_version": kestrel_common::VERSION,
+        "running": running,
+        "error": err,
+        "server": cfg.as_ref().map(|c| c.server.clone()),
+        "device_id": cfg.as_ref().and_then(|c| c.device_id),
+        "enrolled": cfg.as_ref().map(|c| crate::pki::is_enrolled(state_dir, c)).unwrap_or(false),
+        "status": tray_status,
+        "policy": policy.map(|p| serde_json::json!({"id": p.id, "name": p.name, "version": p.version})),
+        "outbox_depth": depth,
+        "last_heartbeat": last_hb,
+        "health": health,
+    }))
+}
+
+#[derive(Debug, Clone)]
+pub struct SimulateOpts {
+    pub install: InstallOpts,
+    pub replay: PathBuf,
+    pub speed: f64,
+    pub hostname: String,
+    /// Exit this long after the replay completes (once the outbox drains).
+    pub exit_after_replay: Option<Duration>,
+}
+
+/// Configure (if needed), enroll, then run the full agent on `SimPlatform`.
+pub async fn simulate(state_dir: &Path, o: SimulateOpts, tuning: Tuning) -> Result<()> {
+    std::fs::create_dir_all(state_dir)?;
+    let need_cfg = match AgentConfig::load(state_dir) {
+        Ok(c) => c.server != o.install.server.trim() || !crate::pki::is_enrolled(state_dir, &c),
+        Err(_) => true,
+    };
+    if need_cfg {
+        let mut io = o.install.clone();
+        io.hostname = Some(o.hostname.clone());
+        if io.uninstall_token.is_none() {
+            io.uninstall_token = Some(config::random_token());
+        }
+        write_install_config(state_dir, &io)?;
+    }
+    let sim = Arc::new(SimPlatform::new(SimOptions {
+        state_dir: state_dir.to_path_buf(),
+        replay: Some(o.replay.clone()),
+        speed: o.speed,
+        hostname: o.hostname.clone(),
+        user: crate::sim::SIM_USER.into(),
+    }));
+    let cfg = AgentConfig::load(state_dir)?;
+    if !crate::pki::is_enrolled(state_dir, &cfg) {
+        use kestrel_platform::Platform;
+        match enroll(state_dir, None, &o.hostname, sim.os_info()).await {
+            Ok(id) => tracing::info!(device_id = %id, "enrolled"),
+            Err(e) => tracing::warn!(
+                "enrollment failed ({e:#}); the agent will keep retrying while protecting locally"
+            ),
+        }
+    }
+    let handle = agent::start(sim.clone(), state_dir.to_path_buf(), tuning).await?;
+    let cancel = handle.shutdown_token();
+    let core = handle.core.clone();
+    tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            let _ = tokio::signal::ctrl_c().await;
+            tracing::info!("interrupted; shutting down");
+            cancel.cancel();
+        }
+    });
+    if let Some(grace) = o.exit_after_replay {
+        let sim = sim.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            while !sim.replay_done() {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            let deadline = tokio::time::Instant::now() + grace;
+            // Let the batcher flush, then wait for the outbox to drain (or the grace to expire).
+            tokio::time::sleep(core.tuning.batch_max_delay + Duration::from_millis(500)).await;
+            while tokio::time::Instant::now() < deadline {
+                let only_hb = core
+                    .store
+                    .pending_after(0, 10)
+                    .map(|r| r.iter().all(|i| i.kind == "heartbeat"))
+                    .unwrap_or(false);
+                if core.outbox_depth() == 0 || (only_hb && core.is_connected()) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            tracing::info!(
+                replayed = sim.events_replayed(),
+                actions = sim.executed().len(),
+                outbox = core.outbox_depth(),
+                "replay complete; exiting"
+            );
+            cancel.cancel();
+        });
+    }
+    handle.wait().await;
+    Ok(())
+}
+
+/// Run the real (Windows) agent until `stop` fires.
+pub async fn run_real(
+    state_dir: PathBuf,
+    stop: impl std::future::Future<Output = ()>,
+) -> Result<()> {
+    // H4: verify (or re-create) the state directory before trusting anything in it.
+    let check = crate::platform_win::secure_state_dir(&state_dir)?;
+    if let Some(moved) = &check.moved_aside {
+        bail!(
+            "the state directory {} was not owned/protected by SYSTEM or Administrators; it was moved to {} and re-created empty. Reinstall the agent.",
+            state_dir.display(),
+            moved.display()
+        );
+    }
+    let cfg = AgentConfig::load(&state_dir).context("agent is not installed")?;
+    // The host name (re-resolved while isolated, H10) plus the IPs it has now.
+    let mut ips = vec![cfg.server.clone()];
+    ips.extend(server_ips_hint(&cfg).await);
+    let platform = crate::platform_win::platform(state_dir.clone(), ips)?;
+    let handle = agent::start(platform, state_dir, Tuning::default()).await?;
+    let cancel = handle.shutdown_token();
+    tokio::select! {
+        _ = stop => {}
+        _ = cancel.cancelled() => {}
+    }
+    handle.stop().await;
+    Ok(())
+}
+
+async fn server_ips_hint(cfg: &AgentConfig) -> Vec<String> {
+    let Ok((host, port)) = cfg.host_port() else {
+        return vec![];
+    };
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return vec![ip.to_string()];
+    }
+    let r = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::lookup_host((host.as_str(), port)),
+    )
+    .await;
+    match r {
+        Ok(Ok(a)) => a.map(|s| s.ip().to_string()).collect(),
+        _ => vec![],
+    }
+}
+
+/// Local break-glass (H10): release network isolation without the server.
+/// Requires the uninstall token and administrator rights (the WFP engine and
+/// the state directory are admin-only). The running service notices the
+/// release and does not re-apply the filters.
+pub fn release_isolation(state_dir: &Path, token: &str) -> Result<String> {
+    verify_uninstall(state_dir, token)?;
+    crate::platform_win::release_isolation_offline(state_dir)
+}
+
+pub fn verify_uninstall(state_dir: &Path, token: &str) -> Result<AgentConfig> {
+    let cfg = AgentConfig::load(state_dir).context("agent is not installed")?;
+    if !cfg.verify_uninstall_token(token) {
+        bail!("invalid uninstall token");
+    }
+    Ok(cfg)
+}
+
+/// `kestrel-agent sensors-test`: start only the platform sensors (Windows:
+/// ETW/event-log sessions via `WindowsPlatform::start_sensors`) for `seconds`
+/// and summarise what was observed. No server, no engine, no response — a CI
+/// smoke test that the sensors produce events on a real Windows host.
+///
+/// `ready` is called once the sensors are running (the smoke script waits for
+/// it before generating activity).
+pub async fn sensors_test(
+    state_dir: &Path,
+    seconds: u64,
+    ready: impl FnOnce(),
+) -> Result<serde_json::Value> {
+    use kestrel_common::EventData;
+    use kestrel_platform::SensorConfig;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    std::fs::create_dir_all(state_dir)?;
+    let platform = crate::platform_win::platform(state_dir.to_path_buf(), vec![])?;
+    let boot_id = platform.boot_id();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(65_536);
+    let cfg = SensorConfig {
+        boot_id,
+        dns: true,
+        script_content: true,
+        sysmon: false,
+        self_pid: std::process::id(),
+        enrich_tx: None,
+    };
+    let handle = platform
+        .start_sensors(cfg, tx)
+        .context("starting sensors")?;
+    ready();
+
+    let started = std::time::Instant::now();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds.max(1));
+    let mut counts: BTreeMap<&'static str, u64> = BTreeMap::new();
+    let mut images: BTreeSet<String> = BTreeSet::new();
+    let mut qnames: BTreeSet<String> = BTreeSet::new();
+    let mut total = 0u64;
+    while let Ok(Some(ev)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        total += 1;
+        *counts.entry(ev.kind().as_str()).or_default() += 1;
+        match &ev.data {
+            EventData::ProcessStart(p) if images.len() < 200 => {
+                let name = p
+                    .image
+                    .rsplit(['\\', '/'])
+                    .next()
+                    .unwrap_or(&p.image)
+                    .to_ascii_lowercase();
+                images.insert(name);
+            }
+            EventData::DnsQuery { qname, .. } if qnames.len() < 200 => {
+                qnames.insert(qname.to_ascii_lowercase());
+            }
+            _ => {}
+        }
+    }
+    let s = handle.stats();
+    handle.stop();
+    Ok(serde_json::json!({
+        "seconds": started.elapsed().as_secs_f64(),
+        "total": total,
+        "counts": counts,
+        "process_images": images,
+        "dns_qnames": qnames,
+        "stats": {
+            "etw_ok": s.etw_ok,
+            "events_lost": s.events_lost,
+            "buffers_lost": s.buffers_lost,
+            "events_total": s.events_total,
+            "sysmon_present": s.sysmon_present,
+            "dpapi_channel_enabled": s.dpapi_channel_enabled,
+            "amsi_ok": s.amsi_ok,
+        },
+    }))
+}

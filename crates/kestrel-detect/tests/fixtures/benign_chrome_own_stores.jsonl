@@ -1,0 +1,18 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer-0001", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\explorer.exe", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 7000, "guid": "chrome-main", "type": "process_start", "ppid": 4000, "image": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "cmdline": "\"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "parent_guid": "explorer-0001", "signer": "Google LLC"}
+{"ts": 1760000000050, "pid": 7300, "guid": "elev-ok", "type": "process_start", "ppid": 700, "image": "C:\\Program Files\\Google\\Chrome\\Application\\130.0.6723.92\\elevation_service.exe", "cmdline": "elevation_service.exe", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Google LLC"}
+{"ts": 1760000000100, "pid": 7000, "guid": "chrome-main", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Local State", "op": "read"}
+{"ts": 1760000000110, "pid": 7000, "guid": "chrome-main", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000000120, "pid": 7000, "guid": "chrome-main", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000000130, "pid": 7000, "guid": "chrome-main", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Web Data", "op": "read"}
+{"ts": 1760000000140, "pid": 7000, "guid": "chrome-main", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Local Extension Settings\\nkbihfbeogaeaoehlefnkodbefgpgknn\\000003.log", "op": "read"}
+{"ts": 1760000000150, "pid": 7000, "guid": "chrome-main", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000000200, "pid": 7000, "guid": "chrome-main", "type": "dpapi_unprotect", "description": "Google Chrome"}
+{"ts": 1760000000210, "pid": 7300, "guid": "elev-ok", "type": "dpapi_unprotect", "description": "Google Chrome"}
+{"ts": 1760000000300, "pid": 7000, "guid": "chrome-main", "type": "dns_query", "qname": "api.telegram.org", "answers": ["149.154.167.220"]}
+{"ts": 1760000000310, "pid": 7000, "guid": "chrome-main", "type": "net_connect", "proto": "tcp", "dst_ip": "149.154.167.220", "dst_port": 443, "src_port": 50310}
+{"ts": 1760000000400, "pid": 7000, "guid": "chrome-main", "type": "net_connect", "proto": "tcp", "dst_ip": "142.250.4.100", "dst_port": 443, "src_port": 50400, "dst_host": "www.google.com"}
+{"ts": 1760000000500, "pid": 7400, "guid": "tg", "type": "process_start", "ppid": 4000, "image": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\Telegram.exe", "cmdline": "Telegram.exe", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "parent_guid": "explorer-0001", "signer": "Telegram FZ-LLC"}
+{"ts": 1760000000510, "pid": 7400, "guid": "tg", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\key_datas", "op": "read"}
+{"ts": 1760000000520, "pid": 7400, "guid": "tg", "type": "dns_query", "qname": "api.telegram.org", "answers": ["149.154.167.220"]}
+{"ts": 1760000000530, "pid": 7400, "guid": "tg", "type": "net_connect", "proto": "tcp", "dst_ip": "149.154.167.220", "dst_port": 443, "src_port": 50530}

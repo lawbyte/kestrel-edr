@@ -1,0 +1,140 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux — lint, test, server image
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: kestrel
+          POSTGRES_PASSWORD: kestrel
+          POSTGRES_DB: kestrel_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U kestrel" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://kestrel:kestrel@localhost:5432/kestrel_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Licence policy (no GPL/AGPL/ELv2/SSPL)
+        run: cargo install cargo-deny --locked && cargo deny check licenses
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Console build + tests
+        working-directory: console
+        run: npm ci && npm run build && npm test --if-present -- --run
+      - name: Tray frontend build + tests
+        working-directory: tray
+        run: npm ci && npm run build && npm test --if-present -- --run
+      - name: End-to-end (server + simulated agent replays)
+        run: ./scripts/e2e.sh
+      - name: Server image
+        run: docker build -f deploy/Dockerfile -t kestrel-server:ci .
+
+  windows:
+    name: Windows — agent, tray, MSI
+    runs-on: windows-2025
+    env:
+      HAS_SIGNING: ${{ secrets.AZURE_CLIENT_ID != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install protoc
+        run: choco install protoc -y --no-progress
+      - name: Agent — test + release build
+        run: |
+          cargo test -p kestrel-common -p kestrel-detect -p kestrel-win -p kestrel-agent
+          cargo build -p kestrel-agent --release
+        env:
+          KESTREL_UPDATE_PUBKEY: ${{ secrets.KESTREL_UPDATE_PUBKEY }}
+      - name: ETW smoke test (agent in console mode, replays a benign process)
+        shell: pwsh
+        run: ./scripts/windows-smoke.ps1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Tray app (Tauri)
+        working-directory: tray
+        run: |
+          npm ci
+          npm run tauri build -- --no-bundle
+      - name: Stage binaries for signing
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist-sign | Out-Null
+          Copy-Item target/release/kestrel-agent.exe dist-sign/
+          Copy-Item tray/src-tauri/target/release/kestrel-tray.exe dist-sign/
+      - name: Sign executables (before packaging)
+        if: github.event_name == 'push' && env.HAS_SIGNING == 'true'
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.ARTIFACT_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}/dist-sign
+          files-folder-filter: exe
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: Build MSI (WiX v6)
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 6.*
+          wix extension add -g WixToolset.Util.wixext/6
+          $v = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages | Where-Object name -eq 'kestrel-agent' | Select-Object -ExpandProperty version
+          wix build installer/Kestrel.wxs -arch x64 -d Version=$v `
+            -d AgentExe=dist-sign/kestrel-agent.exe `
+            -d TrayExe=dist-sign/kestrel-tray.exe `
+            -ext WixToolset.Util.wixext -o KestrelAgent.msi
+      - name: Sign MSI
+        if: github.event_name == 'push' && env.HAS_SIGNING == 'true'
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.ARTIFACT_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}
+          files-folder-filter: msi
+          files-folder-recurse: false
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kestrel-windows
+          path: |
+            KestrelAgent.msi
+            dist-sign/kestrel-agent.exe
+            dist-sign/kestrel-tray.exe

@@ -1,0 +1,18 @@
+[package]
+name = "kestrel-detect"
+description = "Kestrel detection engine: process table, stealer behaviour rules, sequence correlation, Sigma evaluation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kestrel-common = { path = "../kestrel-common" }
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+# Sigma evaluation (MIT). Pure Rust, builds for x86_64-pc-windows-gnu.
+rsigma-eval = { version = "0.25", default-features = false }
+rsigma-parser = "0.25"
+# Case-insensitive multi-substring pre-filter for the file sensor hot path.
+aho-corasick = "1"

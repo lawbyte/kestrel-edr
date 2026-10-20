@@ -1,0 +1,33 @@
+{
+  "name": "kestrel-tray",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:mock": "vite --mode mock",
+    "build": "tsc -b && vite build",
+    "build:mock": "tsc -b && vite build --mode mock --outDir dist-mock",
+    "preview:mock": "vite preview --outDir dist-mock --port 4174",
+    "test": "vitest run",
+    "icons": "node scripts/gen-icons.mjs",
+    "screenshots": "node scripts/screenshots.mjs",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.12.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "@tauri-apps/cli": "^2.12.3",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react": "^4.7.0",
+    "playwright": "^1.64.1",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.4",
+    "vitest": "^3.2.7"
+  }
+}

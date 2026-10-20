@@ -1,0 +1,12 @@
+/target
+/target-*
+node_modules/
+dist/
+*.log
+.env
+/deploy/data/
+tray/src-tauri/target/
+
+# local-only agent context (secrets)
+CLAUDE.local.md
+.claude/settings.local.json

@@ -1,0 +1,98 @@
+import { describe, expect, it } from 'vitest'
+import type { Alert, KEvent, Policy, ResponseAction } from './types'
+import { DATA_CATEGORIES, EVENT_KINDS, SEVERITIES } from './types'
+import { DATA_CATEGORY_LABEL, DATA_CATEGORY_REMEDIATION, EVENT_KIND_LABEL, actionPrivilege, describeAction } from '@/lib/labels'
+import { pathClassOf } from '@/lib/pathclass'
+import { describeEvent } from '@/lib/events'
+import { diffJson } from '@/lib/diff'
+
+/**
+ * JSON exactly as serde produces it from kestrel-common (flattened Event with
+ * a `type` tag, `type`-tagged ResponseAction, snake_case enums). If these stop
+ * compiling, the TS mirror has drifted from the Rust types.
+ */
+const eventJson = `{"ts":1,"pid":4,"guid":"abc","type":"file_access","path":"C:\\\\x","op":"read"}`
+const alertJson = `{
+  "id":"7f1c0000-0000-4000-8000-000000000001","ts":1760000000000,"rule_id":"ST-04","rule_name":"Steal-then-send",
+  "rule_author":null,"severity":"critical","attack":["T1041"],"mode":"protect","summary":"x",
+  "process":{"guid":"g1","pid":10,"ppid":4,"parent_guid":null,"image":"C:\\\\Users\\\\a\\\\Downloads\\\\s.exe","cmdline":"s.exe","user":null,"integrity":"medium","start_ts":1,"exit_ts":null,"signer":null,"signed":"unsigned","sha256":null,"motw_zone":3,"file_size":10,"path_class":"downloads"},
+  "ancestry":[],"data_at_risk":["browser_passwords","crypto_wallet"],
+  "evidence":[{"ts":2,"pid":10,"guid":"g1","type":"net_connect","proto":"tcp","dst_ip":"1.2.3.4","dst_port":443,"src_port":5000,"dst_host":null,"bytes_sent":2048}],
+  "actions":[{"action":{"type":"kill_process","pid":10,"guid":"g1","tree":true},"ok":true,"detail":"","ts":3},{"action":{"type":"release_host"},"ok":true,"detail":"","ts":4}]
+}`
+
+describe('serde shape compatibility', () => {
+  it('parses a flattened Event', () => {
+    const e = JSON.parse(eventJson) as KEvent
+    expect(e.type).toBe('file_access')
+    if (e.type === 'file_access') expect(e.op).toBe('read')
+  })
+  it('parses an Alert with tagged evidence and actions', () => {
+    const a = JSON.parse(alertJson) as Alert
+    expect(a.process.path_class).toBe('downloads')
+    expect(a.evidence?.[0].type).toBe('net_connect')
+    expect(a.actions?.map((x) => x.action.type)).toEqual(['kill_process', 'release_host'])
+  })
+  it('covers every Rust enum variant with a label', () => {
+    expect(SEVERITIES).toHaveLength(5)
+    expect(DATA_CATEGORIES).toHaveLength(14)
+    for (const c of DATA_CATEGORIES) {
+      expect(DATA_CATEGORY_LABEL[c]).toBeTruthy()
+      expect(DATA_CATEGORY_REMEDIATION[c]).toBeTruthy()
+    }
+    expect(EVENT_KINDS).toHaveLength(14)
+    for (const k of EVENT_KINDS) expect(EVENT_KIND_LABEL[k]).toBeTruthy()
+  })
+  it('mirrors ResponseAction::privilege()', () => {
+    const cases: [ResponseAction, string][] = [
+      [{ type: 'kill_process', pid: 1 }, 'response.process'],
+      [{ type: 'quarantine_file', path: 'x' }, 'response.file'],
+      [{ type: 'isolate_host' }, 'response.network'],
+      [{ type: 'release_host' }, 'response.network'],
+      [{ type: 'collect_triage' }, 'response.collect'],
+      [{ type: 'apply_hardening' }, 'response.collect'],
+    ]
+    for (const [a, p] of cases) expect(actionPrivilege(a)).toBe(p)
+    expect(describeAction({ type: 'block_destination', ip: '1.2.3.4', port: 443 })).toBe('Block 1.2.3.4:443')
+  })
+  it('round-trips a Policy through JSON without loss', () => {
+    const p: Policy = {
+      id: 'p',
+      name: 'Default',
+      version: 1,
+      rules: { 'ST-01': 'audit' },
+      suspend_window_ms: 3000,
+      exclusions: [{ id: 'e', kind: 'signer', value: 'X', rule_id: null, expires_at: null, reason: '' }],
+      iocs: [{ id: 'i', kind: 'ip', value: '1.1.1.1', action: 'block', description: '' }],
+      hardening: { mode: 'audit', block_mshta: true, block_user_path_exec: false, disable_run_dialog: false, terminal_paste_warning: true, script_block_logging: true, dpapi_debug_channel: true, asr_rules: true, browser_disable_remote_debugging: true },
+      privacy: { capture_cmdline: true, hash_usernames: false, redact_path_prefixes: [], capture_dns: true, capture_script_content: true },
+      telemetry: { upload_events: true, event_kinds: [], max_outbox_mb: 1024 },
+      canaries: true,
+      branding: { org_name: 'o', it_contact: { name: '', email: '', phone: '', url: '' }, privacy_notice_md: '' },
+      exfil_domains: ['api.telegram.org'],
+      isolation_auto_release_hours: 72,
+      ioc_block_ttl_secs: 86400,
+      ioc_block_host_wide: false,
+    }
+    expect(diffJson(p, JSON.parse(JSON.stringify(p)))).toEqual([])
+    expect(diffJson(p, { ...p, rules: { 'ST-01': 'protect' } })).toEqual([{ path: 'rules.ST-01', before: 'audit', after: 'protect' }])
+  })
+})
+
+describe('PathClass::of port', () => {
+  it('matches the Rust unit test cases', () => {
+    expect(pathClassOf('C:\\Windows\\System32\\cmd.exe')).toBe('system')
+    expect(pathClassOf('C:\\Users\\a\\AppData\\Local\\Temp\\x.exe')).toBe('temp')
+    expect(pathClassOf('c:\\users\\a\\downloads\\setup.exe')).toBe('downloads')
+    expect(pathClassOf('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe')).toBe('program_files')
+    expect(pathClassOf('\\\\?\\C:\\Users\\a\\AppData\\Roaming\\z.exe')).toBe('user_writable')
+    expect(pathClassOf('\\\\server\\share\\a.exe')).toBe('external')
+  })
+})
+
+describe('describeEvent', () => {
+  it('renders process access with hex mask', () => {
+    const e: KEvent = { ts: 1, pid: 2, guid: 'g', type: 'process_access', target_pid: 9, target_image: 'C:\\x\\chrome.exe', granted_access: 0x143a }
+    expect(describeEvent(e)).toBe('Opened chrome.exe (PID 9) with access 0x143a')
+  })
+})

@@ -1,0 +1,81 @@
+# Kestrel EDR — self-hosted server.
+#   cp .env.example .env && edit .env
+#   docker compose up -d --build
+name: kestrel
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kestrel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-kestrel}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    shm_size: 256m
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8.14.39
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-kestrel}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-kestrel}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - chdata:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  kestrel-server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        BUILD_CONSOLE: ${BUILD_CONSOLE:-1}
+    image: kestrel-server:${KESTREL_IMAGE_TAG:-local}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      # Leave CLICKHOUSE_URL empty in .env to use the Postgres telemetry fallback (≤7 days).
+      CLICKHOUSE_URL: ${CLICKHOUSE_URL-http://clickhouse:8123}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - "${KESTREL_HTTPS_PORT:-443}:443"
+      - "${KESTREL_GRPC_PORT:-8443}:8443"
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "0"
+    volumes:
+      # Agent installers (KestrelAgent.msi + VERSION) served at https://<host>/downloads/
+      - ./installers:/app/agent:ro
+      # Optional operator TLS cert/key (set TLS_CERT=/app/tls/fullchain.pem, TLS_KEY=/app/tls/privkey.pem)
+      - ./tls:/app/tls:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsk", "https://127.0.0.1:443/api/healthz"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 10
+
+volumes:
+  pgdata:
+  chdata:

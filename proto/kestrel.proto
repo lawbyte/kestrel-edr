@@ -1,0 +1,43 @@
+// Kestrel agent <-> server protocol.
+//
+// Transport security:
+//   * Enroll: server-auth TLS only. The agent pins the server CA (shipped in
+//     the MSI install config) and authenticates with a one-time/limited-use
+//     enrollment token. It sends a CSR; the server returns a client cert with
+//     CN = device id, signed by the internal agent CA.
+//   * Connect: mutual TLS. The server derives the device id from the client
+//     certificate CN and rejects revoked serials.
+//
+// Payloads are JSON-serialised `kestrel_common::wire::{AgentPayload,
+// ServerPayload}` so agent and server share one Rust definition. Large
+// payloads (event batches) are zstd-compressed and flagged.
+syntax = "proto3";
+
+package kestrel.v1;
+
+service AgentService {
+  // Exchange an enrollment token + CSR for a client certificate.
+  rpc Enroll(EnrollEnvelope) returns (EnrollEnvelope);
+
+  // Long-lived bidirectional stream. First agent message must be Hello.
+  // Each side acknowledges the other's `seq` via an Ack payload so the
+  // agent's SQLite outbox only deletes what the server has durably stored.
+  rpc Connect(stream AgentEnvelope) returns (stream ServerEnvelope);
+}
+
+message EnrollEnvelope {
+  // JSON of EnrollRequest (request) or EnrollResponse (response).
+  bytes json = 1;
+}
+
+message AgentEnvelope {
+  uint64 seq = 1;
+  bool compressed = 2;   // payload is zstd(json)
+  bytes payload = 3;     // JSON of AgentPayload
+}
+
+message ServerEnvelope {
+  uint64 seq = 1;
+  bool compressed = 2;
+  bytes payload = 3;     // JSON of ServerPayload
+}

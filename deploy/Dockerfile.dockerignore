@@ -1,0 +1,11 @@
+# Build context is the repository root; keep it small.
+**/node_modules
+**/dist
+target
+target-*
+tray
+installer
+.git
+deploy/data
+deploy/.env
+**/*.log

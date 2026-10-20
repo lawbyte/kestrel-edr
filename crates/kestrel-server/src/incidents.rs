@@ -1,0 +1,1343 @@
+//! Alert storage, incident grouping, priority, titles, storylines and
+//! Huntress-style remediation checklists.
+
+use crate::{notify::NotifyJob, state::AppState};
+use kestrel_common::{
+    file_name_lower, now_ms, ActionOutcome, Alert, DataCategory, EventData, PathClass, ProcessInfo,
+    ResponseAction, Severity, SignatureState,
+};
+use sqlx::{Postgres, Transaction};
+use std::collections::{BTreeSet, HashSet};
+use uuid::Uuid;
+
+/// Alerts on the same device and process tree within this window share an incident.
+pub const GROUP_WINDOW_MS: i64 = 30 * 60 * 1000;
+pub const EXFIL_RULES: &[&str] = &["ST-04", "ST-14"];
+pub const COMMAND_TTL_MS: i64 = 7 * 86_400_000;
+
+pub fn severity_rank(s: Severity) -> i32 {
+    match s {
+        Severity::Info => 0,
+        Severity::Low => 1,
+        Severity::Medium => 2,
+        Severity::High => 3,
+        Severity::Critical => 4,
+    }
+}
+
+pub fn parse_severity(s: &str) -> Option<Severity> {
+    serde_json::from_value(serde_json::Value::String(s.to_ascii_lowercase())).ok()
+}
+
+fn is_system(p: &ProcessInfo) -> bool {
+    matches!(p.path_class, PathClass::System | PathClass::Windows)
+}
+
+/// Topmost non-system ancestor GUID (the alert's process if the whole chain is system).
+pub fn root_guid(alert: &Alert) -> String {
+    let mut root = alert.process.guid.0.clone();
+    let mut chain: Vec<&ProcessInfo> = vec![&alert.process];
+    chain.extend(alert.ancestry.iter());
+    for p in chain.iter() {
+        if !is_system(p) {
+            root = p.guid.0.clone();
+        }
+    }
+    root
+}
+
+pub fn describe_action(a: &ResponseAction) -> String {
+    match a {
+        ResponseAction::KillProcess { pid, tree, .. } => {
+            if *tree {
+                format!("killed process tree (pid {pid})")
+            } else {
+                format!("killed process (pid {pid})")
+            }
+        }
+        ResponseAction::SuspendProcess { pid, .. } => format!("suspended process (pid {pid})"),
+        ResponseAction::ResumeProcess { pid, .. } => format!("resumed process (pid {pid})"),
+        ResponseAction::QuarantineFile { path, .. } => format!("quarantined {path}"),
+        ResponseAction::RestoreFile { quarantine_id } => {
+            format!("restored quarantined file {quarantine_id}")
+        }
+        ResponseAction::DeleteQuarantined { quarantine_id } => {
+            format!("deleted quarantined file {quarantine_id}")
+        }
+        ResponseAction::BlockDestination { ip, port, .. } => match port {
+            Some(p) => format!("blocked destination {ip}:{p}"),
+            None => format!("blocked destination {ip}"),
+        },
+        ResponseAction::BlockImageNetwork { image, .. } => {
+            format!("blocked network access for {image}")
+        }
+        ResponseAction::IsolateHost { .. } => "isolated the host from the network".into(),
+        ResponseAction::ReleaseHost => "released host isolation".into(),
+        ResponseAction::ApplyHardening => "re-applied the hardening pack".into(),
+        ResponseAction::Scan { path } => match path {
+            Some(p) => format!("scanned {p}"),
+            None => "scanned running user-path executables".into(),
+        },
+        ResponseAction::CollectTriage => "collected a triage package".into(),
+    }
+}
+
+fn containing(a: &ResponseAction) -> bool {
+    matches!(
+        a,
+        ResponseAction::KillProcess { .. }
+            | ResponseAction::QuarantineFile { .. }
+            | ResponseAction::IsolateHost { .. }
+            | ResponseAction::BlockImageNetwork { .. }
+    )
+}
+
+pub const CONTAINING_TYPES: &[&str] = &[
+    "kill_process",
+    "quarantine_file",
+    "isolate_host",
+    "block_image_network",
+];
+
+fn path_phrase(pc: PathClass) -> &'static str {
+    match pc {
+        PathClass::Downloads => "from the Downloads folder",
+        PathClass::Temp => "from a temp folder",
+        PathClass::UserWritable => "from a user-writable folder",
+        PathClass::External => "from removable media or a network share",
+        PathClass::ProgramFiles => "from Program Files",
+        PathClass::System => "a Windows system binary",
+        PathClass::Windows => "from the Windows directory",
+        PathClass::Other => "from an unusual location",
+    }
+}
+
+fn signer_phrase(p: &ProcessInfo) -> String {
+    match (p.signed, p.signer.as_deref()) {
+        (SignatureState::Valid, Some(s)) => format!("signed by {s}"),
+        (SignatureState::Valid, None) => "validly signed".into(),
+        (SignatureState::Unsigned, _) => "unsigned".into(),
+        (SignatureState::Invalid, _) => "with an invalid signature".into(),
+        (SignatureState::Unknown, _) => "signature unknown".into(),
+    }
+}
+
+fn hhmmss(ts: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ts)
+        .map(|d| d.format("%H:%M:%S UTC").to_string())
+        .unwrap_or_default()
+}
+
+fn human_delta(ms: i64) -> String {
+    let s = ms / 1000;
+    if s < 60 {
+        format!("{s} s")
+    } else if s < 3600 {
+        format!("{} min {} s", s / 60, s % 60)
+    } else {
+        format!("{} h {} min", s / 3600, (s % 3600) / 60)
+    }
+}
+
+fn cat_str(c: &DataCategory) -> String {
+    serde_json::to_value(c)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default()
+}
+
+fn enum_str<T: serde::Serialize>(v: &T) -> String {
+    serde_json::to_value(v)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default()
+}
+
+/// Root process of the incident (from the alerts' process/ancestry chains).
+fn find_process<'a>(alerts: &'a [Alert], guid: &str) -> Option<&'a ProcessInfo> {
+    alerts
+        .iter()
+        .flat_map(|a| std::iter::once(&a.process).chain(a.ancestry.iter()))
+        .find(|p| p.guid.0 == guid)
+}
+
+pub struct Summary {
+    pub title: String,
+    pub severity: Severity,
+    pub priority: i32,
+    pub storyline: String,
+    pub rule_ids: Vec<String>,
+    pub attack: Vec<String>,
+    pub data_at_risk: Vec<String>,
+    pub user: Option<String>,
+    /// Non-system process the incident is about (for the "where did it come from" step).
+    pub origin_image: Option<String>,
+    pub first: i64,
+    pub last: i64,
+}
+
+/// Priority = max severity base + 10 (data at risk) + 10 (exfil-stage rule) + 5 (not contained), ≤ 100.
+pub fn priority(max_sev: Severity, any_data: bool, exfil: bool, contained: bool) -> i32 {
+    let mut p = max_sev.base_score() as i32;
+    if any_data {
+        p += 10;
+    }
+    if exfil {
+        p += 10;
+    }
+    if !contained {
+        p += 5;
+    }
+    p.min(100)
+}
+
+/// The most telling process of an incident: the root if it is not a system
+/// binary, else the first non-system actor (e.g. the payload behind a ClickFix
+/// explorer → powershell chain, which may only appear in a later alert's
+/// ancestry), else the most severe alert's actor.
+fn subject_process<'a>(
+    sorted: &[&'a Alert],
+    root_proc: Option<&'a ProcessInfo>,
+) -> Option<&'a ProcessInfo> {
+    root_proc
+        .filter(|p| !is_system(p))
+        .or_else(|| sorted.iter().map(|a| &a.process).find(|p| !is_system(p)))
+        .or_else(|| {
+            sorted
+                .iter()
+                .flat_map(|a| a.ancestry.iter())
+                .find(|p| !is_system(p))
+        })
+        .or_else(|| {
+            sorted
+                .iter()
+                .max_by_key(|a| severity_rank(a.severity))
+                .map(|a| &a.process)
+        })
+        .or(root_proc)
+}
+
+pub fn summarize(
+    alerts: &[Alert],
+    root: &str,
+    hostname: &str,
+    contained: bool,
+    blocked: &[String],
+) -> Summary {
+    let mut sorted: Vec<&Alert> = alerts.iter().collect();
+    sorted.sort_by_key(|a| a.ts);
+    let max_sev = sorted
+        .iter()
+        .map(|a| a.severity)
+        .max()
+        .unwrap_or(Severity::Low);
+    let rule_ids: BTreeSet<String> = sorted.iter().map(|a| a.rule_id.clone()).collect();
+    let attack: BTreeSet<String> = sorted
+        .iter()
+        .flat_map(|a| a.attack.iter().cloned())
+        .collect();
+    let cats: BTreeSet<DataCategory> = sorted
+        .iter()
+        .flat_map(|a| a.data_at_risk.iter().copied())
+        .collect();
+    let exfil = rule_ids.iter().any(|r| EXFIL_RULES.contains(&r.as_str()));
+    let tamper = rule_ids.iter().all(|r| r.starts_with("TP-"));
+    let root_proc = find_process(alerts, root).or_else(|| sorted.first().map(|a| &a.process));
+    let title_proc = subject_process(&sorted, root_proc);
+    let image_name = title_proc
+        .map(|p| file_name_lower(&p.image))
+        .unwrap_or_else(|| "unknown process".into());
+    let user = sorted
+        .iter()
+        .find_map(|a| a.process.user.clone())
+        .or_else(|| root_proc.and_then(|p| p.user.clone()));
+
+    let title = if tamper {
+        format!("Agent tampering on {hostname}")
+    } else if !cats.is_empty() {
+        format!("Credential theft by {image_name} on {hostname}")
+    } else if exfil {
+        format!("Possible data exfiltration by {image_name} on {hostname}")
+    } else {
+        let top = sorted
+            .iter()
+            .max_by_key(|a| severity_rank(a.severity))
+            .map(|a| a.rule_name.clone())
+            .unwrap_or_default();
+        format!("{top}: {image_name} on {hostname}")
+    };
+
+    // ---- storyline (markdown)
+    let mut s = String::new();
+    // The storyline opens with the same process the title names (the first
+    // non-system actor), not a system root such as explorer.exe.
+    if let Some(rp) = title_proc {
+        s.push_str(&format!(
+            "`{}` ({}, {}) ran on **{}**{}.",
+            file_name_lower(&rp.image),
+            path_phrase(rp.path_class),
+            signer_phrase(rp),
+            hostname,
+            user.as_ref()
+                .map(|u| format!(" as `{u}`"))
+                .unwrap_or_default()
+        ));
+        if let Some(parent) = sorted
+            .iter()
+            .flat_map(|a| a.ancestry.iter())
+            .find(|p| Some(&p.guid) == rp.parent_guid.as_ref())
+        {
+            s.push_str(&format!(
+                " It was started by `{}`.",
+                file_name_lower(&parent.image)
+            ));
+        }
+        if rp.motw_zone == Some(3) {
+            s.push_str(" The file carries a Mark-of-the-Web from the Internet zone.");
+        }
+        s.push_str("\n\n");
+    }
+    s.push_str("**What happened**\n\n");
+    let mut prev: Option<i64> = None;
+    for a in &sorted {
+        let delta = prev
+            .map(|p| format!(" (+{})", human_delta(a.ts - p)))
+            .unwrap_or_default();
+        s.push_str(&format!(
+            "- {}{} — {} *({} · {} · {})*\n",
+            hhmmss(a.ts),
+            delta,
+            a.summary.trim(),
+            a.rule_id,
+            a.severity.as_str(),
+            enum_str(&a.mode)
+        ));
+        // Notable network evidence
+        let mut seen = HashSet::new();
+        for e in &a.evidence {
+            if let EventData::NetConnect {
+                dst_ip,
+                dst_port,
+                dst_host,
+                bytes_sent,
+                ..
+            } = &e.data
+            {
+                if seen.insert(dst_ip.clone()) {
+                    let host = dst_host
+                        .as_ref()
+                        .map(|h| format!(" ({h})"))
+                        .unwrap_or_default();
+                    let bytes = bytes_sent
+                        .map(|b| format!(", {} sent", human_bytes(b)))
+                        .unwrap_or_default();
+                    s.push_str(&format!(
+                        "  - connected to `{dst_ip}:{dst_port}`{host}{bytes}\n"
+                    ));
+                }
+            }
+        }
+        prev = Some(a.ts);
+    }
+    if !cats.is_empty() {
+        s.push_str("\n**Data at risk:** ");
+        s.push_str(
+            &cats
+                .iter()
+                .map(|c| c.label())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        s.push_str(".\n");
+    }
+    let outcomes: Vec<&ActionOutcome> = sorted.iter().flat_map(|a| a.actions.iter()).collect();
+    s.push('\n');
+    if outcomes.is_empty() {
+        s.push_str("**Response:** no automatic response was taken (rules ran in Audit mode). Use the checklist to contain the threat.\n");
+    } else {
+        let ok: Vec<String> = outcomes
+            .iter()
+            .filter(|o| o.ok)
+            .map(|o| describe_action(&o.action))
+            .collect();
+        let failed: Vec<String> = outcomes
+            .iter()
+            .filter(|o| !o.ok)
+            .map(|o| describe_action(&o.action))
+            .collect();
+        if !ok.is_empty() {
+            s.push_str(&format!("**Response:** the agent {}.", join_human(&ok)));
+        }
+        if !failed.is_empty() {
+            s.push_str(&format!(" These actions failed: {}.", join_human(&failed)));
+        }
+        s.push('\n');
+    }
+    if !blocked.is_empty() {
+        s.push_str(&format!(
+            "\nBlocked destinations: {}.\n",
+            blocked.join(", ")
+        ));
+    }
+    if exfil || !cats.is_empty() {
+        s.push_str(
+            "\n> Treat this as a **probable credential compromise**: user-mode containment cannot guarantee nothing left the device. \
+             Revoke sessions and rotate the exposed secrets even if the process was killed.\n",
+        );
+    } else if !contained {
+        s.push_str("\nThe threat is **not contained** yet.\n");
+    }
+
+    let data: Vec<String> = cats.iter().map(cat_str).collect();
+    Summary {
+        title,
+        severity: max_sev,
+        priority: priority(max_sev, !data.is_empty(), exfil, contained),
+        storyline: s,
+        rule_ids: rule_ids.into_iter().collect(),
+        attack: attack.into_iter().collect(),
+        data_at_risk: data,
+        user,
+        origin_image: title_proc
+            .filter(|p| !is_system(p))
+            .map(|p| file_name_lower(&p.image)),
+        first: sorted.first().map(|a| a.ts).unwrap_or(0),
+        last: sorted.last().map(|a| a.ts).unwrap_or(0),
+    }
+}
+
+fn human_bytes(b: u64) -> String {
+    if b >= 1 << 20 {
+        format!("{:.1} MB", b as f64 / (1u64 << 20) as f64)
+    } else if b >= 1024 {
+        format!("{:.1} KB", b as f64 / 1024.0)
+    } else {
+        format!("{b} B")
+    }
+}
+
+fn join_human(items: &[String]) -> String {
+    match items.len() {
+        0 => String::new(),
+        1 => items[0].clone(),
+        n => format!("{} and {}", items[..n - 1].join(", "), items[n - 1]),
+    }
+}
+
+pub struct ChecklistSeed {
+    pub kind: &'static str,
+    pub text: String,
+    pub done: bool,
+    pub action: Option<ResponseAction>,
+    pub key: String,
+}
+
+/// Checklist items contributed by one alert.
+pub fn checklist_for(alert: &Alert, hostname: &str, user: Option<&str>) -> Vec<ChecklistSeed> {
+    let mut out = vec![];
+    let image = file_name_lower(&alert.process.image);
+    let done_keys: HashSet<String> = alert
+        .actions
+        .iter()
+        .filter(|o| o.ok)
+        .map(|o| action_key(&o.action))
+        .collect();
+
+    for o in alert.actions.iter() {
+        if o.ok {
+            out.push(ChecklistSeed {
+                kind: "done",
+                text: format!("Agent {} — {}", describe_action(&o.action), image),
+                done: true,
+                action: Some(o.action.clone()),
+                key: format!("done:{}", action_key(&o.action)),
+            });
+        } else {
+            out.push(ChecklistSeed {
+                kind: "approve",
+                text: format!(
+                    "Retry: {} (automatic attempt failed{})",
+                    describe_action(&o.action),
+                    if o.detail.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", o.detail)
+                    }
+                ),
+                done: false,
+                action: Some(o.action.clone()),
+                key: format!("approve:{}", action_key(&o.action)),
+            });
+        }
+    }
+
+    let tamper = alert.rule_id.starts_with("TP-");
+    if !tamper && !is_system(&alert.process) && severity_rank(alert.severity) >= 2 {
+        let kill = ResponseAction::KillProcess {
+            pid: alert.process.pid,
+            guid: Some(alert.process.guid.clone()),
+            tree: true,
+        };
+        if !alert
+            .actions
+            .iter()
+            .any(|o| o.ok && matches!(o.action, ResponseAction::KillProcess { .. }))
+        {
+            out.push(ChecklistSeed {
+                kind: "approve",
+                text: format!(
+                    "Kill {image} (pid {}) and its child processes",
+                    alert.process.pid
+                ),
+                done: false,
+                key: format!("approve:{}", action_key(&kill)),
+                action: Some(kill),
+            });
+        }
+        if alert.process.path_class.is_user_writable() {
+            let q = ResponseAction::QuarantineFile {
+                path: alert.process.image.clone(),
+                sha256: alert.process.sha256.clone(),
+            };
+            if !done_keys.contains(&action_key(&q)) {
+                out.push(ChecklistSeed {
+                    kind: "approve",
+                    text: format!("Quarantine {}", alert.process.image),
+                    done: false,
+                    key: format!("approve:{}", action_key(&q)),
+                    action: Some(q),
+                });
+            }
+        }
+    }
+    let mut ips = vec![];
+    for e in &alert.evidence {
+        if let EventData::NetConnect { dst_ip, .. } = &e.data {
+            if !ips.contains(dst_ip) && is_public_ip(dst_ip) {
+                ips.push(dst_ip.clone());
+            }
+        }
+    }
+    for ip in ips.into_iter().take(5) {
+        let b = ResponseAction::BlockDestination {
+            ip: ip.clone(),
+            port: None,
+            image: None,
+            ttl_secs: None,
+        };
+        let already = alert.actions.iter().any(|o| {
+            o.ok && matches!(&o.action, ResponseAction::BlockDestination { ip: i, .. } if *i == ip)
+        });
+        if !already {
+            out.push(ChecklistSeed {
+                kind: "approve",
+                text: format!("Block destination {ip}"),
+                done: false,
+                key: format!("approve:block:{ip}"),
+                action: Some(b),
+            });
+        }
+    }
+    let isolated = alert
+        .actions
+        .iter()
+        .any(|o| o.ok && matches!(o.action, ResponseAction::IsolateHost { .. }));
+    if !tamper && severity_rank(alert.severity) >= 3 && !isolated {
+        out.push(ChecklistSeed {
+            kind: "approve",
+            text: format!("Isolate host {hostname}"),
+            done: false,
+            key: "approve:isolate".into(),
+            action: Some(ResponseAction::IsolateHost { allow_ips: vec![] }),
+        });
+    }
+    // Release is only offered once the host is actually isolated (here by the
+    // agent; analyst isolations add it when their result comes back).
+    if isolated {
+        out.push(release_seed(hostname));
+    }
+    let who = user.map(|u| format!(" for {u}")).unwrap_or_default();
+    for c in &alert.data_at_risk {
+        out.push(ChecklistSeed {
+            kind: "manual",
+            text: format!("{}{who}", c.remediation()),
+            done: false,
+            action: None,
+            key: format!("manual:{}", crate::crypto::sha256_hex(c.remediation())),
+        });
+    }
+    if tamper {
+        out.push(ChecklistSeed {
+            kind: "manual",
+            text: format!("Check that the Kestrel agent on {hostname} is running and healthy, and find out who changed it"),
+            done: false,
+            action: None,
+            key: "manual:tamper".into(),
+        });
+    }
+    // The "where did it come from" step is maintained per incident by
+    // `recompute_incident` (it must name the incident's non-system subject).
+    out
+}
+
+pub fn release_seed(hostname: &str) -> ChecklistSeed {
+    ChecklistSeed {
+        kind: "approve",
+        text: format!("Release isolation of {hostname} once every step above is complete"),
+        done: false,
+        key: "approve:release".into(),
+        action: Some(ResponseAction::ReleaseHost),
+    }
+}
+
+pub fn origin_seed(image: &str, user: Option<&str>) -> ChecklistSeed {
+    ChecklistSeed {
+        kind: "manual",
+        text: format!(
+            "Ask {} where {image} came from (download link, email, chat) and block that source",
+            user.unwrap_or("the user")
+        ),
+        done: false,
+        action: None,
+        key: "manual:origin".into(),
+    }
+}
+
+fn is_public_ip(ip: &str) -> bool {
+    match ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => {
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast())
+        }
+        Ok(std::net::IpAddr::V6(v6)) => {
+            !(v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xfe00) == 0xfc00)
+        }
+        Err(_) => false,
+    }
+}
+
+fn action_key(a: &ResponseAction) -> String {
+    match a {
+        ResponseAction::KillProcess { guid, pid, .. } => {
+            format!(
+                "kill:{}",
+                guid.as_ref()
+                    .map(|g| g.0.clone())
+                    .unwrap_or_else(|| pid.to_string())
+            )
+        }
+        ResponseAction::QuarantineFile { path, .. } => {
+            format!("quarantine:{}", path.to_ascii_lowercase())
+        }
+        ResponseAction::BlockDestination { ip, .. } => format!("block:{ip}"),
+        ResponseAction::IsolateHost { .. } => "isolate".into(),
+        ResponseAction::ReleaseHost => "release".into(),
+        other => format!(
+            "{}:{}",
+            other.name(),
+            crate::crypto::sha256_hex(serde_json::to_vec(other).unwrap_or_default())
+        ),
+    }
+}
+
+pub struct IngestOutcome {
+    pub incident_id: Option<Uuid>,
+    pub incident_created: bool,
+    pub duplicate: bool,
+}
+
+/// Store an alert, attach it to an incident, refresh the incident and its checklist.
+pub async fn ingest_alert(
+    state: &AppState,
+    device_id: Uuid,
+    alert: Alert,
+) -> anyhow::Result<IngestOutcome> {
+    let now = now_ms();
+    let root = root_guid(&alert);
+    let mut tx = state.db.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        .bind(format!("incident:{device_id}"))
+        .execute(&mut *tx)
+        .await?;
+    let (hostname, logged_on): (String, Option<String>) =
+        sqlx::query_as("SELECT hostname, logged_on_user FROM devices WHERE id = $1")
+            .bind(device_id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+    let inserted = sqlx::query(
+        "INSERT INTO alerts (id, device_id, ts, rule_id, rule_name, rule_author, severity, severity_rank, attack, mode, summary, \
+         process_guid, root_guid, image, sha256, signer, user_name, data_at_risk, actions, body, received_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(alert.id)
+    .bind(device_id)
+    .bind(alert.ts)
+    .bind(&alert.rule_id)
+    .bind(&alert.rule_name)
+    .bind(&alert.rule_author)
+    .bind(alert.severity.as_str())
+    .bind(severity_rank(alert.severity))
+    .bind(&alert.attack)
+    .bind(enum_str(&alert.mode))
+    .bind(&alert.summary)
+    .bind(&alert.process.guid.0)
+    .bind(&root)
+    .bind(&alert.process.image)
+    .bind(alert.process.sha256.as_ref().map(|s| s.to_ascii_lowercase()))
+    .bind(&alert.process.signer)
+    .bind(&alert.process.user)
+    .bind(alert.data_at_risk.iter().map(cat_str).collect::<Vec<_>>())
+    .bind(serde_json::to_value(&alert.actions)?)
+    .bind(serde_json::to_value(&alert)?)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if inserted == 0 {
+        tx.commit().await?;
+        return Ok(IngestOutcome {
+            incident_id: None,
+            incident_created: false,
+            duplicate: true,
+        });
+    }
+
+    // Same root tree, or an open incident rooted at one of this process's
+    // ancestors (e.g. ClickFix: explorer.exe RunMRU → powershell.exe → payload,
+    // where explorer/powershell are system-path and would otherwise each get
+    // their own incident). An exact root match wins.
+    let mut chain: Vec<String> = vec![root.clone(), alert.process.guid.0.clone()];
+    chain.extend(alert.ancestry.iter().map(|p| p.guid.0.clone()));
+    chain.dedup();
+    let existing: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM incidents WHERE device_id = $1 AND root_guid = ANY($5) AND status IN ('open','in_progress') \
+         AND $3 BETWEEN first_alert_at - $4 AND last_alert_at + $4 \
+         ORDER BY (root_guid = $2) DESC, last_alert_at DESC LIMIT 1",
+    )
+    .bind(device_id)
+    .bind(&root)
+    .bind(alert.ts)
+    .bind(GROUP_WINDOW_MS)
+    .bind(&chain)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (incident_id, created) = match existing {
+        Some((id,)) => (id, false),
+        None => {
+            let id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO incidents (id, title, severity, severity_rank, priority, status, device_id, root_guid, user_name, \
+                 first_alert_at, last_alert_at, created_at, updated_at) VALUES ($1,'',$2,$3,0,'open',$4,$5,$6,$7,$7,$8,$8)",
+            )
+            .bind(id)
+            .bind(alert.severity.as_str())
+            .bind(severity_rank(alert.severity))
+            .bind(device_id)
+            .bind(&root)
+            .bind(alert.process.user.clone().or(logged_on.clone()))
+            .bind(alert.ts)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+            (id, true)
+        }
+    };
+    sqlx::query("UPDATE alerts SET incident_id = $2 WHERE id = $1")
+        .bind(alert.id)
+        .bind(incident_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // Automatic actions become ResponseActionRows with requested_by = null.
+    for o in &alert.actions {
+        sqlx::query(
+            "INSERT INTO response_actions (id, device_id, incident_id, action, action_type, status, requested_by, comment, \
+             created_at, sent_at, delivered_at, completed_at, expires_at, result_detail, artifact) \
+             VALUES ($1,$2,$3,$4,$5,$6,NULL,$7,$8,$8,$8,$8,$8,$9,$10)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(device_id)
+        .bind(incident_id)
+        .bind(serde_json::to_value(&o.action)?)
+        .bind(o.action.name())
+        .bind(if o.ok { "succeeded" } else { "failed" })
+        .bind(format!("Automatic response by rule {}", alert.rule_id))
+        .bind(o.ts)
+        .bind(&o.detail)
+        .bind(&o.artifact)
+        .execute(&mut *tx)
+        .await?;
+        if o.ok {
+            if let ResponseAction::QuarantineFile { path, sha256 } = &o.action {
+                upsert_quarantine(
+                    &mut tx,
+                    device_id,
+                    Some(alert.id),
+                    path,
+                    sha256.as_deref(),
+                    o.artifact.as_deref(),
+                    &o.detail,
+                )
+                .await?;
+            }
+        }
+    }
+
+    sqlx::query("INSERT INTO incident_activity (incident_id, ts, kind, title, detail) VALUES ($1,$2,'alert',$3,$4)")
+        .bind(incident_id)
+        .bind(alert.ts)
+        .bind(format!("{} ({})", alert.rule_name, alert.rule_id))
+        .bind(&alert.summary)
+        .execute(&mut *tx)
+        .await?;
+
+    let user = alert.process.user.clone().or(logged_on);
+    for seed in checklist_for(&alert, &hostname, user.as_deref()) {
+        insert_checklist(&mut tx, incident_id, &seed).await?;
+    }
+    for o in alert.actions.iter().filter(|o| o.ok) {
+        supersede_approvals(&mut tx, incident_id, &o.action).await?;
+    }
+    count_ioc_hits(&mut tx, &alert).await?;
+    recompute_incident(&mut tx, incident_id).await?;
+    tx.commit().await?;
+
+    state.publish("alert", alert.id, "created");
+    state.publish(
+        "incident",
+        incident_id,
+        if created { "created" } else { "updated" },
+    );
+    state.notifier.submit(NotifyJob {
+        alert: alert.clone(),
+        device_id,
+        hostname,
+        incident_id,
+        incident_created: created,
+    });
+    Ok(IngestOutcome {
+        incident_id: Some(incident_id),
+        incident_created: created,
+        duplicate: false,
+    })
+}
+
+pub async fn insert_checklist(
+    tx: &mut Transaction<'_, Postgres>,
+    incident_id: Uuid,
+    seed: &ChecklistSeed,
+) -> anyhow::Result<()> {
+    let base = match seed.kind {
+        "done" => 0,
+        "approve" => 1_000_000,
+        _ => 2_000_000,
+    };
+    sqlx::query(
+        "INSERT INTO incident_checklist (id, incident_id, position, kind, text, done, action, dedupe_key, done_at) \
+         VALUES ($1, $2, $3 + (SELECT count(*) FROM incident_checklist WHERE incident_id = $2), $4, $5, $6, $7, $8, $9) \
+         ON CONFLICT (incident_id, dedupe_key) DO NOTHING",
+    )
+    .bind(Uuid::new_v4())
+    .bind(incident_id)
+    .bind(base)
+    .bind(seed.kind)
+    .bind(&seed.text)
+    .bind(seed.done)
+    .bind(seed.action.as_ref().map(serde_json::to_value).transpose()?)
+    .bind(&seed.key)
+    .bind(if seed.done { Some(now_ms()) } else { None })
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+fn id_chars(s: &str) -> String {
+    s.chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect()
+}
+
+/// An action that already succeeded closes the matching one-click approval.
+pub async fn supersede_approvals(
+    tx: &mut Transaction<'_, Postgres>,
+    incident_id: Uuid,
+    action: &ResponseAction,
+) -> anyhow::Result<()> {
+    // Kill approvals match any process of the incident; others match exactly.
+    let (cond, key) = match action {
+        ResponseAction::KillProcess { .. } => {
+            ("starts_with(dedupe_key, $2)", "approve:kill:".to_string())
+        }
+        other => ("dedupe_key = $2", format!("approve:{}", action_key(other))),
+    };
+    sqlx::query(&format!(
+        "UPDATE incident_checklist SET done = true, done_at = $3 WHERE incident_id = $1 AND kind = 'approve' AND NOT done AND {cond}"
+    ))
+    .bind(incident_id)
+    .bind(key)
+    .bind(now_ms())
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Parse the quarantine id an agent reports in `ActionOutcome.detail`. The agent
+/// writes `quarantined <path> as <id> (…)` or `already quarantined as <id>; …`;
+/// `{"quarantine_id": "..."}` JSON, `quarantine_id=<id>` and a bare id are accepted too.
+pub fn quarantine_id_from_detail(detail: &str, path: &str, fallback_seed: &str) -> String {
+    for marker in [format!("{path} as "), "already quarantined as ".to_string()] {
+        if let Some(i) = detail.find(&marker) {
+            let id = id_chars(&detail[i + marker.len()..]);
+            if !id.is_empty() {
+                return id;
+            }
+        }
+    }
+    if detail.starts_with("quarantined ") || detail.contains(": quarantined ") {
+        if let Some(i) = detail.rfind(" as ") {
+            let id = id_chars(&detail[i + 4..]);
+            if !id.is_empty() {
+                return id;
+            }
+        }
+    }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(detail) {
+        if let Some(id) = v.get("quarantine_id").and_then(|x| x.as_str()) {
+            return id.to_string();
+        }
+    }
+    if let Some(rest) = detail.split("quarantine_id=").nth(1) {
+        let id: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if !id.is_empty() {
+            return id;
+        }
+    }
+    let d = detail.trim();
+    if !d.is_empty()
+        && d.len() <= 64
+        && d.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return d.to_string();
+    }
+    crate::crypto::sha256_hex(fallback_seed)[..32].to_string()
+}
+
+/// Quarantine id of a successful `QuarantineFile`: the structured
+/// `ActionOutcome.artifact` when the agent sent one, else parsed from `detail`.
+pub fn quarantine_id(artifact: Option<&str>, detail: &str, path: &str, seed: &str) -> String {
+    if let Some(a) = artifact.map(str::trim) {
+        let id = id_chars(a);
+        if !id.is_empty() && id.len() == a.len() && id.len() <= 128 {
+            return id;
+        }
+    }
+    quarantine_id_from_detail(detail, path, seed)
+}
+
+pub async fn upsert_quarantine(
+    tx: &mut Transaction<'_, Postgres>,
+    device_id: Uuid,
+    alert_id: Option<Uuid>,
+    path: &str,
+    sha256: Option<&str>,
+    artifact: Option<&str>,
+    detail: &str,
+) -> anyhow::Result<()> {
+    let id = quarantine_id(
+        artifact,
+        detail,
+        path,
+        &format!("{device_id}|{path}|{}", sha256.unwrap_or("")),
+    );
+    let now = now_ms();
+    sqlx::query(
+        "INSERT INTO quarantine_items (id, device_id, sha256, original_path, alert_id, state, created_at, updated_at) \
+         VALUES ($1,$2,$3,$4,$5,'held',$6,$6) ON CONFLICT (id) DO UPDATE SET state = 'held', updated_at = EXCLUDED.updated_at",
+    )
+    .bind(id)
+    .bind(device_id)
+    .bind(sha256.map(|s| s.to_ascii_lowercase()))
+    .bind(path)
+    .bind(alert_id)
+    .bind(now)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn count_ioc_hits(tx: &mut Transaction<'_, Postgres>, alert: &Alert) -> anyhow::Result<()> {
+    let mut values: Vec<String> = vec![];
+    if let Some(h) = &alert.process.sha256 {
+        values.push(h.to_ascii_lowercase());
+    }
+    if let Some(s) = &alert.process.signer {
+        values.push(s.to_ascii_lowercase());
+    }
+    for e in &alert.evidence {
+        match &e.data {
+            EventData::NetConnect {
+                dst_ip, dst_host, ..
+            } => {
+                values.push(dst_ip.to_ascii_lowercase());
+                if let Some(h) = dst_host {
+                    values.push(h.to_ascii_lowercase());
+                }
+            }
+            EventData::DnsQuery { qname, .. } => values.push(qname.to_ascii_lowercase()),
+            EventData::ProcessStart(p) => {
+                if let Some(h) = &p.sha256 {
+                    values.push(h.to_ascii_lowercase());
+                }
+            }
+            _ => {}
+        }
+    }
+    if values.is_empty() {
+        return Ok(());
+    }
+    values.sort();
+    values.dedup();
+    sqlx::query("UPDATE iocs SET hits = hits + 1 WHERE lower(value) = ANY($1)")
+        .bind(&values)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Recompute aggregates, title, priority and storyline from the incident's alerts.
+pub async fn recompute_incident(
+    tx: &mut Transaction<'_, Postgres>,
+    incident_id: Uuid,
+) -> anyhow::Result<()> {
+    let bodies: Vec<(serde_json::Value,)> =
+        sqlx::query_as("SELECT body FROM alerts WHERE incident_id = $1 ORDER BY ts")
+            .bind(incident_id)
+            .fetch_all(&mut **tx)
+            .await?;
+    let alerts: Vec<Alert> = bodies
+        .into_iter()
+        .filter_map(|(b,)| serde_json::from_value(b).ok())
+        .collect();
+    if alerts.is_empty() {
+        return Ok(());
+    }
+    let (root, hostname, user_name): (String, String, Option<String>) = sqlx::query_as(
+        "SELECT i.root_guid, d.hostname, i.user_name FROM incidents i JOIN devices d ON d.id = i.device_id WHERE i.id = $1",
+    )
+    .bind(incident_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let (contained,): (bool,) = sqlx::query_as(
+        "SELECT EXISTS(SELECT 1 FROM response_actions WHERE incident_id = $1 AND status = 'succeeded' AND action_type = ANY($2))",
+    )
+    .bind(incident_id)
+    .bind(CONTAINING_TYPES.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    .fetch_one(&mut **tx)
+    .await?;
+    let blocked: Vec<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT action FROM response_actions WHERE incident_id = $1 AND status = 'succeeded' AND action_type = 'block_destination'",
+    )
+    .bind(incident_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let blocked: Vec<String> = blocked
+        .into_iter()
+        .filter_map(|(a,)| a.get("ip").and_then(|i| i.as_str()).map(String::from))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let contained = contained
+        || alerts
+            .iter()
+            .flat_map(|a| a.actions.iter())
+            .any(|o| o.ok && containing(&o.action));
+    let s = summarize(&alerts, &root, &hostname, contained, &blocked);
+    if let Some(img) = &s.origin_image {
+        if alerts.iter().any(|a| a.rule_id.starts_with("ST-")) {
+            let seed = origin_seed(img, s.user.as_deref().or(user_name.as_deref()));
+            insert_checklist(tx, incident_id, &seed).await?;
+            // Keep the text on the incident's subject as later alerts refine it.
+            sqlx::query("UPDATE incident_checklist SET text = $3 WHERE incident_id = $1 AND dedupe_key = $2 AND NOT done")
+                .bind(incident_id)
+                .bind(&seed.key)
+                .bind(&seed.text)
+                .execute(&mut **tx)
+                .await?;
+        }
+    }
+    sqlx::query(
+        "UPDATE incidents SET title = $2, severity = $3, severity_rank = $4, priority = $5, storyline = $6, alert_count = $7, \
+         rule_ids = $8, attack = $9, data_at_risk = $10, contained = $11, first_alert_at = $12, last_alert_at = $13, \
+         user_name = COALESCE(user_name, $14), updated_at = $15 WHERE id = $1",
+    )
+    .bind(incident_id)
+    .bind(&s.title)
+    .bind(s.severity.as_str())
+    .bind(severity_rank(s.severity))
+    .bind(s.priority)
+    .bind(&s.storyline)
+    .bind(alerts.len() as i32)
+    .bind(&s.rule_ids)
+    .bind(&s.attack)
+    .bind(&s.data_at_risk)
+    .bind(contained)
+    .bind(s.first)
+    .bind(s.last)
+    .bind(s.user.or(user_name))
+    .bind(now_ms())
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Server-side synthetic process for tamper alerts raised from heartbeat analysis.
+pub fn agent_process(now: i64) -> ProcessInfo {
+    ProcessInfo {
+        guid: kestrel_common::ProcessGuid("kestrel-agent".into()),
+        pid: 0,
+        ppid: 0,
+        parent_guid: None,
+        image: r"C:\Program Files\Kestrel\kestrel-agent.exe".into(),
+        cmdline: String::new(),
+        user: Some("NT AUTHORITY\\SYSTEM".into()),
+        integrity: None,
+        start_ts: now,
+        exit_ts: None,
+        signer: None,
+        signed: SignatureState::Unknown,
+        sha256: None,
+        motw_zone: None,
+        file_size: None,
+        path_class: PathClass::ProgramFiles,
+    }
+}
+
+pub fn server_tamper_alert(
+    rule_id: &str,
+    name: &str,
+    severity: Severity,
+    summary: String,
+) -> Alert {
+    let now = now_ms();
+    Alert {
+        id: Uuid::new_v4(),
+        ts: now,
+        rule_id: rule_id.into(),
+        rule_name: name.into(),
+        rule_author: Some("Kestrel server".into()),
+        severity,
+        attack: vec!["T1562.001".into()],
+        mode: kestrel_common::RuleMode::Audit,
+        summary,
+        process: agent_process(now),
+        ancestry: vec![],
+        data_at_risk: vec![],
+        evidence: vec![],
+        actions: vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kestrel_common::{Event, ProcessGuid, RuleMode};
+
+    fn proc(guid: &str, image: &str, parent: Option<&str>) -> ProcessInfo {
+        ProcessInfo {
+            guid: ProcessGuid(guid.into()),
+            pid: 100,
+            ppid: 1,
+            parent_guid: parent.map(|p| ProcessGuid(p.into())),
+            image: image.into(),
+            cmdline: image.into(),
+            user: Some("CORP\\alice".into()),
+            integrity: None,
+            start_ts: 1,
+            exit_ts: None,
+            signer: None,
+            signed: SignatureState::Unsigned,
+            sha256: Some("AB".into()),
+            motw_zone: Some(3),
+            file_size: None,
+            path_class: PathClass::of(image),
+        }
+    }
+
+    pub fn sample_alert(rule: &str, sev: Severity) -> Alert {
+        Alert {
+            id: Uuid::new_v4(),
+            ts: 1_760_000_000_000,
+            rule_id: rule.into(),
+            rule_name: "Browser credential store read".into(),
+            rule_author: None,
+            severity: sev,
+            attack: vec!["T1555.003".into()],
+            mode: RuleMode::Protect,
+            summary: "setup_x64.exe read Chrome Login Data".into(),
+            process: proc("p3", r"C:\Windows\System32\cmd.exe", Some("p2")),
+            ancestry: vec![
+                proc("p2", r"C:\Users\alice\Downloads\setup_x64.exe", Some("p1")),
+                proc("p1", r"C:\Windows\explorer.exe", None),
+            ],
+            data_at_risk: vec![DataCategory::BrowserPasswords],
+            evidence: vec![Event {
+                ts: 1_760_000_000_000,
+                pid: 100,
+                guid: ProcessGuid("p3".into()),
+                data: EventData::NetConnect {
+                    proto: kestrel_common::NetProto::Tcp,
+                    dst_ip: "203.0.113.7".into(),
+                    dst_port: 443,
+                    src_port: 5000,
+                    dst_host: Some("api.telegram.org".into()),
+                    bytes_sent: Some(2_200_000),
+                },
+            }],
+            actions: vec![],
+        }
+    }
+
+    #[test]
+    fn root_is_topmost_non_system() {
+        let a = sample_alert("ST-04", Severity::High);
+        assert_eq!(root_guid(&a), "p2");
+        let mut sys = a.clone();
+        sys.ancestry = vec![];
+        assert_eq!(root_guid(&sys), "p3");
+    }
+
+    #[test]
+    fn quarantine_ids() {
+        let p = r"C:\Users\a b\x as y.exe";
+        assert_eq!(
+            quarantine_id_from_detail(
+                &format!("quarantined {p} as 0f3a-12 (sha256 ab, 3 bytes); ok"),
+                p,
+                "s"
+            ),
+            "0f3a-12"
+        );
+        assert_eq!(
+            quarantine_id_from_detail("already quarantined as q-0002; same hash", p, "s"),
+            "q-0002"
+        );
+        assert_eq!(
+            quarantine_id_from_detail(&format!("simulated: quarantined {p} as q-0001"), p, "s"),
+            "q-0001"
+        );
+        assert_eq!(
+            quarantine_id_from_detail(r#"{"quarantine_id":"abc"}"#, p, "s"),
+            "abc"
+        );
+        assert_eq!(quarantine_id_from_detail("", p, "s").len(), 32);
+    }
+
+    #[test]
+    fn priority_model() {
+        assert_eq!(priority(Severity::High, true, true, false), 95);
+        assert_eq!(priority(Severity::Critical, true, true, false), 100);
+        assert_eq!(priority(Severity::Medium, false, false, true), 45);
+    }
+
+    #[test]
+    fn title_and_checklist() {
+        let a = sample_alert("ST-04", Severity::High);
+        let s = summarize(std::slice::from_ref(&a), "p2", "FIN-LAPTOP-07", false, &[]);
+        assert_eq!(
+            s.title,
+            "Credential theft by setup_x64.exe on FIN-LAPTOP-07"
+        );
+        assert!(s.storyline.contains("setup_x64.exe"));
+        assert!(s.storyline.contains("203.0.113.7"));
+        assert_eq!(s.priority, 95);
+        let items = checklist_for(&a, "FIN-LAPTOP-07", Some("alice"));
+        assert!(items
+            .iter()
+            .any(|i| i.kind == "approve" && i.text == "Isolate host FIN-LAPTOP-07"));
+        assert!(items
+            .iter()
+            .any(|i| i.kind == "approve" && i.text == "Block destination 203.0.113.7"));
+        assert!(items
+            .iter()
+            .any(|i| i.kind == "manual" && i.text.starts_with("Rotate every password")));
+        // Never isolated → no release step.
+        assert!(!items.iter().any(|i| i.key == "approve:release"));
+        let mut iso = a.clone();
+        iso.actions.push(ActionOutcome {
+            action: ResponseAction::IsolateHost { allow_ips: vec![] },
+            ok: true,
+            detail: String::new(),
+            ts: 1,
+            artifact: None,
+        });
+        let items = checklist_for(&iso, "FIN-LAPTOP-07", Some("alice"));
+        assert!(items.iter().any(|i| i.key == "approve:release"));
+        assert!(!items.iter().any(|i| i.key == "approve:isolate"));
+    }
+
+    #[test]
+    fn clickfix_story_names_payload_not_explorer() {
+        // ST-10 alert on explorer.exe (RunMRU), later ST-01 by the payload whose
+        // ancestry is explorer → powershell → vcredist_x64.exe.
+        let mut first = sample_alert("ST-10", Severity::High);
+        first.process = proc("e", r"C:\Windows\explorer.exe", None);
+        first.process.signed = SignatureState::Valid;
+        first.process.signer = Some("Microsoft Windows".into());
+        first.ancestry = vec![];
+        first.data_at_risk = vec![];
+        let mut second = sample_alert("ST-01", Severity::Critical);
+        second.ts += 5_000;
+        second.process = proc(
+            "v",
+            r"C:\Users\jd\AppData\Local\Temp\vcredist_x64.exe",
+            Some("ps"),
+        );
+        second.ancestry = vec![
+            proc(
+                "ps",
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                Some("e"),
+            ),
+            proc("e", r"C:\Windows\explorer.exe", None),
+        ];
+        let alerts = vec![first, second];
+        let s = summarize(&alerts, "e", "E2E-LUMMA-01", false, &[]);
+        assert!(s.title.contains("vcredist_x64.exe"), "{}", s.title);
+        assert!(
+            s.storyline.starts_with("`vcredist_x64.exe`"),
+            "{}",
+            s.storyline
+        );
+        assert_eq!(s.origin_image.as_deref(), Some("vcredist_x64.exe"));
+        // The explorer alert alone contributes no origin step naming explorer.
+        let items = checklist_for(&alerts[0], "E2E-LUMMA-01", Some("CORP\\j.doe"));
+        assert!(!items
+            .iter()
+            .any(|i| i.text.contains("explorer.exe came from")));
+        assert!(origin_seed("vcredist_x64.exe", Some("CORP\\j.doe"))
+            .text
+            .contains("where vcredist_x64.exe came from"));
+    }
+
+    #[test]
+    fn quarantine_artifact_preferred() {
+        assert_eq!(
+            quarantine_id(Some("q-77"), "quarantined x as other", "x", "s"),
+            "q-77"
+        );
+        // Garbage artifact → fall back to detail parsing.
+        assert_eq!(
+            quarantine_id(Some("../../x"), "quarantined x as q-1", "x", "s"),
+            "q-1"
+        );
+        assert_eq!(quarantine_id(None, "quarantined x as q-1", "x", "s"), "q-1");
+    }
+}

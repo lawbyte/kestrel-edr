@@ -1,0 +1,107 @@
+<!--
+  Kestrel EDR agent installer (WiX Toolset v6).
+
+  Silent deploy (GPO / Intune / RMM):
+    msiexec /i KestrelAgent.msi /qn SERVER=edr.example.com:8443 TOKEN=<enrollment token> CA_B64=<base64 CA pem>
+
+  The console's Enrollment page generates this exact command.
+  The uninstall token is issued by the server at enrollment (one per device, shown to
+  administrators on the device page in the console); the agent stores only its
+  Argon2id hash. It is never printed or passed on the install command line.
+  Uninstall (the token is required; a wrong token aborts the uninstall):
+    msiexec /x KestrelAgent.msi /qn UNINSTALL_TOKEN=<token>
+
+  Secrets (TOKEN, UNINSTALL_TOKEN, CA_B64) and the deferred custom-action data that
+  embeds them (CA_Install, CA_Uninstall) are listed in MsiHiddenProperties and the
+  custom actions use HideTarget, so none of them reach a verbose MSI log.
+
+  Build (Windows, after a release build of kestrel-agent, i.e. cargo build with the release
+  profile, and the tray app build):
+    wix build installer\Kestrel.wxs -arch x64 -d Version=0.1.0 ^
+      -d AgentExe=target\release\kestrel-agent.exe -d TrayExe=tray\src-tauri\target\release\kestrel-tray.exe ^
+      -ext WixToolset.Util.wixext -o KestrelAgent.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package Name="Kestrel EDR Agent"
+           Manufacturer="Kestrel"
+           Version="$(var.Version)"
+           UpgradeCode="6E3A0F43-8A1B-4C55-9B5D-2F4C7E1A9D10"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Kestrel is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Public properties set on the msiexec command line. Hidden so they never reach the MSI log. -->
+    <Property Id="SERVER" Secure="yes" />
+    <Property Id="TOKEN" Secure="yes" Hidden="yes" />
+    <Property Id="CA_B64" Secure="yes" Hidden="yes" />
+    <!-- Required for uninstall only (M5): the server issues the token at enrollment. -->
+    <Property Id="UNINSTALL_TOKEN" Secure="yes" Hidden="yes" />
+    <!-- Deferred custom-action data carries TOKEN / UNINSTALL_TOKEN: hide it too. -->
+    <Property Id="CA_Install" Hidden="yes" />
+    <Property Id="CA_Uninstall" Hidden="yes" />
+
+    <Launch Condition="Installed OR (SERVER AND TOKEN AND CA_B64)"
+            Message="SERVER, TOKEN and CA_B64 are required. Copy the install command from the Kestrel console (Settings → Enrollment)." />
+    <Launch Condition="VersionNT64 &gt;= 603"
+            Message="Kestrel requires 64-bit Windows 10, Windows 11 or Windows Server 2019 or later." />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Kestrel">
+        <Component Id="AgentExe" Guid="*">
+          <File Id="KestrelAgentExe" Source="$(var.AgentExe)" Name="kestrel-agent.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="TrayExe" Guid="*">
+          <File Id="KestrelTrayExe" Source="$(var.TrayExe)" Name="kestrel-tray.exe" KeyPath="yes" />
+          <!-- Start the employee tray app at every user logon (runs unprivileged). -->
+          <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+                         Name="KestrelTray" Type="string" Value="&quot;[INSTALLFOLDER]kestrel-tray.exe&quot; --background" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="STATEFOLDER" Name="Kestrel">
+        <Component Id="StateDir" Guid="*">
+          <CreateFolder>
+            <!-- State (keys, outbox, quarantine): SYSTEM and Administrators only. -->
+            <util:PermissionEx User="SYSTEM" GenericAll="yes" />
+            <util:PermissionEx User="Administrators" GenericAll="yes" />
+          </CreateFolder>
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="Kestrel EDR Agent" Level="1">
+      <ComponentRef Id="AgentExe" />
+      <ComponentRef Id="TrayExe" />
+      <ComponentRef Id="StateDir" />
+    </Feature>
+
+    <!--
+      Enrol + register the service. Runs elevated (deferred, no impersonation)
+      after files are installed. The agent first verifies %ProgramData%\Kestrel
+      (owner SYSTEM/Administrators, no write access for anyone else, not a
+      junction) and moves an untrusted pre-existing folder aside, then writes
+      its config, enrols with the server (receiving the uninstall token),
+      installs and starts the service with a restricted DACL.
+    -->
+    <SetProperty Id="CA_Install" Sequence="execute" Before="CA_Install"
+                 Value="&quot;[INSTALLFOLDER]kestrel-agent.exe&quot; install --server &quot;[SERVER]&quot; --ca &quot;[CA_B64]&quot; --token &quot;[TOKEN]&quot;" />
+    <CustomAction Id="CA_Install" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec"
+                  Execute="deferred" Impersonate="no" Return="check" HideTarget="yes" />
+
+    <SetProperty Id="CA_Uninstall" Sequence="execute" Before="CA_Uninstall"
+                 Value="&quot;[INSTALLFOLDER]kestrel-agent.exe&quot; uninstall --token &quot;[UNINSTALL_TOKEN]&quot;" />
+    <CustomAction Id="CA_Uninstall" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec"
+                  Execute="deferred" Impersonate="no" Return="check" HideTarget="yes" />
+
+    <InstallExecuteSequence>
+      <Custom Action="CA_Install" After="InstallFiles" Condition="NOT Installed AND NOT REMOVE" />
+      <!-- The agent refuses to stop without a valid uninstall token (tamper protection). -->
+      <Custom Action="CA_Uninstall" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

@@ -1,0 +1,48 @@
+[package]
+name = "kestrel-tray"
+version = "0.1.0"
+description = "Kestrel EDR employee tray app"
+authors = ["Azka (lawbyte)"]
+license = "Apache-2.0"
+edition = "2021"
+rust-version = "1.85"
+
+# Standalone: must NOT join the root Kestrel workspace (different deps / toolchain needs).
+[workspace]
+
+[lib]
+name = "kestrel_tray_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "kestrel-tray"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["serde", "v4"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
+anyhow = "1"
+log = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Wdk_System_SystemServices", "Win32_Foundation", "Win32_System_Pipes", "Win32_System_SystemInformation"] }
+
+[dev-dependencies]
+# Contract test: the mirrored protocol types must match the agent's exactly.
+kestrel-common = { path = "../../crates/kestrel-common" }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
