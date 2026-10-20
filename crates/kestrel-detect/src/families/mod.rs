@@ -20,6 +20,7 @@ use kestrel_common::{
     Severity, SignatureState, TimestampMs,
 };
 
+pub(crate) mod autorun;
 pub(crate) mod cd;
 pub(crate) mod ps;
 pub(crate) mod rw;
@@ -49,6 +50,10 @@ pub(crate) struct FamilyHit {
     pub dedup_key: Option<String>,
     /// Subject override when it is not (or no longer) in the process table.
     pub process: Option<ProcessInfo>,
+    /// This variant of the rule only ever alerts: it runs as Audit even when
+    /// the rule is in Protect (e.g. RW-08's name-agnostic fallback). `Off`
+    /// still silences it.
+    pub audit_only: bool,
 }
 
 impl FamilyHit {
@@ -70,6 +75,7 @@ impl FamilyHit {
             extra_evidence: vec![],
             dedup_key: None,
             process: None,
+            audit_only: false,
         }
     }
 
@@ -80,12 +86,14 @@ impl FamilyHit {
 }
 
 /// Read-only view of the engine for families.
+#[allow(dead_code)] // helpers are part of the seam even when no family uses them yet
 pub(crate) struct Ctx<'a> {
     pub(crate) st: &'a EngineState,
     /// Engine time (event ts, or tick time).
     pub now: TimestampMs,
 }
 
+#[allow(dead_code)]
 impl<'a> Ctx<'a> {
     pub fn table(&self) -> &ProcessTable {
         self.st.table()

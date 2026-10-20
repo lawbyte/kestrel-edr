@@ -68,8 +68,8 @@ jobs:
         run: choco install protoc -y --no-progress
       - name: Agent — test + release build
         run: |
-          cargo test -p kestrel-common -p kestrel-detect -p kestrel-win -p kestrel-agent
-          cargo build -p kestrel-agent --release
+          cargo test -p kestrel-common -p kestrel-detect -p kestrel-win -p kestrel-agent -p kestrel-scan
+          cargo build -p kestrel-agent -p kestrel-scan --release
         env:
           KESTREL_UPDATE_PUBKEY: ${{ secrets.KESTREL_UPDATE_PUBKEY }}
       - name: ETW smoke test (agent in console mode, replays a benign process)
@@ -88,6 +88,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist-sign | Out-Null
           Copy-Item target/release/kestrel-agent.exe dist-sign/
+          Copy-Item target/release/kestrel-scan.exe dist-sign/
           Copy-Item tray/src-tauri/target/release/kestrel-tray.exe dist-sign/
       - name: Sign executables (before packaging)
         if: github.event_name == 'push' && env.HAS_SIGNING == 'true'
@@ -113,6 +114,7 @@ jobs:
           $v = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages | Where-Object name -eq 'kestrel-agent' | Select-Object -ExpandProperty version
           wix build installer/Kestrel.wxs -arch x64 -d Version=$v `
             -d AgentExe=dist-sign/kestrel-agent.exe `
+            -d ScanExe=dist-sign/kestrel-scan.exe `
             -d TrayExe=dist-sign/kestrel-tray.exe `
             -ext WixToolset.Util.wixext -o KestrelAgent.msi
       - name: Sign MSI
@@ -137,4 +139,5 @@ jobs:
           path: |
             KestrelAgent.msi
             dist-sign/kestrel-agent.exe
+            dist-sign/kestrel-scan.exe
             dist-sign/kestrel-tray.exe

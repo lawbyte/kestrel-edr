@@ -138,7 +138,7 @@ wix extension add -g WixToolset.Util.wixext/6
 $v = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
      Where-Object name -eq 'kestrel-agent' | Select-Object -ExpandProperty version
 wix build installer/Kestrel.wxs -arch x64 -d Version=$v `
-  -d AgentExe=target/release/kestrel-agent.exe `
+  -d AgentExe=target/release/kestrel-agent.exe -d ScanExe=target/release/kestrel-scan.exe `
   -d TrayExe=tray/src-tauri/target/release/kestrel-tray.exe `
   -ext WixToolset.Util.wixext -o KestrelAgent.msi
 ```

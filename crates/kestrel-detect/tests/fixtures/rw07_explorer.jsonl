@@ -1,0 +1,2 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer-1", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\explorer.exe", "user": "CORP\\alice", "integrity": "high", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000001000, "pid": 4000, "guid": "explorer-1", "type": "file_activity", "window_ms": 10000, "files_touched": 1, "dirs": 1, "deletes": 1, "canary_hits": ["C:\\Users\\alice\\Documents\\!_Q3 budget review.docx"]}

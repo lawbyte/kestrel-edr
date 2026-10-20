@@ -1349,6 +1349,9 @@ impl EngineState {
         hit.extra_evidence = h.extra_evidence;
         hit.dedup_key = h.dedup_key;
         hit.process = h.process;
+        if h.audit_only {
+            hit.mode_override = Some(RuleMode::Audit);
+        }
         self.emit(ev, hit);
     }
 

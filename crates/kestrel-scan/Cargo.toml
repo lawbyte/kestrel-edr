@@ -1,0 +1,24 @@
+[package]
+name = "kestrel-scan"
+description = "On-demand YARA-X scanner for the Kestrel agent (separate process, so the agent itself stays small)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["engine"]
+# The YARA-X engine (pulls in wasmtime). Only the `kestrel-scan` binary needs
+# it; the agent depends on this crate with default-features = false for the
+# report types and the process protocol.
+engine = ["dep:yara-x"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+yara-x = { version = "1.22", optional = true, default-features = false, features = ["pe-module", "hash-module", "math-module", "string-module", "dotnet-module", "fast-regexp", "constant-folding", "exact-atoms"] }
+
+[[bin]]
+name = "kestrel-scan"
+path = "src/main.rs"
+required-features = ["engine"]

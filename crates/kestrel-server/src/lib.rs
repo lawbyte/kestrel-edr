@@ -23,6 +23,7 @@ pub mod policy_svc;
 pub mod registry;
 pub mod scrub;
 pub mod settings;
+pub mod sigmapack;
 pub mod state;
 pub mod telemetry;
 
@@ -59,6 +60,7 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<AppState> {
     install_crypto_provider();
     let db = db::connect(&cfg.database_url).await?;
     db::migrate_and_seed(&db).await?;
+    sigmapack::seed(&db).await?;
     let mk = MasterKey::new(&cfg.master_key);
     let s = settings::load(&db).await?;
     // Fail fast on a wrong master key rather than at first use.

@@ -2655,6 +2655,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kestrel-scan"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "yara-x",
+]
+
+[[package]]
 name = "kestrel-server"
 version = "0.1.0"
 dependencies = [
@@ -2720,6 +2730,7 @@ dependencies = [
  "kestrel-common",
  "kestrel-detect",
  "kestrel-platform",
+ "kestrel-scan",
  "roxmltree",
  "serde",
  "serde_json",
@@ -2727,9 +2738,9 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "windows",
  "windows-service",
  "windows-sys 0.61.2",
- "yara-x",
 ]
 
 [[package]]

@@ -29,6 +29,8 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 COPY proto proto
+# Vendored SigmaHQ Audit pack, embedded into the server (crates/kestrel-server/src/sigmapack.rs).
+COPY rules rules
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked -p kestrel-server && \

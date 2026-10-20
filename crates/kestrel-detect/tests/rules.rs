@@ -24,7 +24,13 @@ fn unsigned_temp(e: &mut Engine, guid: &str, pid: u32) {
 #[test]
 fn catalog_through_engine() {
     let c = Engine::catalog();
-    assert_eq!(c.len(), 21);
+    // 16 stealer + 5 tamper rules; the RW/CD/PS families add their own.
+    let core = |p: &str| c.iter().filter(|m| m.id.starts_with(p)).count();
+    assert_eq!((core("ST-"), core("TP-")), (16, 5));
+    let mut ids: Vec<&str> = c.iter().map(|m| m.id.as_str()).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), c.len(), "rule ids are unique");
     let st01 = c.iter().find(|m| m.id == "ST-01").unwrap();
     assert_eq!(st01.default_mode, RuleMode::Audit);
     assert!(!st01.protect_day_one);
