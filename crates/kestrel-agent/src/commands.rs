@@ -323,21 +323,79 @@ pub fn verify_uninstall(state_dir: &Path, token: &str) -> Result<AgentConfig> {
 ///
 /// `ready` is called once the sensors are running (the smoke script waits for
 /// it before generating activity).
+///
+/// Optional, still read-only extras for lab work:
+/// * `events_out`: write every observed event as JSON lines (capped at
+///   [`SENSORS_TEST_MAX_EVENTS`]) — raw material for regression fixtures.
+/// * `detect`: run the detection engine on the stream with **every rule forced
+///   to Audit** and report the alerts. No action is ever executed.
+/// Upper bound on events written by `sensors-test --events-out`.
+pub const SENSORS_TEST_MAX_EVENTS: u64 = 500_000;
+
+/// Engine with the default policy, every catalog rule forced to Audit (so no
+/// `Output` ever carries an action) and canaries off.
+fn audit_only_engine(boot_id: String) -> Result<kestrel_detect::Engine> {
+    use kestrel_common::{Policy, RuleBundle, RuleMode};
+    let mut policy = Policy {
+        canaries: false,
+        ..Policy::default()
+    };
+    for m in kestrel_detect::Engine::catalog() {
+        policy.rules.insert(m.id.clone(), RuleMode::Audit);
+    }
+    let host = kestrel_detect::HostContext {
+        boot_id,
+        hostname: hostname_or_default(),
+        agent_image: std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+        server_ips: vec![],
+        system_drive: std::env::var("SystemDrive")
+            .ok()
+            .and_then(|d| d.chars().next()),
+    };
+    kestrel_detect::Engine::new(host, policy, RuleBundle::default())
+        .map_err(|e| anyhow::anyhow!("engine: {e}"))
+}
+
+fn hostname_or_default() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_else(|_| "localhost".into())
+}
+
+fn collect_alerts(alerts: &mut Vec<serde_json::Value>, outs: Vec<kestrel_detect::Output>) {
+    for o in outs {
+        if let kestrel_detect::Output::Alert(d) = o {
+            debug_assert!(d.actions.is_empty(), "audit-only engine produced actions");
+            alerts.push(serde_json::json!({
+                "ts": d.alert.ts,
+                "rule_id": d.alert.rule_id,
+                "severity": d.alert.severity,
+                "summary": d.alert.summary,
+                "image": d.alert.process.image,
+                "pid": d.alert.process.pid,
+            }));
+        }
+    }
+}
+
 pub async fn sensors_test(
     state_dir: &Path,
     seconds: u64,
+    events_out: Option<&Path>,
+    detect: bool,
     ready: impl FnOnce(),
 ) -> Result<serde_json::Value> {
     use kestrel_common::EventData;
     use kestrel_platform::SensorConfig;
     use std::collections::{BTreeMap, BTreeSet};
+    use std::io::Write as _;
 
     std::fs::create_dir_all(state_dir)?;
     let platform = crate::platform_win::platform(state_dir.to_path_buf(), vec![])?;
     let boot_id = platform.boot_id();
     let (tx, mut rx) = tokio::sync::mpsc::channel(65_536);
     let cfg = SensorConfig {
-        boot_id,
+        boot_id: boot_id.clone(),
         dns: true,
         script_content: true,
         sysmon: false,
@@ -355,8 +413,53 @@ pub async fn sensors_test(
     let mut images: BTreeSet<String> = BTreeSet::new();
     let mut qnames: BTreeSet<String> = BTreeSet::new();
     let mut total = 0u64;
-    while let Ok(Some(ev)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+    let mut out = match events_out {
+        Some(p) => Some(std::io::BufWriter::new(
+            std::fs::File::create(p).with_context(|| format!("creating {}", p.display()))?,
+        )),
+        None => None,
+    };
+    let mut engine = if detect {
+        let mut e = audit_only_engine(boot_id.clone())?;
+        // Same as the service: processes that predate the sensors are known.
+        for info in platform.snapshot_processes(&boot_id) {
+            e.seed_process(info);
+        }
+        Some(e)
+    } else {
+        None
+    };
+    let mut alerts: Vec<serde_json::Value> = Vec::new();
+    let mut next_tick = tokio::time::Instant::now() + Duration::from_millis(250);
+    loop {
+        let wake = next_tick.min(deadline);
+        let ev = match tokio::time::timeout_at(wake, rx.recv()).await {
+            Ok(Some(ev)) => ev,
+            Ok(None) => break,
+            Err(_) => {
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                if let Some(e) = engine.as_mut() {
+                    let outs = e.tick(kestrel_common::now_ms());
+                    collect_alerts(&mut alerts, outs);
+                }
+                next_tick = tokio::time::Instant::now() + Duration::from_millis(250);
+                continue;
+            }
+        };
         total += 1;
+        if let Some(w) = out.as_mut() {
+            if total <= SENSORS_TEST_MAX_EVENTS {
+                serde_json::to_writer(&mut *w, &ev)?;
+                w.write_all(b"
+")?;
+            }
+        }
+        if let Some(e) = engine.as_mut() {
+            let outs = e.process(&ev);
+            collect_alerts(&mut alerts, outs);
+        }
         *counts.entry(ev.kind().as_str()).or_default() += 1;
         match &ev.data {
             EventData::ProcessStart(p) if images.len() < 200 => {
@@ -374,9 +477,13 @@ pub async fn sensors_test(
             _ => {}
         }
     }
+    if let Some(mut w) = out {
+        w.flush()?;
+    }
     let s = handle.stats();
     handle.stop();
     Ok(serde_json::json!({
+        "alerts": alerts,
         "seconds": started.elapsed().as_secs_f64(),
         "total": total,
         "counts": counts,

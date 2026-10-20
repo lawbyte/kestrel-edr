@@ -94,6 +94,13 @@ enum Cmd {
     SensorsTest {
         #[arg(long, default_value_t = 20)]
         seconds: u64,
+        /// Write every observed event as JSON lines to this file (lab fixtures).
+        #[arg(long)]
+        events_out: Option<PathBuf>,
+        /// Also run the detection engine with every rule forced to Audit and
+        /// print its alerts (never executes a response action).
+        #[arg(long)]
+        detect: bool,
     },
 }
 
@@ -291,8 +298,12 @@ async fn dispatch(state_dir: PathBuf, cmd: Cmd) -> Result<()> {
             };
             commands::simulate(&state_dir, o, tuning).await
         }
-        Cmd::SensorsTest { seconds } => {
-            let v = commands::sensors_test(&state_dir, seconds, || {
+        Cmd::SensorsTest {
+            seconds,
+            events_out,
+            detect,
+        } => {
+            let v = commands::sensors_test(&state_dir, seconds, events_out.as_deref(), detect, || {
                 eprintln!("KESTREL-SENSORS-READY collecting for {seconds}s");
             })
             .await?;
