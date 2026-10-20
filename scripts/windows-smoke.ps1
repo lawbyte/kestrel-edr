@@ -132,7 +132,11 @@ try {
     New-Item -ItemType Directory -Path $insecure | Out-Null
     Set-Content -LiteralPath (Join-Path $insecure 'agent.toml') -Value 'server = "attacker:8443"'
     & icacls.exe $insecure /grant '*S-1-5-32-545:(OI)(CI)M' | Out-Null   # BUILTIN\Users: modify
-    & $AgentExe --state-dir $insecure enroll --token smoke-not-a-token 2>&1 | Out-Null   # fails (not installed) after securing the dir
+    # Fails (not installed) after securing the dir. Windows PowerShell 5.1 turns a
+    # native command's stderr into a terminating error under 'Stop', so relax it here.
+    $ErrorActionPreference = 'Continue'
+    & $AgentExe --state-dir $insecure enroll --token smoke-not-a-token 2>$null | Out-Null
+    $ErrorActionPreference = 'Stop'
     $aside = @(Get-ChildItem -LiteralPath $work -Directory -Filter 'insecure-state.untrusted-*')
     if ($aside.Count -ge 1) { Pass "untrusted pre-created state dir moved aside ($($aside[0].Name))" }
     else { Fail 'untrusted pre-created state dir was not moved aside' }

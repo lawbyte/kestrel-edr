@@ -65,8 +65,14 @@ Start-Sleep -Seconds 3
 
 # risk 4: DPAPI unprotect of our own blob (does 16385 arrive?)
 Add-Type -AssemblyName System.Security
-$blob = [Security.Cryptography.ProtectedData]::Protect([byte[]](1..32), $null, 'CurrentUser')
-[Security.Cryptography.ProtectedData]::Unprotect($blob, $null, 'CurrentUser') | Out-Null
+try {
+    $blob = [Security.Cryptography.ProtectedData]::Protect([byte[]](1..32), $null, 'CurrentUser')
+    [Security.Cryptography.ProtectedData]::Unprotect($blob, $null, 'CurrentUser') | Out-Null
+} catch {
+    # No user DPAPI keys in a network logon (e.g. SSH); use the machine scope.
+    $blob = [Security.Cryptography.ProtectedData]::Protect([byte[]](1..32), $null, 'LocalMachine')
+    [Security.Cryptography.ProtectedData]::Unprotect($blob, $null, 'LocalMachine') | Out-Null
+}
 
 # Audit-API OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION) on our own child
 $child = Start-Process ping.exe -ArgumentList '-n 6 127.0.0.1' -WindowStyle Hidden -PassThru
