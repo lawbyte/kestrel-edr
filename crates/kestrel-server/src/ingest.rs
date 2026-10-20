@@ -131,6 +131,8 @@ pub async fn hello(
         server_time: now,
     }];
     let pid = policy_svc::device_policy_id(&state.db, device_id).await?;
+    // Database restored from a backup? Never let agents ignore later changes.
+    policy_svc::catch_up_versions(&state.db, &pid, h.policy_version, h.rules_version).await?;
     if let Some(p) = policy_svc::effective(&state.db, &pid).await? {
         if p.version != h.policy_version {
             out.push(ServerPayload::Policy(Box::new(p)));

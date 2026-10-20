@@ -114,6 +114,94 @@ pub async fn effective(db: &PgPool, policy_id: &str) -> anyhow::Result<Option<Po
     Ok(Some(p))
 }
 
+/// Largest forward jump a single agent report may cause (see [`catch_up_versions`]).
+pub const MAX_VERSION_CATCH_UP: i64 = 1_000_000;
+
+/// Agents apply only *newer* policy / rule versions. After the server database
+/// is restored from a backup, the sequences are behind what agents already
+/// applied, and every agent would silently ignore every later change. When an
+/// agent reports a version above what the server holds for it, move the
+/// server's counters past the agent's and re-version its policy so the next
+/// push is accepted. A jump larger than [`MAX_VERSION_CATCH_UP`] is refused
+/// (a compromised agent must not be able to run the counters up), logged and
+/// reported as `false`.
+pub async fn catch_up_versions(
+    db: &PgPool,
+    policy_id: &str,
+    agent_policy: u64,
+    agent_rules: u64,
+) -> anyhow::Result<bool> {
+    let mut ok = true;
+    let agent_policy = i64::try_from(agent_policy).unwrap_or(i64::MAX);
+    let agent_rules = i64::try_from(agent_rules).unwrap_or(i64::MAX);
+    let cur: Option<(i64,)> = sqlx::query_as("SELECT version FROM policies WHERE id = $1")
+        .bind(policy_id)
+        .fetch_optional(db)
+        .await?;
+    if let Some((cur,)) = cur {
+        if agent_policy > cur {
+            let (seq_last,): (i64,) = sqlx::query_as("SELECT last_value FROM policy_version_seq")
+                .fetch_one(db)
+                .await?;
+            if agent_policy.saturating_sub(seq_last.max(cur)) > MAX_VERSION_CATCH_UP {
+                tracing::warn!(
+                    policy_id,
+                    agent_policy,
+                    server = cur,
+                    "agent reports an implausible policy version; not catching up"
+                );
+                ok = false;
+            } else {
+                // Move the global sequence past the agent, then re-version.
+                sqlx::query("SELECT setval('policy_version_seq', GREATEST($1, (SELECT last_value FROM policy_version_seq)))")
+                    .bind(agent_policy)
+                    .execute(db)
+                    .await?;
+                let v = next_version(db).await?;
+                sqlx::query("UPDATE policies SET version = GREATEST(version, $2), updated_at = $3 WHERE id = $1")
+                    .bind(policy_id)
+                    .bind(v)
+                    .bind(kestrel_common::now_ms())
+                    .execute(db)
+                    .await?;
+                tracing::warn!(
+                    policy_id,
+                    agent_policy,
+                    server = cur,
+                    new = v,
+                    "policy version was behind an agent (database restored?); re-versioned"
+                );
+            }
+        }
+    }
+    let (rules,): (i64,) = sqlx::query_as("SELECT rules_version FROM settings WHERE id = 1")
+        .fetch_one(db)
+        .await?;
+    if agent_rules > rules {
+        if agent_rules - rules > MAX_VERSION_CATCH_UP {
+            tracing::warn!(
+                agent_rules,
+                server = rules,
+                "agent reports an implausible rules version; not catching up"
+            );
+            ok = false;
+        } else {
+            sqlx::query(
+                "UPDATE settings SET rules_version = GREATEST(rules_version, $1 + 1) WHERE id = 1",
+            )
+            .bind(agent_rules)
+            .execute(db)
+            .await?;
+            tracing::warn!(
+                agent_rules,
+                server = rules,
+                "rules version was behind an agent (database restored?); re-versioned"
+            );
+        }
+    }
+    Ok(ok)
+}
+
 pub async fn next_version(db: &PgPool) -> anyhow::Result<i64> {
     let (v,): (i64,) = sqlx::query_as("SELECT nextval('policy_version_seq')")
         .fetch_one(db)
