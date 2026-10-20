@@ -23,6 +23,7 @@ VNC_DISPLAY=${VNC_DISPLAY:-5}
 CPUS=${CPUS:-4}
 MEM=${MEM:-8192}
 HERE=$(cd "$(dirname "$0")" && pwd)
+SELF="$HERE/$(basename "$0")"
 mkdir -p "$KVM_DIR"
 cd "$KVM_DIR"
 
@@ -78,8 +79,8 @@ install)
     done
     echo "first boot done; letting the reboot settle"
     sleep 90
-    "$0" wait-ssh 600
-    "$0" stop
+    "$SELF" wait-ssh 600
+    "$SELF" stop
     # Re-launch without the install media from now on.
     qemu-img snapshot -c clean "$DISK"
     echo "snapshot 'clean' created"
@@ -110,5 +111,5 @@ wait-ssh)
         [ "$(date +%s)" -lt "$end" ] || { echo "ssh not reachable" >&2; exit 1; }
         sleep 5
     done; echo "ssh ok" ;;
-*) sed -n '2,20p' "$0" ;;
+*) sed -n '2,20p' "$SELF" ;;
 esac
