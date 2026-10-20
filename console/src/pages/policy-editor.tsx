@@ -1,11 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronLeft, Info, ShieldCheck, Sparkles, X } from 'lucide-react'
+import { AlertTriangle, ChevronLeft, Eye, Info, ShieldCheck, Sparkles, X } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useBlocker, useNavigate, useParams } from 'react-router'
 import { toast } from 'sonner'
 import { api, qk } from '@/api/endpoints'
-import type { HardeningControl, HardeningMode, Policy, RuleCategory, RuleMode, RuleRow } from '@/api/types'
-import { SeverityIcon } from '@/components/badges'
+import type { HardeningControl, HardeningMode, Policy, RuleMode, RuleRow, SensorSettings } from '@/api/types'
+import { CategoryBadge, SeverityIcon } from '@/components/badges'
 import { ErrorState, LoadingRows } from '@/components/common'
 import { Markdown } from '@/components/markdown'
 import { Button } from '@/components/ui/button'
@@ -14,13 +14,14 @@ import { Field, Input, Textarea } from '@/components/ui/input'
 import { Segmented, Switch, Tooltip } from '@/components/ui/misc'
 import { useAuth } from '@/lib/auth'
 import { diffJson, type Change } from '@/lib/diff'
-import { HARDENING_CONTROLS, HARDENING_INFO, RULE_CATEGORY_LABEL } from '@/lib/labels'
+import { HARDENING_CONTROLS, HARDENING_INFO, RULE_CATEGORY_ORDER } from '@/lib/labels'
 import { cn } from '@/lib/utils'
 
 const SECTIONS = [
   { id: 'rules', label: 'Detection rules' },
   { id: 'suspend', label: 'Suspend on suspicion' },
   { id: 'containment', label: 'Isolation & indicator blocks' },
+  { id: 'sensors', label: 'Sensors' },
   { id: 'hardening', label: 'Windows hardening' },
   { id: 'privacy', label: 'Privacy' },
   { id: 'telemetry', label: 'Telemetry' },
@@ -159,6 +160,8 @@ function Editor({ original, catalog }: { original: Policy; catalog: RuleRow[] })
               </p>
             ) : null}
           </Section>
+
+          <SensorsSection value={p.sensors ?? DEFAULT_SENSORS} onChange={(v) => set('sensors', v)} readOnly={readOnly} />
 
           <HardeningSection p={p} onChange={(h) => set('hardening', h)} readOnly={readOnly} />
 
@@ -350,7 +353,42 @@ function NumberRow({ id, label, hint, value, min, max, unit, onChange, disabled 
   )
 }
 
-const CAT_ORDER: RuleCategory[] = ['delivery', 'execution', 'credential_access', 'browser_tampering', 'exfiltration', 'tripwire', 'tamper', 'custom']
+export const DEFAULT_SENSORS: SensorSettings = { file_activity: true, ransomware_canaries: true, persistence: true, credential_access: true }
+
+const SENSOR_INFO: { key: keyof SensorSettings; label: string; hint: string }[] = [
+  {
+    key: 'file_activity',
+    label: 'File activity (ransomware)',
+    hint: 'Counts file renames, overwrites and deletes per program in your users’ document folders and on network shares, so mass encryption (RW-06) and ransom notes (RW-08) are caught within seconds. Costs a little CPU on devices that move many files.',
+  },
+  {
+    key: 'ransomware_canaries',
+    label: 'Ransomware canary documents',
+    hint: 'Plants a few hidden decoy documents in Documents, Desktop and Pictures. Any program that changes one triggers RW-07. Users may notice them if they show hidden files.',
+  },
+  {
+    key: 'persistence',
+    label: 'Persistence (tasks, services, WMI, autorun registry keys)',
+    hint: 'Watches scheduled tasks, new services, WMI subscriptions and Run / Winlogon / IFEO keys for the PS-xx rules. Off: Kestrel no longer sees malware making itself start at logon.',
+  },
+  {
+    key: 'credential_access',
+    label: 'LSASS access (credential dumping)',
+    hint: 'Reports failed and dump-capable opens of lsass.exe and the dump files that follow (CD-xx rules). Off: credential-dumping rules can only use command lines.',
+  },
+]
+
+function SensorsSection({ value, onChange, readOnly }: { value: SensorSettings; onChange: (v: SensorSettings) => void; readOnly: boolean }) {
+  return (
+    <Section id="sensors" title="Sensors" description="Optional sensor groups for ransomware, credential dumping and persistence. All are on by default; turn one off only if it costs too much on a particular fleet, because the rules that depend on it go quiet.">
+      <div className="divide-y divide-border rounded-lg border border-border bg-surface">
+        {SENSOR_INFO.map((s) => (
+          <ToggleRow key={s.key} label={s.label} hint={s.hint} checked={value[s.key]} onChange={(v) => onChange({ ...value, [s.key]: v })} disabled={readOnly} />
+        ))}
+      </div>
+    </Section>
+  )
+}
 
 function RuleMatrix({ p, catalog, onChange, readOnly }: { p: Policy; catalog: RuleRow[]; onChange: (r: Record<string, RuleMode>) => void; readOnly: boolean }) {
   const rules = catalog.filter((r) => r.kind === 'builtin' || r.enabled_custom)
@@ -393,12 +431,14 @@ function RuleMatrix({ p, catalog, onChange, readOnly }: { p: Policy; catalog: Ru
       }
     >
       <div className="overflow-hidden rounded-lg border border-border bg-surface">
-        {CAT_ORDER.map((cat) => {
+        {RULE_CATEGORY_ORDER.map((cat) => {
           const rs = rules.filter((r) => r.category === cat)
           if (!rs.length) return null
           return (
             <div key={cat}>
-              <div className="border-b border-border bg-surface-2/60 px-4 py-1.5 text-xs font-medium text-fg-muted">{RULE_CATEGORY_LABEL[cat]}</div>
+              <div className="border-b border-border bg-surface-2/60 px-4 py-1.5">
+                <CategoryBadge category={cat} className="text-xs font-medium" />
+              </div>
               <ul className="divide-y divide-border">
                 {rs.map((r) => {
                   const m = mode(r)
@@ -481,10 +521,21 @@ function HardeningSection({ p, onChange, readOnly }: { p: Policy; onChange: (h: 
               <div className="flex items-start justify-between gap-3">
                 <label htmlFor={id} className="text-sm font-medium">
                   {info.label}
+                  {info.reportOnly ? (
+                    <span className="ml-2 inline-flex items-center gap-1 rounded bg-surface-2 px-1.5 py-px align-middle text-[10.5px] font-normal text-fg-muted">
+                      <Eye className="size-3" aria-hidden /> Report only
+                    </span>
+                  ) : null}
                 </label>
                 <Switch id={id} checked={h[c]} disabled={readOnly} onCheckedChange={(v) => onChange({ ...h, [c]: v })} />
               </div>
               <p className="mt-1 text-xs leading-relaxed text-fg-muted">{info.blocks}</p>
+              {info.caveat ? (
+                <p className="mt-1.5 flex gap-1.5 text-xs leading-relaxed text-warn">
+                  <AlertTriangle className="mt-px size-3.5 shrink-0" aria-hidden />
+                  <span>{info.caveat}</span>
+                </p>
+              ) : null}
             </li>
           )
         })}

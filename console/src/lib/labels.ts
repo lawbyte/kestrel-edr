@@ -69,6 +69,38 @@ export const RULE_CATEGORY_LABEL: Record<RuleCategory, string> = {
   tripwire: 'Tripwire',
   tamper: 'Agent tamper',
   custom: 'Custom',
+  ransomware: 'Ransomware',
+  credential_dumping: 'Credential dumping',
+  persistence: 'Persistence',
+}
+
+/** Display order of rule categories (catalog groups, policy rule matrix). */
+export const RULE_CATEGORY_ORDER: RuleCategory[] = [
+  'delivery',
+  'execution',
+  'credential_access',
+  'browser_tampering',
+  'exfiltration',
+  'tripwire',
+  'ransomware',
+  'credential_dumping',
+  'persistence',
+  'tamper',
+  'custom',
+]
+
+export const RULE_CATEGORY_HINT: Record<RuleCategory, string> = {
+  delivery: 'How the malware arrived: lures, downloads, paste-and-run.',
+  execution: 'Untrusted programs and script hosts starting.',
+  credential_access: 'Browser, wallet and app credential stores read by the wrong program (stealers, ST-xx).',
+  browser_tampering: 'Browsers started or modified to give up their secrets.',
+  exfiltration: 'Stolen data leaving the device.',
+  tripwire: 'Decoys nothing legitimate touches.',
+  ransomware: 'Backup deletion, recovery tampering and mass file encryption (RW-xx).',
+  credential_dumping: 'LSASS, SAM and NTDS dumping and LSA tampering (CD-xx).',
+  persistence: 'Run keys, scheduled tasks, services, WMI and other autoruns (PS-xx).',
+  tamper: 'Attempts to blind or remove the Kestrel agent.',
+  custom: 'Your own Sigma rules.',
 }
 
 export const INCIDENT_STATUS_LABEL: Record<IncidentStatus, string> = {
@@ -135,15 +167,22 @@ export const EVENT_KIND_LABEL: Record<EventKind, string> = {
   debug_attach: 'Debugger attach',
   script_block: 'Script block',
   tamper: 'Tamper',
+  file_activity: 'File activity',
+  task_registered: 'Scheduled task',
+  service_installed: 'Service install',
+  wmi_subscription: 'WMI subscription',
 }
 
 /** Event kinds offered as timeline filters (most useful first). */
-export const EVENT_KINDS_UI: EventKind[] = ['process_start', 'file_access', 'net_connect', 'dns_query', 'dpapi_unprotect', 'process_access', 'registry_set', 'image_load', 'script_block', 'tamper']
+export const EVENT_KINDS_UI: EventKind[] = ['process_start', 'file_access', 'file_activity', 'net_connect', 'dns_query', 'dpapi_unprotect', 'process_access', 'registry_set', 'task_registered', 'service_installed', 'wmi_subscription', 'image_load', 'script_block', 'tamper']
 
 export interface HardeningInfo {
   label: string
   blocks: string
-  /** Agent health key in `AgentHealth.hardening`. */
+  /** Side effects or preconditions the admin must know before turning it on. */
+  caveat?: string
+  /** Kestrel only reports the state; it never changes it. */
+  reportOnly?: boolean
 }
 export const HARDENING_INFO: Record<HardeningControl, HardeningInfo> = {
   block_mshta: {
@@ -184,6 +223,33 @@ export const HARDENING_INFO: Record<HardeningControl, HardeningInfo> = {
     blocks:
       'Sets Chrome/Edge RemoteDebuggingAllowed = false, closing the headless-debugging route stealers use to bypass App-Bound Encryption.',
   },
+  wdigest_off: {
+    label: 'Keep WDigest cleartext passwords off',
+    blocks:
+      'Pins WDigest UseLogonCredential to 0 so Windows does not keep reusable cleartext passwords in LSASS memory. Already the Windows default; attackers flip it back before dumping (rule CD-12).',
+  },
+  asr_lsass: {
+    label: 'Defender: block credential stealing from LSASS',
+    blocks: 'Adds the Defender attack-surface rule that stops most programs from reading LSASS memory. Kestrel adds this one rule and leaves your other ASR rules alone.',
+    caveat: 'Works only where Microsoft Defender is the active antivirus. Not needed when LSA protection is already on.',
+  },
+  lsa_protection: {
+    label: 'LSA protection (RunAsPPL)',
+    blocks: 'Runs LSASS as a protected process so ordinary admin-level tools cannot open it to dump credentials (failed attempts raise CD-06).',
+    caveat:
+      'Takes effect only after the next reboot, which Kestrel never forces; devices show “Pending reboot” until then. It can stop unsigned LSA plug-ins (some smart-card, SSO or password-filter add-ons) from loading, so test on a few devices first.',
+  },
+  report_vulnerable_driver_blocklist: {
+    label: 'Report the vulnerable-driver blocklist',
+    blocks:
+      'Shows whether the Microsoft vulnerable-driver blocklist is on. Ransomware loads known-vulnerable signed drivers to kill security tools (BYOVD).',
+    caveat: 'Report only: Kestrel never changes this setting. Turn it on through Windows Security or your device management.',
+    reportOnly: true,
+  },
+  task_scheduler_log: {
+    label: 'Task Scheduler operational log',
+    blocks: 'Turns on the Windows log that records scheduled tasks being created or changed, so persistence rule PS-05 still works if the live sensor misses an event.',
+  },
 }
 export const HARDENING_CONTROLS = Object.keys(HARDENING_INFO) as HardeningControl[]
 
@@ -201,6 +267,15 @@ export const ACTION_LABEL: Record<ResponseAction['type'], string> = {
   apply_hardening: 'Re-apply hardening',
   scan: 'Scan',
   collect_triage: 'Collect triage package',
+  remove_autorun: 'Remove persistence entry',
+}
+
+export const AUTORUN_KIND_LABEL: Record<import('@/api/types').AutorunKind, string> = {
+  registry_value: 'Registry value',
+  startup_file: 'Startup-folder file',
+  scheduled_task: 'Scheduled task',
+  service: 'Service',
+  wmi_subscription: 'WMI subscription',
 }
 
 /** Mirrors `ResponseAction::privilege()`. */
@@ -213,6 +288,7 @@ export function actionPrivilege(a: ResponseAction): string {
     case 'quarantine_file':
     case 'restore_file':
     case 'delete_quarantined':
+    case 'remove_autorun':
       return 'response.file'
     case 'block_destination':
     case 'block_image_network':
@@ -253,6 +329,12 @@ export function describeAction(a: ResponseAction): string {
       return a.path ? `Scan ${a.path}` : 'Scan running user-path programs'
     case 'collect_triage':
       return 'Collect triage package'
+    case 'remove_autorun': {
+      const what = a.kind === 'registry_value' && a.value_name ? `${a.location}\\${a.value_name}` : a.location
+      if (a.restore_data != null) return `Restore default of ${what} (${a.restore_data})`
+      const verb = a.kind === 'service' ? 'Disable service' : `Remove ${AUTORUN_KIND_LABEL[a.kind].replace(/^[A-Z][a-z]/, (m) => m.toLowerCase())}`
+      return `${verb} ${what}`
+    }
   }
 }
 

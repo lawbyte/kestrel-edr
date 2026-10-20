@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, CheckCircle2, ChevronLeft, CircleDashed, Copy, KeyRound, RefreshCw, XCircle } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, ChevronLeft, CircleDashed, Copy, KeyRound, RefreshCw, RotateCw, XCircle } from 'lucide-react'
 import { toast } from 'sonner'
 import { useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
@@ -34,7 +34,7 @@ function DeviceView({ d }: { d: DeviceDetail }) {
   const h = dev.health
   const [action, setAction] = useState<ActionSpec | null>(null)
   const isolated = dev.status === 'isolated'
-  const drift = d.hardening.filter((x) => x.desired && !x.applied).length
+  const drift = d.hardening.filter((x) => x.desired && x.applied === false && !x.pending_reboot && !x.report_only).length
 
   return (
     <div className="pb-16">
@@ -158,16 +158,36 @@ function DeviceView({ d }: { d: DeviceDetail }) {
                 <tbody>
                   {d.hardening.map((x) => {
                     const info = HARDENING_INFO[x.control as HardeningControl]
-                    const drifted = x.desired && !x.applied
+                    const reportOnly = x.report_only ?? info?.reportOnly ?? false
+                    const drifted = x.desired && x.applied === false && !x.pending_reboot && !reportOnly
                     return (
                       <tr key={x.control} className="border-b border-border last:border-0">
                         <td className="px-4 py-2.5">
                           <div className="font-medium">{info?.label ?? x.control}</div>
                           <div className="max-w-xl text-xs text-fg-muted">{info?.blocks}</div>
+                          {info?.caveat ? <div className="mt-0.5 max-w-xl text-xs text-fg-subtle">{info.caveat}</div> : null}
                         </td>
-                        <td className="px-4 py-2.5 text-sm">{x.desired ? 'On' : <span className="text-fg-subtle">Off</span>}</td>
+                        <td className="px-4 py-2.5 text-sm">{x.desired ? (reportOnly ? 'Report' : 'On') : <span className="text-fg-subtle">Off</span>}</td>
                         <td className="px-4 py-2.5">
-                          {x.applied ? (
+                          {reportOnly && x.desired ? (
+                            x.applied == null ? (
+                              <span className="inline-flex items-center gap-1 text-fg-subtle">
+                                <CircleDashed className="size-4" /> Not reported
+                              </span>
+                            ) : x.applied ? (
+                              <span className="inline-flex items-center gap-1 text-ok">
+                                <CheckCircle2 className="size-4" /> On in Windows
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 font-medium text-warn">
+                                <AlertTriangle className="size-4" /> Off in Windows
+                              </span>
+                            )
+                          ) : x.pending_reboot && !x.applied ? (
+                            <span className="inline-flex items-center gap-1 font-medium text-accent-text">
+                              <RotateCw className="size-4" /> Pending reboot
+                            </span>
+                          ) : x.applied ? (
                             <span className="inline-flex items-center gap-1 text-ok">
                               <CheckCircle2 className="size-4" /> Applied
                             </span>

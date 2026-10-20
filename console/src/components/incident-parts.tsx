@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Bot, CheckCircle2, Circle, ClipboardCheck, Hand, KeyRound, ShieldAlert, Zap } from 'lucide-react'
+import { useState } from 'react'
 import { toast } from 'sonner'
 import { api, qk } from '@/api/endpoints'
 import type { ChecklistItem, DataCategory, Incident, IncidentDetail, TreeNode } from '@/api/types'
@@ -7,6 +8,7 @@ import { useAuth } from '@/lib/auth'
 import { actionPrivilege, DATA_CATEGORY_LABEL, DATA_CATEGORY_REMEDIATION, describeAction } from '@/lib/labels'
 import { cn } from '@/lib/utils'
 import { Button } from './ui/button'
+import { Dialog, DialogContent } from './ui/dialog'
 import { Tooltip } from './ui/misc'
 
 /**
@@ -72,12 +74,21 @@ export function pickTarget(nodes: TreeNode[]): TreeNode | null {
   return rank(descendants.filter(isSafeKillTarget))
 }
 
+/** Rule ids that put an incident in the impact stage (+10): exfiltration, ransomware, credential dumping. */
+export function impactStage(ruleIds: string[]): string | null {
+  if (ruleIds.some((r) => r.startsWith('RW-'))) return 'Ransomware rule fired (RW-xx)'
+  if (ruleIds.some((r) => r.startsWith('CD-'))) return 'Credential-dumping rule fired (CD-xx)'
+  if (ruleIds.some((r) => r === 'ST-04' || r === 'ST-14')) return 'Exfiltration-stage rule fired (ST-04 / ST-14)'
+  return null
+}
+
 /** Explains the 0-100 priority as the contract defines it. */
 export function priorityFactors(i: Incident): { label: string; points: number }[] {
   const base = { info: 5, low: 20, medium: 45, high: 70, critical: 90 }[i.severity]
   const f = [{ label: `Highest alert severity: ${i.severity}`, points: base }]
   if (i.data_at_risk.length) f.push({ label: 'Credential stores were touched', points: 10 })
-  if (i.rule_ids.some((r) => r === 'ST-04' || r === 'ST-14')) f.push({ label: 'Exfiltration-stage rule fired (ST-04 / ST-14)', points: 10 })
+  const stage = impactStage(i.rule_ids)
+  if (stage) f.push({ label: stage, points: 10 })
   if (!i.contained) f.push({ label: 'Not contained yet', points: 5 })
   return f
 }
@@ -141,6 +152,7 @@ const KIND_META = {
 export function RemediationChecklist({ incident }: { incident: IncidentDetail }) {
   const qc = useQueryClient()
   const { can } = useAuth()
+  const [confirming, setConfirming] = useState<ChecklistItem | null>(null)
   const m = useMutation({
     mutationFn: (v: { item: ChecklistItem; done: boolean }) => api.setChecklist(incident.id, v.item.id, v.done),
     onMutate: async (v) => {
@@ -211,12 +223,12 @@ export function RemediationChecklist({ incident }: { incident: IncidentDetail })
                       )}
                       <div className="min-w-0 flex-1">
                         <p className={cn('text-sm [overflow-wrap:anywhere]', it.done && k !== 'done' && 'text-fg-muted line-through decoration-fg-subtle/60')}>{it.text}</p>
-                        {it.action && k === 'approve' ? <p className="mt-0.5 font-mono text-[11.5px] text-fg-subtle">{describeAction(it.action)}</p> : null}
+                        {it.action && k === 'approve' ? <p className="mt-0.5 font-mono text-[11.5px] text-fg-subtle [overflow-wrap:anywhere]">{describeAction(it.action)}</p> : null}
                       </div>
                       {k === 'approve' && !it.done ? (
                         <Tooltip content={allowed ? 'Sends the action to the device now' : `Your role is missing ${priv}`}>
                           <span>
-                            <Button size="sm" variant="primary" disabled={!allowed || m.isPending} onClick={() => m.mutate({ item: it, done: true })}>
+                            <Button size="sm" variant="primary" disabled={!allowed || m.isPending} onClick={() => (it.action?.type === 'remove_autorun' ? setConfirming(it) : m.mutate({ item: it, done: true }))}>
                               <ClipboardCheck /> Approve
                             </Button>
                           </span>
@@ -230,6 +242,44 @@ export function RemediationChecklist({ incident }: { incident: IncidentDetail })
           </div>
         )
       })}
+      {confirming?.action?.type === 'remove_autorun' ? (
+        <Dialog open onOpenChange={(o) => !o && setConfirming(null)}>
+          <DialogContent
+            title="Remove this persistence entry?"
+            description={describeAction(confirming.action)}
+            footer={
+              <>
+                <Button variant="ghost" onClick={() => setConfirming(null)}>
+                  Cancel
+                </Button>
+                <Button
+                  variant="primary"
+                  disabled={m.isPending}
+                  onClick={() => {
+                    m.mutate({ item: confirming, done: true })
+                    setConfirming(null)
+                  }}
+                >
+                  Remove entry
+                </Button>
+              </>
+            }
+          >
+            <div className="space-y-2 text-sm text-fg-muted">
+              <p>
+                The agent re-reads the entry, backs it up to the quarantine vault, then{' '}
+                {confirming.action.kind === 'service'
+                  ? 'stops the service and sets it to disabled (it is not deleted)'
+                  : confirming.action.restore_data != null
+                    ? `writes the safe value ${confirming.action.restore_data}`
+                    : 'deletes it'}
+                . It refuses Kestrel’s own entries and protected Windows entries.
+              </p>
+              <p>If this is legitimate software, the user loses whatever it started at logon until you restore it from the backup.</p>
+            </div>
+          </DialogContent>
+        </Dialog>
+      ) : null}
     </div>
   )
 }

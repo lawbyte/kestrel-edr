@@ -275,6 +275,12 @@
   .prose-k li {
     margin: 0.15em 0;
   }
+  .prose-k blockquote {
+    margin: 0.4em 0 0.6em;
+    padding: 0.35em 0 0.35em 0.8em;
+    border-left: 3px solid var(--border-strong);
+    color: var(--fg);
+  }
   .prose-k h1,
   .prose-k h2,
   .prose-k h3 {

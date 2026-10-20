@@ -17,7 +17,23 @@ pub const HARDENING_CONTROLS: &[&str] = &[
     "dpapi_debug_channel",
     "asr_rules",
     "browser_disable_remote_debugging",
+    "wdigest_off",
+    "asr_lsass",
+    "lsa_protection",
+    "report_vulnerable_driver_blocklist",
+    "task_scheduler_log",
 ];
+
+/// Controls Kestrel only reports on and never changes.
+pub const REPORT_ONLY_CONTROLS: &[&str] = &["report_vulnerable_driver_blocklist"];
+
+/// Default of a hardening control when a stored policy predates it.
+pub fn hardening_default(control: &str) -> bool {
+    serde_json::to_value(kestrel_common::Hardening::default())
+        .ok()
+        .and_then(|v| v.get(control).and_then(|b| b.as_bool()))
+        .unwrap_or(false)
+}
 
 pub async fn get_dashboard(State(st): State<AppState>, p: Principal) -> ApiResult<Json<Value>> {
     p.require("read")?;
@@ -97,10 +113,11 @@ pub async fn get_dashboard(State(st): State<AppState>, p: Principal) -> ApiResul
             "SELECT count(*) FILTER (WHERE COALESCE((d.health->'hardening'->>$1)::boolean, false)), count(*) \
              FROM devices d LEFT JOIN groups g ON g.id = d.group_id \
              JOIN policies p ON p.id = COALESCE(g.policy_id, (SELECT policy_id FROM groups WHERE is_default LIMIT 1)) \
-             WHERE d.decommissioned_at IS NULL AND COALESCE((p.body->'hardening'->>$1)::boolean, false) \
+             WHERE d.decommissioned_at IS NULL AND COALESCE((p.body->'hardening'->>$1)::boolean, $2) \
                AND COALESCE(p.body->'hardening'->>'mode', 'audit') != 'off'",
         )
         .bind(control)
+        .bind(hardening_default(control))
         .fetch_one(db)
         .await?;
         hardening.push(json!({"control": control, "applied": applied, "total": total_desired}));

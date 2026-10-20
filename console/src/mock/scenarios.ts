@@ -2,6 +2,7 @@ import type { Device, IncidentDetail, RuleMeta, RuleMode } from '@/api/types'
 import { AISYAH, DANIEL, DAY, HOUR, MARCUS, MIN, NOW, PRIYA } from './fleet'
 import { Story } from './story'
 import { chance, int, pick, rand, sha256 } from './rng'
+import { basename } from '@/lib/utils'
 
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
 const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'
@@ -495,8 +496,240 @@ function noise(ctx: Ctx, all: Device[]): IncidentDetail[] {
   return out
 }
 
+/** Ransomware: fake shipping-label viewer → shadow copies deleted, recovery disabled, logs cleared → mass rename + ransom notes → canary → host isolated. */
+function ransomware(ctx: Ctx): IncidentDetail {
+  const s = story(ctx, 'OPS-DT-009', NOW - 3 * HOUR - 5 * MIN)
+  const d = s.dev
+  const ex = s.proc(null, EXPLORER, 'C:\\Windows\\Explorer.EXE', { dt: -4 * HOUR, pid: 3988, signer: MS, quiet: true })
+  const img = `${home(d)}\\AppData\\Local\\Temp\\LabelViewer\\lblview.exe`
+  const sha = '9d1c6e0b7f3a2c58e4d1b0a9f8e7d6c5b4a3928170f6e5d4c3b2a1908f7e6d5c'
+  const rw = s.proc(ex, img, `"${img}" --silent`, { dt: 0, sha, size: 3_311_616, motw: 3 })
+  s.alert(rw, 300, 'ST-12', 'An unsigned program extracted from an emailed ZIP ran from the Temp folder.', { evidence: [s.events.find((e) => e.guid === rw.guid)!] })
+  const vss = s.proc(rw, 'C:\\Windows\\System32\\vssadmin.exe', 'vssadmin.exe delete shadows /all /quiet', { dt: 41_000, signer: MS, exitDt: 41_400 })
+  const vssEv = s.events.find((e) => e.guid === vss.guid)!
+  s.alert(vss, 41_100, 'RW-01', 'lblview.exe ran vssadmin to delete every Volume Shadow Copy on the device.', {
+    evidence: [vssEv],
+  })
+  s.alert(vss, 41_150, 'SIG-c947b146', 'vssadmin.exe delete shadows /all /quiet', { evidence: [vssEv] })
+  const bcd = s.proc(rw, 'C:\\Windows\\System32\\bcdedit.exe', 'bcdedit.exe /set {default} recoveryenabled No', { dt: 42_300, signer: MS, exitDt: 42_500 })
+  s.alert(bcd, 42_400, 'RW-02', 'lblview.exe switched off Windows boot recovery. Undo with: bcdedit /set {default} recoveryenabled Yes', { evidence: [s.events.find((e) => e.guid === bcd.guid)!] })
+  const wev = s.proc(rw, 'C:\\Windows\\System32\\wevtutil.exe', 'wevtutil.exe cl System', { dt: 43_000, signer: MS, exitDt: 43_200 })
+  s.alert(wev, 43_100, 'RW-04', 'lblview.exe cleared the System event log after deleting shadow copies.', { evidence: [s.events.find((e) => e.guid === wev.guid)!] })
+  const share = '\\\\SRV-FS-01\\Shared\\Warehouse'
+  const fa = s.ev(rw, 58_000, {
+    type: 'file_activity',
+    window_ms: 10_000,
+    files_touched: 430,
+    dirs: 37,
+    renames: 412,
+    ext_changes: 401,
+    overwrites: 0,
+    new_files: 37,
+    deletes: 0,
+    net_paths: 96,
+    top_new_ext: 'k3str',
+    top_ext_pct: 95,
+    note_name: 'how_to_back_files.txt',
+    note_dirs: 37,
+    canary_hits: [],
+    sample_paths: [`${home(d)}\\Documents\\Shipping\\manifest_0921.xlsx.k3str`, `${share}\\Q3\\stock_count.xlsx.k3str`, `${home(d)}\\Desktop\\how_to_back_files.txt`],
+  })
+  const canary = s.ev(rw, 58_900, {
+    type: 'file_activity',
+    window_ms: 1_000,
+    files_touched: 1,
+    dirs: 1,
+    renames: 1,
+    ext_changes: 1,
+    top_new_ext: 'k3str',
+    top_ext_pct: 100,
+    canary_hits: [`${home(d)}\\Documents\\~$Budget_FY26.xlsx`],
+    sample_paths: [],
+  })
+  s.alert(rw, 58_100, 'RW-06', 'lblview.exe renamed 412 files in 37 folders within 10 seconds to the new extension .k3str, 96 of them on \\\\SRV-FS-01\\Shared.', {
+    evidence: [fa],
+    auto: [
+      { action: { type: 'suspend_process', pid: rw.pid, guid: rw.guid }, detail: 'Suspended lblview.exe and 0 children', after: 120 },
+      { action: { type: 'kill_process', pid: rw.pid, guid: rw.guid, tree: true }, detail: 'Terminated 1 process after canary corroboration', after: 950 },
+      { action: { type: 'quarantine_file', path: img, sha256: sha }, detail: 'Moved to quarantine vault', after: 1_300, artifact: 'q-5e2a91c4' },
+    ],
+  })
+  s.alert(rw, 58_950, 'RW-07', 'lblview.exe renamed a ransomware canary document (~$Budget_FY26.xlsx).', { evidence: [canary] })
+  s.alert(rw, 59_000, 'RW-08', 'how_to_back_files.txt was created in 37 folders within 20 seconds (ransom note).', { evidence: [fa] })
+  s.alert(rw, 59_200, 'RW-12', 'Shadow-copy deletion, recovery tampering, log clearing and mass encryption from one process tree within 20 minutes.', {
+    evidence: [vssEv, fa],
+    auto: [{ action: { type: 'isolate_host', allow_ips: [] }, detail: 'Host isolated; only the Kestrel server is reachable', after: 600 }],
+  })
+  s.manualAction(14 * MIN, MARCUS, { type: 'collect_triage' }, 'Preserve evidence before reimaging', 'Triage package uploaded (6.8 MB)')
+  return s.finalize({
+    status: 'in_progress',
+    assignee: MARCUS,
+    contained: true,
+    title: `Ransomware activity by lblview.exe on ${d.hostname}`,
+    storyline: `\`lblview.exe\` (from a temp folder, unsigned) ran on **${d.hostname}** as \`${d.logged_on_user ?? 'the user'}\`. The file carries a Mark-of-the-Web from the Internet zone.
+
+**What happened**
+
+- It deleted every **Volume Shadow Copy** (\`vssadmin delete shadows /all /quiet\`), switched off **boot recovery** and **cleared the System event log** — classic ransomware preparation.
+- 17 seconds later it **renamed 412 files in 37 folders within 10 s**, new extension \`.k3str\` (95%), **96 of them on \`\\\\SRV-FS-01\\Shared\`**, and dropped \`how_to_back_files.txt\` in 37 folders.
+- It renamed a **ransomware canary** document, which confirmed the verdict.
+
+**Response:** the agent suspended and then killed \`lblview.exe\`, quarantined it and **isolated the host** (the Kestrel server stays reachable).
+
+> Treat this as **active ransomware**. Kestrel works in user mode and cannot guarantee it stopped every encrypting process, or files encrypted over the network from another machine. Keep **${d.hostname}** isolated, check every file share it could write to, confirm your backups are intact before restoring, and do not pay or contact the attackers.`,
+    approve: [{ text: `Collect a triage package from ${d.hostname} to check for other autoruns`, action: { type: 'collect_triage' }, done: true }],
+    manual: [
+      { text: `Keep ${d.hostname} isolated and powered on until you know the scope — unplugging it destroys memory evidence, and rebooting may let the ransomware run again` },
+      { text: 'Check backups before restoring anything: confirm the latest offline or immutable backup is intact, and whether Volume Shadow Copies survived (`vssadmin list shadows`) — most ransomware deletes them first', done: true },
+      { text: `Check every file share ${d.hostname} could write to for encrypted files (extension .k3str), and take affected shares offline` },
+      { text: 'Do not pay or contact the attackers. Preserve the ransom note (how_to_back_files.txt) and one encrypted sample file to identify the family (e.g. No More Ransom) and for the police report' },
+      { text: `Reset the passwords of accounts used on ${d.hostname}: ransomware operators usually hold domain credentials before they encrypt` },
+      { text: 'If personal data was affected, assess your breach-notification duty (Singapore PDPA: notify the PDPC within 3 days of deciding a breach is notifiable; Indonesia UU PDP: within 3 × 24 hours)' },
+    ],
+    comments: [
+      { author: MARCUS, dt: 9 * MIN, body: 'SRV-FS-01 Warehouse share: 96 files renamed, restored from last night’s Veeam job. Shadow copies on the file server are intact (the attack only hit the desktop’s own VSS).' },
+    ],
+    statusChanges: [{ dt: 6 * MIN, title: 'Status → In progress, assigned to Marcus Lim', actor: MARCUS.name }],
+  })
+}
+
+/** Credential dumping on an app server: WDigest downgrade (reverted) → comsvcs MiniDump of lsass → killed, dump quarantined. */
+function credDump(ctx: Ctx): IncidentDetail {
+  const s = story(ctx, 'SRV-APP-02', NOW - 7 * HOUR - 20 * MIN)
+  const user = 'HARBOURLINE\\svc_deploy'
+  const rdp = s.proc(null, 'C:\\Windows\\explorer.exe', 'C:\\Windows\\Explorer.EXE', { dt: -40 * MIN, pid: 6120, signer: MS, quiet: true, user })
+  const cmd = s.proc(rdp, CMD, '"C:\\Windows\\system32\\cmd.exe"', { dt: -2 * MIN, signer: MS, user, integrity: 'high' })
+  const reg = s.proc(cmd, 'C:\\Windows\\System32\\reg.exe', 'reg add HKLM\\SYSTEM\\CurrentControlSet\\Control\\SecurityProviders\\WDigest /v UseLogonCredential /t REG_DWORD /d 1 /f', { dt: 0, signer: MS, user, integrity: 'high', exitDt: 150 })
+  const wdKey = 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\SecurityProviders\\WDigest'
+  const wd = s.ev(reg, 90, { type: 'registry_set', key: wdKey, value_name: 'UseLogonCredential', data: '1', op: 'set' })
+  s.alert(reg, 120, 'CD-12', 'reg.exe set WDigest UseLogonCredential = 1, which makes Windows keep cleartext passwords in LSASS memory.', {
+    evidence: [s.events.find((e) => e.guid === reg.guid)!, wd],
+    auto: [{ action: { type: 'remove_autorun', kind: 'registry_value', location: wdKey, value_name: 'UseLogonCredential', restore_data: 'dword:0' }, detail: 'Value re-read, previous data (1) backed up, restored to 0', after: 300, artifact: 'ar-7c1e04b2d9f3' }],
+  })
+  const dump = 'C:\\Windows\\Temp\\debug.dmp'
+  const rd = s.proc(cmd, 'C:\\Windows\\System32\\rundll32.exe', `rundll32.exe C:\\Windows\\System32\\comsvcs.dll, MiniDump 712 ${dump} full`, { dt: 64_000, signer: MS, user, integrity: 'high', exitDt: 65_900 })
+  const rdEv = s.events.find((e) => e.guid === rd.guid)!
+  const acc = s.ev(rd, 64_200, { type: 'process_access', target_pid: 712, target_guid: null, target_image: 'C:\\Windows\\System32\\lsass.exe', granted_access: 0x1fffff, return_code: 0 })
+  const df = s.file(rd, 64_900, dump, 'create')
+  s.alert(rd, 65_000, 'CD-01', 'rundll32.exe called comsvcs.dll MiniDump on lsass.exe (PID 712) and wrote C:\\Windows\\Temp\\debug.dmp.', {
+    evidence: [rdEv, acc, df],
+    auto: [
+      { action: { type: 'kill_process', pid: rd.pid, guid: rd.guid, tree: false }, detail: 'Terminated 1 process', after: 250 },
+      { action: { type: 'quarantine_file', path: dump, sha256: null }, detail: 'Moved the 61 MB dump to the quarantine vault', after: 700, artifact: 'q-91fd30aa' },
+    ],
+  })
+  s.alert(rd, 65_050, 'SIG-646ea171', 'rundll32.exe C:\\Windows\\System32\\comsvcs.dll, MiniDump 712 C:\\Windows\\Temp\\debug.dmp full', { evidence: [rdEv] })
+  return s.finalize({
+    status: 'open',
+    contained: true,
+    title: `Credential dumping by rundll32.exe on ${s.dev.hostname}`,
+    storyline: `An administrator session (\`${user}\`, RDP) on **${s.dev.hostname}** opened an elevated \`cmd.exe\`.
+
+**What happened**
+
+- \`reg.exe\` set **WDigest \`UseLogonCredential\` = 1**, so Windows would keep cleartext passwords in LSASS memory from the next logon.
+- A minute later \`rundll32.exe\` used **comsvcs.dll MiniDump** on \`lsass.exe\` (access \`0x1fffff\`) and wrote \`C:\\Windows\\Temp\\debug.dmp\`.
+
+**Response:** the agent **restored WDigest to 0** (old value backed up as \`ar-7c1e04b2d9f3\`), killed \`rundll32.exe\` and **quarantined the dump**. The dump was complete before the kill landed.
+
+> Treat every account that logged on to **${s.dev.hostname}** as **compromised**: a dump of LSASS contains reusable password hashes and Kerberos tickets. Killing the dumper does not undo a dump that already finished. Reset those passwords and look for logons from ${s.dev.hostname} to other machines.`,
+    approve: [{ text: `Isolate host ${s.dev.hostname}`, action: { type: 'isolate_host', allow_ips: [] } }],
+    manual: [
+      { text: `Reset the passwords of every account that logged on to ${s.dev.hostname} (interactive, RDP, services and scheduled tasks), administrators first` },
+      { text: `Rotate service-account credentials used on ${s.dev.hostname} (svc_deploy, svc_sql) and the local administrator password (with LAPS, force an immediate rotation)` },
+      { text: `Look for lateral movement: logons from ${s.dev.hostname} to servers and other PCs since the alert (RDP, SMB/PsExec, WMI, WinRM)` },
+      { text: `If a domain or enterprise admin had logged on to ${s.dev.hostname}, treat the domain as compromised: reset the krbtgt account twice (allowing replication in between) and review privileged groups` },
+      { text: 'Find out who used svc_deploy interactively over RDP — a deployment account should never log on interactively' },
+      { text: 'Turn on LSA protection and WDigest-off in the device’s policy (Windows hardening); LSA protection takes effect after the next reboot' },
+    ],
+  })
+}
+
+/** LSA protection doing its job: a dumper's open of lsass is refused (CD-06, Audit). */
+function lsassBlocked(ctx: Ctx): IncidentDetail {
+  const s = story(ctx, 'FIN-LT-014', NOW - 30 * HOUR)
+  const d = s.dev
+  const ex = s.proc(null, EXPLORER, 'C:\\Windows\\Explorer.EXE', { dt: -2 * HOUR, pid: 4410, signer: MS, quiet: true })
+  const img = `${home(d)}\\Downloads\\HP_Support_Assistant_Fix\\hpfix.exe`
+  const p = s.proc(ex, img, `"${img}"`, { dt: 0, size: 512_000, motw: 3, integrity: 'high', exitDt: 4_000 })
+  const acc = s.ev(p, 1_800, { type: 'process_access', target_pid: 1004, target_guid: null, target_image: 'C:\\Windows\\System32\\lsass.exe', granted_access: 0x1410, return_code: 0xc0000022 })
+  s.alert(p, 1_900, 'CD-06', 'hpfix.exe, unsigned and from Downloads, tried to read lsass.exe memory. Windows refused (LSA protection is on).', {
+    evidence: [s.events.find((e) => e.guid === p.guid)!, acc],
+  })
+  return s.finalize({
+    status: 'open',
+    contained: false,
+    storyline: `\`hpfix.exe\` (from the Downloads folder, unsigned) ran elevated on **${d.hostname}** and asked for read access to \`lsass.exe\` memory (\`0x1410\`). Windows **refused** (\`0xc0000022\` access denied) because **LSA protection** is on for this device — no credentials were read.
+
+The program still ran with administrator rights. Find out where it came from.`,
+    approve: [
+      { text: 'Quarantine hpfix.exe', action: { type: 'quarantine_file', path: img, sha256: null } },
+      { text: 'Scan the user’s Downloads folder', action: { type: 'scan', path: `${home(d)}\\Downloads` } },
+    ],
+    manual: [{ text: `Ask ${d.logged_on_user ?? 'the user'} where hpfix.exe came from (download link, email, chat) and why they ran it as administrator` }],
+  })
+}
+
+/** Persistence: fake PDF converter installs a hidden logon task, a Run key and a WMI subscription. */
+function persistence(ctx: Ctx): IncidentDetail {
+  const s = story(ctx, 'HR-LT-006', NOW - 5 * HOUR - 50 * MIN)
+  const d = s.dev
+  const sid = 'S-1-5-21-3623811015-3361044348-30300820-1013'
+  const ex = s.proc(null, EXPLORER, 'C:\\Windows\\Explorer.EXE', { dt: -3 * HOUR, pid: 5280, signer: MS, quiet: true })
+  const setup = `${home(d)}\\Downloads\\PDF_Converter_Pro_Setup.exe`
+  const st = s.proc(ex, setup, `"${setup}"`, { dt: 0, signed: 'invalid', signer: 'PDF Tools Ltd', size: 8_400_000, motw: 3, exitDt: 25_000 })
+  const payload = `${home(d)}\\AppData\\Roaming\\PdfTools\\pdfupd.exe`
+  s.file(st, 9_000, payload, 'create')
+  const taskName = '\\PdfTools Updater'
+  const task = s.ev(st, 11_000, { type: 'task_registered', name: taskName, op: 'created', user: d.logged_on_user, actions: [`"${payload}" /background`], hidden: true, triggers: ['logon', 'time'] })
+  s.alert(st, 11_200, 'PS-05', 'PDF_Converter_Pro_Setup.exe registered a hidden scheduled task that starts an unsigned program from AppData at every logon.', { evidence: [task] })
+  const runKey = `HKU\\${sid}\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`
+  const ps = 'powershell.exe -w hidden -nop -enc JABjAD0ATgBlAHcALQBPAGIAagBlAGMAdAAgAE4AZQB0AC4AVwBlAGIAQwBsAGkAZQBuAHQA'
+  const run = s.ev(st, 12_500, { type: 'registry_set', key: runKey, value_name: 'PdfToolsHelper', data: ps, op: 'set' })
+  s.alert(st, 12_700, 'PS-02', 'A Run key value starts hidden PowerShell with an encoded command at logon.', {
+    evidence: [run],
+    auto: [{ action: { type: 'remove_autorun', kind: 'registry_value', location: runKey, value_name: 'PdfToolsHelper' }, detail: 'Value re-read, backed up and deleted', after: 350, artifact: 'ar-3fa9c2e17b04' }],
+  })
+  s.alert(st, 12_750, 'SIG-9c5037d1', `Run key PdfToolsHelper written by ${basename(setup)} from Downloads`, { evidence: [run] })
+  const wmi = s.ev(st, 14_000, {
+    type: 'wmi_subscription',
+    namespace: 'root\\subscription',
+    filter: "SELECT * FROM __InstanceModificationEvent WITHIN 60 WHERE TargetInstance ISA 'Win32_PerfFormattedData_PerfOS_System'",
+    consumer: `CommandLineEventConsumer="PdfToolsSync" "${payload}" /sync`,
+  })
+  s.alert(st, 14_200, 'PS-08', 'A WMI permanent subscription runs pdfupd.exe through a CommandLineEventConsumer every few minutes.', {
+    evidence: [wmi],
+    auto: [{ action: { type: 'remove_autorun', kind: 'wmi_subscription', location: 'PdfToolsSync' }, detail: 'Binding, consumer and filter exported to MOF and deleted', after: 500, artifact: 'ar-b81d55e0a6c2' }],
+  })
+  return s.finalize({
+    status: 'open',
+    contained: false,
+    title: `Persistence planted by PDF_Converter_Pro_Setup.exe on ${d.hostname}`,
+    storyline: `\`PDF_Converter_Pro_Setup.exe\` (from the Downloads folder, with an invalid “PDF Tools Ltd” signature) ran on **${d.hostname}** as \`${d.logged_on_user ?? 'the user'}\`. The file carries a Mark-of-the-Web from the Internet zone.
+
+**What happened**
+
+- It dropped \`pdfupd.exe\` into AppData and registered a **hidden scheduled task** \`\\PdfTools Updater\` that runs it at every logon.
+- It added a **Run key** value \`PdfToolsHelper\` that starts hidden PowerShell with an encoded command.
+- It bound a **WMI subscription** whose CommandLineEventConsumer \`PdfToolsSync\` runs \`pdfupd.exe\` every minute.
+
+**Response:** the agent removed the Run key value (backup \`ar-3fa9c2e17b04\`) and the WMI subscription (backup \`ar-b81d55e0a6c2\`). **The scheduled task is still in place** — PS-05 runs in Audit here.
+
+**Persistence:** malware usually installs more than one autorun: collect a triage package (it lists every autorun) and compare it with a clean device.`,
+    approve: [
+      { text: 'Remove scheduled task \\PdfTools Updater (the agent backs it up to the quarantine vault first)', action: { type: 'remove_autorun', kind: 'scheduled_task', location: taskName } },
+      { text: `Quarantine ${payload}`, action: { type: 'quarantine_file', path: payload, sha256: null } },
+      { text: `Collect a triage package from ${d.hostname} to check for other autoruns`, action: { type: 'collect_triage' } },
+    ],
+    manual: [
+      { text: 'Compare the triage package’s autoruns list with a clean device: malware usually installs more than one autorun' },
+      { text: `Ask ${d.logged_on_user ?? 'the user'} where PDF_Converter_Pro_Setup.exe came from (download link, email, chat) and block that source` },
+    ],
+  })
+}
+
 export function buildIncidents(ctx: Ctx, all: Device[]): IncidentDetail[] {
-  return [lumma(ctx), abe(ctx), debugKey(ctx), canary(ctx), vidar(ctx), backupFp(ctx), acreed(ctx), filefix(ctx), tamper(ctx), ...noise(ctx, all)]
+  return [lumma(ctx), abe(ctx), debugKey(ctx), canary(ctx), vidar(ctx), backupFp(ctx), acreed(ctx), filefix(ctx), tamper(ctx), ransomware(ctx), credDump(ctx), lsassBlocked(ctx), persistence(ctx), ...noise(ctx, all)]
 }
 
 /** A fresh incident injected while the console is open, to exercise live updates. */

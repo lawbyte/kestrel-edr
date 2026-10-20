@@ -19,7 +19,8 @@ import type {
   Settings,
   User,
 } from '@/api/types'
-import { BUILTIN_RULES, CUSTOM_RULES } from './catalog'
+import { BUILTIN_RULES, CUSTOM_RULES, PACK_RULES } from './catalog'
+import { FAMILY_RULES } from './catalog-families'
 import { buildTelemetry, type DeviceTelemetry } from './events'
 import {
   AISYAH,
@@ -78,8 +79,14 @@ export class MockDb {
   session: User | null = null
 
   constructor() {
-    for (const r of BUILTIN_RULES) this.rules.set(r.id, r)
-    for (const r of CUSTOM_RULES) {
+    // FIN-LT-021 got LSA protection from its policy but has not rebooted yet.
+    const fin = this.devices.find((d) => d.hostname === 'FIN-LT-021')
+    if (fin?.health.hardening) Object.assign(fin.health.hardening, { lsa_protection: false, lsa_protection_pending_reboot: true })
+    // FIN-LT-014 has LSA protection in effect (it refused the dumper in the CD-06 scenario).
+    const ppl = this.devices.find((d) => d.hostname === 'FIN-LT-014')
+    if (ppl?.health.hardening) Object.assign(ppl.health.hardening, { lsa_protection: true, lsa_protection_pending_reboot: false })
+    for (const r of [...BUILTIN_RULES, ...FAMILY_RULES]) this.rules.set(r.id, r)
+    for (const r of [...CUSTOM_RULES, ...PACK_RULES]) {
       const { source, enabled_custom, ...meta } = r
       this.rules.set(r.id, meta)
       this.customRules.set(r.id, { source, enabled_custom })

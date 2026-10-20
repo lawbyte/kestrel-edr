@@ -1,6 +1,6 @@
 use super::{csv, list_response, page, parse_uuid, ApiJson, ApiPath, ApiQuery, Arg, Filter};
 use crate::{
-    api::dashboard::HARDENING_CONTROLS,
+    api::dashboard::{HARDENING_CONTROLS, REPORT_ONLY_CONTROLS},
     audit,
     auth::Principal,
     error::{ApiError, ApiResult},
@@ -111,12 +111,26 @@ pub async fn detail(
             .to_string();
         for c in HARDENING_CONTROLS {
             let desired = hv.get(*c).and_then(|v| v.as_bool()).unwrap_or(false) && mode != "off";
-            hardening.push(json!({
+            let mut row = json!({
                 "control": c,
                 "desired": desired,
                 "applied": health.hardening.get(*c).copied(),
                 "source": format!("policy:{} ({})", pol.name, mode),
-            }));
+            });
+            if REPORT_ONLY_CONTROLS.contains(c) {
+                row["report_only"] = true.into();
+            }
+            // Agents report a control that is configured but waits for a
+            // reboot (LSA protection) as `<control>_pending_reboot`.
+            if health
+                .hardening
+                .get(&format!("{c}_pending_reboot"))
+                .copied()
+                .unwrap_or(false)
+            {
+                row["pending_reboot"] = true.into();
+            }
+            hardening.push(row);
         }
     }
     let dups: Vec<(Uuid, String, i64, i64, Option<i64>)> = sqlx::query_as(
@@ -372,7 +386,70 @@ pub fn validate_manual_action(a: &ResponseAction) -> ApiResult<()> {
                 "block_destination needs a single IP address",
             ));
         }
+        ResponseAction::RemoveAutorun {
+            kind,
+            location,
+            value_name,
+            restore_data,
+        } => validate_remove_autorun(
+            *kind,
+            location,
+            value_name.as_deref(),
+            restore_data.as_deref(),
+        )?,
         _ => {}
+    }
+    Ok(())
+}
+
+/// Shape checks for an analyst-issued `remove_autorun`. The agent re-reads the
+/// entry, backs it up and refuses protected/Kestrel entries itself; the server
+/// rejects obviously malformed or self-targeting requests early.
+fn validate_remove_autorun(
+    kind: kestrel_common::AutorunKind,
+    location: &str,
+    value_name: Option<&str>,
+    restore_data: Option<&str>,
+) -> ApiResult<()> {
+    use kestrel_common::AutorunKind as K;
+    let bad = |m: &str| Err(ApiError::bad_request(m.to_string()));
+    let loc = location.trim();
+    if loc.is_empty() || loc.len() > 1024 || loc.chars().any(|c| c.is_control()) {
+        return bad("remove_autorun needs a location (1-1024 printable characters)");
+    }
+    for v in [value_name, restore_data].into_iter().flatten() {
+        if v.len() > 2048 || v.contains('\0') {
+            return bad("remove_autorun value_name/restore_data too long or contains NUL");
+        }
+    }
+    if loc.to_ascii_lowercase().contains("kestrel") {
+        return bad("remove_autorun never targets Kestrel's own entries");
+    }
+    let upper = loc.to_ascii_uppercase();
+    match kind {
+        K::RegistryValue => {
+            if !(upper.starts_with(r"HKLM\") || upper.starts_with(r"HKU\")) {
+                return bad(r"registry_value location must be an absolute HKLM\ or HKU\<SID>\ key");
+            }
+        }
+        K::ScheduledTask => {
+            if !loc.starts_with('\\') {
+                return bad(r"scheduled_task location must be a task path such as \Folder\Name");
+            }
+        }
+        K::StartupFile => {
+            if !upper.contains(r"\START MENU\PROGRAMS\STARTUP\") {
+                return bad("startup_file location must be a file inside a Startup folder");
+            }
+        }
+        K::Service | K::WmiSubscription => {
+            if loc.contains('\\') || loc.contains('/') {
+                return bad("service / wmi_subscription location is a bare name");
+            }
+        }
+    }
+    if restore_data.is_some() && kind != K::RegistryValue {
+        return bad("restore_data only applies to registry_value");
     }
     Ok(())
 }

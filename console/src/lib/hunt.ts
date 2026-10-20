@@ -19,19 +19,26 @@ export const HUNT_FIELDS = [
   'user',
   'hostname',
   'device_id',
+  'reg_key',
+  'reg_value',
+  'target_image',
+  'granted_access',
+  'return_code',
+  'op',
+  'new_ext',
 ] as const
 export type HuntField = (typeof HUNT_FIELDS)[number]
 
 export const HUNT_OPS = ['=', '!=', '~', '>', '<'] as const
 export type HuntOp = (typeof HUNT_OPS)[number]
 
-export const NUMERIC_FIELDS: ReadonlySet<HuntField> = new Set(['dst_port'])
+export const NUMERIC_FIELDS: ReadonlySet<HuntField> = new Set(['dst_port', 'granted_access', 'return_code'])
 
 export const FIELD_HELP: Record<HuntField, string> = {
-  event_type: 'Event kind, e.g. process_start, file_access, net_connect, dns_query, dpapi_unprotect',
+  event_type: 'Event kind, e.g. process_start, file_access, file_activity, registry_set, task_registered, service_installed, wmi_subscription',
   image: 'Full path of the acting process image',
-  cmdline: 'Process command line (process_start)',
-  file_path: 'Path of a file_access or image_load event',
+  cmdline: 'Command line (process_start), registry value data, task actions, service ImagePath or WMI consumer',
+  file_path: 'Path of a file_access or image_load event; first sample of file_activity; task path; service ImagePath',
   dst_ip: 'Destination IP of a network connection',
   dst_port: 'Destination port (number; supports > and <)',
   dns_qname: 'Queried DNS name',
@@ -40,6 +47,13 @@ export const FIELD_HELP: Record<HuntField, string> = {
   user: 'User account that ran the process',
   hostname: 'Device hostname',
   device_id: 'Device UUID',
+  reg_key: 'Registry key (registry_set), service key (service_installed), namespace\\filter (wmi_subscription)',
+  reg_value: 'Registry value name (registry_set)',
+  target_image: 'Target process of process_access / remote_thread, e.g. lsass.exe',
+  granted_access: 'Access mask of a process_access (number or 0x hex)',
+  return_code: 'NTSTATUS of a process_access; non-zero = refused (e.g. by LSA protection)',
+  op: 'File op, registry op (set, delete_value, delete_key), task op (created, updated, deleted), "activity", "install", "bind"',
+  new_ext: 'Most common new file extension of a file_activity summary (no dot)',
 }
 
 export interface Condition {
@@ -136,8 +150,9 @@ export function parseHunt(src: string): ParseResult {
     const hf = field as HuntField
     if ((o.v === '>' || o.v === '<') && !NUMERIC_FIELDS.has(hf))
       return { message: `"${o.v}" only works on numeric fields (${[...NUMERIC_FIELDS].join(', ')})`, pos: o.pos }
-    if (NUMERIC_FIELDS.has(hf) && o.v !== '~' && !/^\d+$/.test(v.v))
+    if (NUMERIC_FIELDS.has(hf) && o.v !== '~' && !/^(\d+|0[xX][0-9a-fA-F]+)$/.test(v.v))
       return { message: `${field} expects a number`, pos: v.pos }
+    if (NUMERIC_FIELDS.has(hf) && o.v === '~') return { message: `"~" does not work on numeric field ${field}`, pos: o.pos }
     return { field: hf, op: o.v, value: v.v }
   }
   for (;;) {

@@ -5,6 +5,8 @@
 //! server where the user may `CREATE DATABASE`. Tests are skipped when unset.
 //! ClickHouse tests additionally need `KESTREL_TEST_CLICKHOUSE_URL`.
 #![allow(dead_code)]
+// tonic::Status is large; test helpers return it like the real handlers.
+#![allow(clippy::result_large_err)]
 
 use kestrel_common::wire::{
     AgentPayload, EnrollRequest, EnrollResponse, Hello, OsInfo, ServerPayload,

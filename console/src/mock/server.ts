@@ -17,7 +17,7 @@ import type {
   Severity,
   User,
 } from '@/api/types'
-import { HARDENING_CONTROLS, ROLE_PRIVILEGES, SEVERITY_RANK } from '@/lib/labels'
+import { HARDENING_CONTROLS, HARDENING_INFO, ROLE_PRIVILEGES, SEVERITY_RANK } from '@/lib/labels'
 import { evaluate, parseHunt } from '@/lib/hunt'
 import { toHuntRecord } from '@/lib/events'
 import { MockDb } from './db'
@@ -215,7 +215,9 @@ route('GET', '/devices/:id', ({ params }) => {
       control: c,
       desired: pol.hardening.mode !== 'off' && pol.hardening[c],
       applied: !!d.health.hardening?.[c],
-      source: pol.hardening.mode === 'off' ? 'Not managed' : `Policy “${pol.name}” v${pol.version}${c === 'asr_rules' && d.health.av_product !== 'Microsoft Defender Antivirus' ? ' (needs Defender as active AV)' : ''}`,
+      source: pol.hardening.mode === 'off' ? 'Not managed' : `Policy “${pol.name}” v${pol.version}${(c === 'asr_rules' || c === 'asr_lsass') && d.health.av_product !== 'Microsoft Defender Antivirus' ? ' (needs Defender as active AV)' : ''}`,
+      ...(HARDENING_INFO[c].reportOnly ? { report_only: true } : {}),
+      ...(d.health.hardening?.[`${c}_pending_reboot`] ? { pending_reboot: true } : {}),
     })),
   }
 })
@@ -392,11 +394,23 @@ function issueAction(d: Device, action: ResponseAction, u: User, comment: string
           row.result_detail = 'Hardening re-applied: all desired controls in effect'
           for (const k of Object.keys(d.health.hardening ?? {})) {
             const p = db.policies.find((x) => x.id === d.policy_id)
+            // LSA protection still waits for a reboot; report-only controls are never changed.
+            if (k === 'lsa_protection' && d.health.hardening?.lsa_protection_pending_reboot) continue
+            if (k === 'report_vulnerable_driver_blocklist' || k.endsWith('_pending_reboot')) continue
             if (p && p.hardening[k as keyof Policy['hardening']]) d.health.hardening![k] = true
           }
           break
         case 'block_destination':
           row.result_detail = 'WFP filter added'
+          break
+        case 'remove_autorun':
+          row.artifact = `ar-${hexId(12)}`
+          row.result_detail =
+            action.kind === 'service'
+              ? `Service ${action.location} stopped and disabled; configuration exported`
+              : action.restore_data != null
+                ? `Value restored to ${action.restore_data}; previous data backed up`
+                : `Entry re-read, backed up and removed`
           break
         default:
           row.result_detail = 'Done'

@@ -33,6 +33,13 @@ pub enum Field {
     User,
     Hostname,
     DeviceId,
+    RegKey,
+    RegValue,
+    TargetImage,
+    GrantedAccess,
+    ReturnCode,
+    EventOp,
+    NewExt,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +64,13 @@ impl Field {
             "user" => Field::User,
             "hostname" => Field::Hostname,
             "device_id" => Field::DeviceId,
+            "reg_key" => Field::RegKey,
+            "reg_value" => Field::RegValue,
+            "target_image" => Field::TargetImage,
+            "granted_access" => Field::GrantedAccess,
+            "return_code" => Field::ReturnCode,
+            "op" => Field::EventOp,
+            "new_ext" => Field::NewExt,
             _ => return None,
         })
     }
@@ -75,10 +89,17 @@ impl Field {
             "user",
             "hostname",
             "device_id",
+            "reg_key",
+            "reg_value",
+            "target_image",
+            "granted_access",
+            "return_code",
+            "op",
+            "new_ext",
         ]
     }
 
-    /// Column name (identical in both backends' `events` tables).
+    /// Field name as typed in queries (used in error messages).
     pub fn column(&self) -> &'static str {
         match self {
             Field::EventType => "event_type",
@@ -93,12 +114,43 @@ impl Field {
             Field::User => "user_name",
             Field::Hostname => "hostname",
             Field::DeviceId => "device_id",
+            Field::RegKey => "reg_key",
+            Field::RegValue => "reg_value",
+            Field::TargetImage => "target_image",
+            Field::GrantedAccess => "granted_access",
+            Field::ReturnCode => "return_code",
+            Field::EventOp => "op",
+            Field::NewExt => "new_ext",
+        }
+    }
+
+    /// Fixed SQL expression for the field in one backend. Most fields are
+    /// plain columns shared by both `events` tables; the rest are read from
+    /// the stored event JSON (`raw`) where a backend has no column for them.
+    /// Never contains user input.
+    pub fn sql(&self, d: Dialect) -> &'static str {
+        match (self, d) {
+            (Field::User, _) => "user_name",
+            (Field::EventOp, _) => "file_op",
+            (Field::RegValue, Dialect::ClickHouse) => "reg_value",
+            (Field::RegValue, Dialect::Postgres) => "coalesce(raw->>'value_name', '')",
+            (Field::GrantedAccess, Dialect::ClickHouse) => "granted_access",
+            (Field::GrantedAccess, Dialect::Postgres) => {
+                "(CASE WHEN jsonb_typeof(raw->'granted_access') = 'number' THEN (raw->>'granted_access')::bigint ELSE 0 END)"
+            }
+            (Field::ReturnCode, Dialect::ClickHouse) => "JSONExtractUInt(raw, 'return_code')",
+            (Field::ReturnCode, Dialect::Postgres) => {
+                "(CASE WHEN jsonb_typeof(raw->'return_code') = 'number' THEN (raw->>'return_code')::bigint ELSE 0 END)"
+            }
+            (Field::NewExt, Dialect::ClickHouse) => "JSONExtractString(raw, 'top_new_ext')",
+            (Field::NewExt, Dialect::Postgres) => "coalesce(raw->>'top_new_ext', '')",
+            (f, _) => f.column(),
         }
     }
 
     pub fn ty(&self) -> FieldType {
         match self {
-            Field::DstPort => FieldType::Num,
+            Field::DstPort | Field::GrantedAccess | Field::ReturnCode => FieldType::Num,
             Field::DeviceId => FieldType::Uuid,
             _ => FieldType::Str,
         }
@@ -320,7 +372,7 @@ impl Parser {
                 }
                 match (field.ty(), op) {
                     (FieldType::Num, _) => {
-                        value.parse::<i64>().map_err(|_| {
+                        parse_num(&value).ok_or_else(|| {
                             ParseError(format!("{} expects a number", field.column()))
                         })?;
                         if op == Op::Contains {
@@ -332,7 +384,7 @@ impl Parser {
                     }
                     (_, Op::Gt) | (_, Op::Lt) => {
                         return Err(ParseError(
-                            "'>'/'<' only apply to numeric fields (dst_port)".into(),
+                            "'>'/'<' only apply to numeric fields (dst_port, granted_access, return_code)".into(),
                         ));
                     }
                     (FieldType::Uuid, Op::Contains) => {
@@ -428,16 +480,25 @@ impl SqlParams {
     }
 }
 
+/// Decimal or `0x`-prefixed hexadecimal (access masks, NTSTATUS codes).
+pub fn parse_num(v: &str) -> Option<i64> {
+    let t = v.trim();
+    match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        Some(h) => i64::from_str_radix(h, 16).ok(),
+        None => t.parse::<i64>().ok(),
+    }
+}
+
 /// Render an expression into a SQL boolean expression.
 pub fn render(e: &Expr, sp: &mut SqlParams) -> String {
     match e {
         Expr::And(a, b) => format!("({} AND {})", render(a, sp), render(b, sp)),
         Expr::Or(a, b) => format!("({} OR {})", render(a, sp), render(b, sp)),
         Expr::Cmp { field, op, value } => {
-            let col = field.column();
+            let col = field.sql(sp.dialect);
             match field.ty() {
                 FieldType::Num => {
-                    let v = value.parse::<i64>().unwrap_or(0);
+                    let v = parse_num(value).unwrap_or(0);
                     let ph = sp.push(Param::Int(v));
                     let o = match op {
                         Op::Eq => "=",
@@ -573,5 +634,42 @@ mod tests {
             ),
             "{sql}"
         );
+    }
+
+    #[test]
+    fn general_malware_fields() {
+        let (sql, params) = pg(
+            "target_image ~ lsass.exe and granted_access = 0x1fffff and return_code != 0 and reg_value = Debugger and op = delete_value and new_ext = k3str",
+        );
+        assert!(
+            sql.contains("strpos(lower(target_image), lower($1)) > 0"),
+            "{sql}"
+        );
+        assert!(sql.contains("jsonb_typeof(raw->'granted_access')"), "{sql}");
+        assert!(sql.contains("raw->>'return_code'"), "{sql}");
+        assert!(
+            sql.contains("lower(coalesce(raw->>'value_name', '')) = lower($4)"),
+            "{sql}"
+        );
+        assert!(sql.contains("lower(file_op) = lower($5)"), "{sql}");
+        assert_eq!(params[1], Param::Int(0x1fffff));
+        assert_eq!(params[2], Param::Int(0));
+        // The stored JSON itself is not a hunt field.
+        assert!(parse("raw ~ x").is_err());
+        let e = parse("return_code > 0 and reg_value ~ run")
+            .unwrap()
+            .unwrap();
+        let mut sp = SqlParams::new(Dialect::ClickHouse, 0);
+        let ch = render(&e, &mut sp);
+        assert!(
+            ch.contains("JSONExtractUInt(raw, 'return_code') > {p1:Int64}"),
+            "{ch}"
+        );
+        assert!(
+            ch.contains("positionCaseInsensitiveUTF8(reg_value, {p2:String})"),
+            "{ch}"
+        );
+        assert!(parse("granted_access = 0xZZ").is_err());
+        assert!(parse("return_code ~ 5").is_err());
     }
 }

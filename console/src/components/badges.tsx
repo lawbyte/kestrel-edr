@@ -1,6 +1,6 @@
-import { AlertOctagon, AlertTriangle, Circle, ChevronDown, Info, ShieldCheck, ShieldAlert, ShieldX, ShieldQuestion, Wifi, WifiOff, Activity, Lock, CheckCircle2, XCircle, Clock, Send, Hourglass, FolderDown, FolderClock, FolderOpen, Network, HardDrive } from 'lucide-react'
-import type { ActionStatus, DeviceStatus, IncidentStatus, PathClass, RuleMode, Severity, SignatureState } from '@/api/types'
-import { ACTION_STATUS_LABEL, DEVICE_STATUS_LABEL, INCIDENT_STATUS_LABEL, PATH_CLASS_LABEL, SEVERITY_LABEL, SIGNATURE_LABEL } from '@/lib/labels'
+import { AlertOctagon, AlertTriangle, Circle, ChevronDown, Info, ShieldCheck, ShieldAlert, ShieldX, ShieldQuestion, Wifi, WifiOff, Activity, Lock, CheckCircle2, XCircle, Clock, Send, Hourglass, FolderDown, FolderClock, FolderOpen, Network, HardDrive, Download, SquareTerminal, KeyRound, Globe, Upload, Radar, ShieldOff, FileCode2, FileLock2, Fingerprint, Anchor } from 'lucide-react'
+import type { ActionStatus, DeviceStatus, IncidentStatus, PathClass, RuleCategory, RuleMode, Severity, SignatureState } from '@/api/types'
+import { ACTION_STATUS_LABEL, DEVICE_STATUS_LABEL, INCIDENT_STATUS_LABEL, PATH_CLASS_LABEL, RULE_CATEGORY_LABEL, SEVERITY_LABEL, SIGNATURE_LABEL } from '@/lib/labels'
 import { cn } from '@/lib/utils'
 import { Tooltip } from './ui/misc'
 import type { ReactNode } from 'react'
@@ -143,6 +143,31 @@ export function Chip({ children, className, title }: { children: ReactNode; clas
   return (
     <span title={title} className={cn('inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-border bg-surface-2 px-1.5 py-px text-xs text-fg-muted', className)}>
       {children}
+    </span>
+  )
+}
+
+const CATEGORY_ICON: Record<RuleCategory, typeof AlertOctagon> = {
+  delivery: Download,
+  execution: SquareTerminal,
+  credential_access: KeyRound,
+  browser_tampering: Globe,
+  exfiltration: Upload,
+  tripwire: Radar,
+  tamper: ShieldOff,
+  custom: FileCode2,
+  ransomware: FileLock2,
+  credential_dumping: Fingerprint,
+  persistence: Anchor,
+}
+
+/** Rule category as icon + label (never colour alone). */
+export function CategoryBadge({ category, className, iconOnly }: { category: RuleCategory; className?: string; iconOnly?: boolean }) {
+  const Icon = CATEGORY_ICON[category] ?? FileCode2
+  return (
+    <span className={cn('inline-flex items-center gap-1.5 whitespace-nowrap text-sm text-fg-muted', className)}>
+      <Icon className="size-3.5 shrink-0" aria-hidden />
+      {iconOnly ? <span className="sr-only">{RULE_CATEGORY_LABEL[category]}</span> : RULE_CATEGORY_LABEL[category]}
     </span>
   )
 }

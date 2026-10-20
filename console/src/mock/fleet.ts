@@ -65,7 +65,13 @@ function basePolicy(id: string, name: string, version: number): Policy {
       dpapi_debug_channel: true,
       asr_rules: true,
       browser_disable_remote_debugging: true,
+      wdigest_off: true,
+      asr_lsass: true,
+      lsa_protection: false,
+      report_vulnerable_driver_blocklist: true,
+      task_scheduler_log: true,
     },
+    sensors: { file_activity: true, ransomware_canaries: true, persistence: true, credential_access: true },
     privacy: { capture_cmdline: true, hash_usernames: false, redact_path_prefixes: [], capture_dns: true, capture_script_content: true },
     telemetry: { upload_events: true, event_kinds: [], max_outbox_mb: 1024 },
     canaries: true,
@@ -103,7 +109,7 @@ pDefault.rules = { 'ST-10': 'audit', 'ST-11': 'audit' }
 
 const pStrict = basePolicy('pol-finance', 'Finance & Executives (strict)', 9)
 pStrict.rules = { 'ST-01': 'protect', 'ST-03': 'protect', 'ST-05': 'protect', 'ST-06': 'protect', 'ST-08': 'protect', 'ST-12': 'protect', 'ST-14': 'protect' }
-pStrict.hardening = { ...pStrict.hardening, mode: 'enforce', block_user_path_exec: true, disable_run_dialog: true }
+pStrict.hardening = { ...pStrict.hardening, mode: 'enforce', block_user_path_exec: true, disable_run_dialog: true, lsa_protection: true }
 pStrict.suspend_window_ms = 5000
 pStrict.isolation_auto_release_hours = 24
 pStrict.ioc_block_ttl_secs = 7 * 24 * 3600
@@ -118,6 +124,8 @@ const pSrv = basePolicy('pol-servers', 'Servers', 3)
 pSrv.rules = { 'ST-10': 'off', 'ST-11': 'protect', 'ST-12': 'protect' }
 pSrv.hardening = { ...pSrv.hardening, mode: 'enforce', disable_run_dialog: true, block_user_path_exec: true }
 pSrv.canaries = false
+pSrv.hardening = { ...pSrv.hardening, lsa_protection: true }
+pSrv.sensors = { file_activity: true, ransomware_canaries: false, persistence: true, credential_access: true }
 
 export const POLICIES: Policy[] = [pDefault, pStrict, pEng, pSrv]
 export const POLICY_UPDATED: Record<string, number> = {
@@ -202,6 +210,13 @@ export function hardeningFor(p: Policy, drift: number): Record<string, boolean> 
     const desired = p.hardening[c]
     out[c] = desired && p.hardening.mode !== 'off' ? !(rand() < drift) : false
   }
+  // LSA protection only takes effect after a reboot: about a third of devices are still waiting.
+  if (p.hardening.lsa_protection && p.hardening.mode === 'enforce' && rand() < 0.35) {
+    out.lsa_protection = false
+    out.lsa_protection_pending_reboot = true
+  }
+  // Report-only: whether Windows has the vulnerable-driver blocklist on.
+  if (p.hardening.report_vulnerable_driver_blocklist) out.report_vulnerable_driver_blocklist = rand() < 0.8
   return out
 }
 

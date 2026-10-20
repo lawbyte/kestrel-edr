@@ -40,7 +40,7 @@ describe('serde shape compatibility', () => {
       expect(DATA_CATEGORY_LABEL[c]).toBeTruthy()
       expect(DATA_CATEGORY_REMEDIATION[c]).toBeTruthy()
     }
-    expect(EVENT_KINDS).toHaveLength(14)
+    expect(EVENT_KINDS).toHaveLength(18)
     for (const k of EVENT_KINDS) expect(EVENT_KIND_LABEL[k]).toBeTruthy()
   })
   it('mirrors ResponseAction::privilege()', () => {
@@ -51,6 +51,7 @@ describe('serde shape compatibility', () => {
       [{ type: 'release_host' }, 'response.network'],
       [{ type: 'collect_triage' }, 'response.collect'],
       [{ type: 'apply_hardening' }, 'response.collect'],
+      [{ type: 'remove_autorun', kind: 'scheduled_task', location: '\\Updater' }, 'response.file'],
     ]
     for (const [a, p] of cases) expect(actionPrivilege(a)).toBe(p)
     expect(describeAction({ type: 'block_destination', ip: '1.2.3.4', port: 443 })).toBe('Block 1.2.3.4:443')
@@ -64,7 +65,23 @@ describe('serde shape compatibility', () => {
       suspend_window_ms: 3000,
       exclusions: [{ id: 'e', kind: 'signer', value: 'X', rule_id: null, expires_at: null, reason: '' }],
       iocs: [{ id: 'i', kind: 'ip', value: '1.1.1.1', action: 'block', description: '' }],
-      hardening: { mode: 'audit', block_mshta: true, block_user_path_exec: false, disable_run_dialog: false, terminal_paste_warning: true, script_block_logging: true, dpapi_debug_channel: true, asr_rules: true, browser_disable_remote_debugging: true },
+      hardening: {
+        mode: 'audit',
+        block_mshta: true,
+        block_user_path_exec: false,
+        disable_run_dialog: false,
+        terminal_paste_warning: true,
+        script_block_logging: true,
+        dpapi_debug_channel: true,
+        asr_rules: true,
+        browser_disable_remote_debugging: true,
+        wdigest_off: true,
+        asr_lsass: true,
+        lsa_protection: false,
+        report_vulnerable_driver_blocklist: true,
+        task_scheduler_log: true,
+      },
+      sensors: { file_activity: true, ransomware_canaries: true, persistence: true, credential_access: false },
       privacy: { capture_cmdline: true, hash_usernames: false, redact_path_prefixes: [], capture_dns: true, capture_script_content: true },
       telemetry: { upload_events: true, event_kinds: [], max_outbox_mb: 1024 },
       canaries: true,
@@ -94,5 +111,23 @@ describe('describeEvent', () => {
   it('renders process access with hex mask', () => {
     const e: KEvent = { ts: 1, pid: 2, guid: 'g', type: 'process_access', target_pid: 9, target_image: 'C:\\x\\chrome.exe', granted_access: 0x143a }
     expect(describeEvent(e)).toBe('Opened chrome.exe (PID 9) with access 0x143a')
+  })
+  it('renders general-malware events readably', () => {
+    const fa = JSON.parse(
+      `{"ts":1,"pid":2,"guid":"g","type":"file_activity","window_ms":10000,"files_touched":430,"dirs":37,"renames":412,"ext_changes":400,"overwrites":0,"new_files":37,"deletes":0,"net_paths":0,"top_new_ext":"k3str","top_ext_pct":95,"note_name":"readme.txt","note_dirs":37,"canary_hits":[],"sample_paths":[]}`,
+    ) as KEvent
+    expect(describeEvent(fa)).toBe('Renamed 412 files in 37 folders within 10 s, new extension .k3str (95%); created readme.txt in 37 folders')
+    const task = JSON.parse(
+      `{"ts":1,"pid":2,"guid":"g","type":"task_registered","name":"\\\\Updater","op":"created","user":null,"actions":["\\"C:\\\\Users\\\\a\\\\u.exe\\" -s"],"hidden":true,"triggers":["logon"]}`,
+    ) as KEvent
+    expect(describeEvent(task)).toBe('Created task \\Updater (hidden, at logon) → "C:\\Users\\a\\u.exe" -s')
+    const svc: KEvent = { ts: 1, pid: 2, guid: 'g', type: 'service_installed', name: 'svc', image_path: 'C:\\Users\\Public\\s.exe', start_type: 2 }
+    expect(describeEvent(svc)).toBe('Installed service svc (auto start) → C:\\Users\\Public\\s.exe')
+    const del: KEvent = { ts: 1, pid: 2, guid: 'g', type: 'registry_set', key: 'HKLM\\X', value_name: 'RunAsPPL', op: 'delete_value' }
+    expect(describeEvent(del)).toBe('Deleted value HKLM\\X\\RunAsPPL')
+    const lsass: KEvent = { ts: 1, pid: 2, guid: 'g', type: 'process_access', target_pid: 700, target_image: 'C:\\Windows\\System32\\lsass.exe', granted_access: 0x1fffff, return_code: 0xc0000022 }
+    expect(describeEvent(lsass)).toBe('Opened lsass.exe (PID 700) with access 0x1fffff — refused by Windows (0xc0000022 access denied)')
+    expect(describeAction({ type: 'remove_autorun', kind: 'registry_value', location: 'HKLM\\Run', value_name: 'x' })).toBe('Remove registry value HKLM\\Run\\x')
+    expect(describeAction({ type: 'remove_autorun', kind: 'service', location: 'evil' })).toBe('Disable service evil')
   })
 })

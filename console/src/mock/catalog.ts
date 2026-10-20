@@ -443,3 +443,100 @@ export const CUSTOM_RULES: (RuleMeta & { source: string; enabled_custom: boolean
     source: SIGMA_SAMPLE.replace('Suspicious ClickFix/FileFix execution pattern', 'Finance share: archive extracted and executed').replace('SigmaHQ community', 'Marcus Lim'),
   },
 ]
+
+const PACK_COMMIT = 'e3f466211866e92553d8389d621ed13cfed5523d'
+const upstream = (file: string) => `https://github.com/SigmaHQ/sigma/blob/${PACK_COMMIT}/${file}`
+const packSource = (id: string, title: string, author: string, level: string, body: string) => `title: ${title}
+id: ${id}
+status: stable
+author: ${author}
+logsource:
+${body}
+level: ${level}
+`
+
+/** A few rules of the SigmaHQ Audit pack the server seeds (DRL 1.1, pinned upstream link first). */
+export const PACK_RULES: (RuleMeta & { source: string; enabled_custom: boolean })[] = [
+  {
+    id: 'SIG-c947b146',
+    name: 'Shadow Copies Deletion Using Operating Systems Utilities',
+    description: 'Shadow copies deleted with operating-system utilities (vssadmin, wmic, diskshadow, wbadmin). Corroborates RW-01.',
+    kind: 'sigma',
+    category: 'ransomware',
+    severity: 'high',
+    attack: ['T1070', 'T1490'],
+    default_mode: 'audit',
+    protect_day_one: false,
+    protect_action: 'Alert only (SigmaHQ pack; RW-01 owns Protect)',
+    author: 'Florian Roth (Nextron Systems), Michael Haag, Teymur Kheirkhabarov, Daniil Yugoslavskiy, oscd.community, Andreas Hunkeler (@Karneades)',
+    license: 'DRL-1.1',
+    references: [upstream('rules/windows/process_creation/proc_creation_win_susp_shadow_copies_deletion.yml'), 'https://www.slideshare.net/heirhabarov/hunting-for-credentials-dumping-in-windows-environment'],
+    false_positives: ['Legitimate Administrator deletes Shadow Copies using operating systems utilities for legitimate reason', 'LANDesk LDClient Ivanti-PSModule'],
+    enabled_custom: true,
+    source: packSource('c947b146-0abc-4c87-9c64-b17e9d7274a2', 'Shadow Copies Deletion Using Operating Systems Utilities', 'Florian Roth (Nextron Systems), Michael Haag, Teymur Kheirkhabarov, Daniil Yugoslavskiy, oscd.community, Andreas Hunkeler (@Karneades)', 'high', String.raw`  category: process_creation
+  product: windows
+detection:
+  selection1_img:
+    Image|endswith:
+      - '\vssadmin.exe'
+      - '\wmic.exe'
+  selection1_cli:
+    CommandLine|contains|all:
+      - 'shadow'
+      - 'delete'
+  condition: all of selection1_*`),
+  },
+  {
+    id: 'SIG-646ea171',
+    name: 'Process Memory Dump Via Comsvcs.DLL',
+    description: 'rundll32 calls the MiniDump export of comsvcs.dll, a common way to dump LSASS memory. Corroborates CD-01.',
+    kind: 'sigma',
+    category: 'credential_dumping',
+    severity: 'high',
+    attack: ['T1036', 'T1003.001'],
+    default_mode: 'audit',
+    protect_day_one: false,
+    protect_action: 'Alert only (SigmaHQ pack; CD-01 owns Protect)',
+    author: 'Florian Roth (Nextron Systems), Modexp, Nasreddine Bencherchali (Nextron Systems), Swachchhanda Shrawan Poudel (Nextron Systems)',
+    license: 'DRL-1.1',
+    references: [upstream('rules/windows/process_creation/proc_creation_win_rundll32_process_dump_via_comsvcs.yml'), 'https://modexp.wordpress.com/2019/08/30/minidumpwritedump-via-com-services-dll/'],
+    false_positives: ['Unlikely'],
+    enabled_custom: true,
+    source: packSource('646ea171-dded-4578-8a4d-65e9822892e3', 'Process Memory Dump Via Comsvcs.DLL', 'Florian Roth (Nextron Systems), Modexp, Nasreddine Bencherchali (Nextron Systems), Swachchhanda Shrawan Poudel (Nextron Systems)', 'high', String.raw`  category: process_creation
+  product: windows
+detection:
+  selection_img:
+    Image|endswith: '\rundll32.exe'
+  selection_cli:
+    CommandLine|contains|all:
+      - 'comsvcs'
+      - 'full'
+  condition: all of selection_*`),
+  },
+  {
+    id: 'SIG-9c5037d1',
+    name: 'Suspicious Run Key from Download',
+    description: 'A Run key value points to a program in a download or temp folder.',
+    kind: 'sigma',
+    category: 'persistence',
+    severity: 'high',
+    attack: ['T1547.001'],
+    default_mode: 'audit',
+    protect_day_one: false,
+    protect_action: 'Alert only (SigmaHQ pack)',
+    author: 'Florian Roth (Nextron Systems), Swachchhanda Shrawan Poude (Nextron Systems)',
+    license: 'DRL-1.1',
+    references: [upstream('rules/windows/registry/registry_event/registry_event_susp_download_run_key.yml')],
+    false_positives: ['Software installers downloaded and used by users'],
+    enabled_custom: true,
+    source: packSource('9c5037d1-c568-49b3-88c7-9846a5bdc2be', 'Suspicious Run Key from Download', 'Florian Roth (Nextron Systems), Swachchhanda Shrawan Poude (Nextron Systems)', 'high', String.raw`  category: registry_event
+  product: windows
+detection:
+  selection:
+    Image|contains:
+      - '\Downloads\'
+      - '\Temporary Internet Files\Content.Outlook\'
+    TargetObject|contains: '\SOFTWARE\Microsoft\Windows\CurrentVersion\Run\'
+  condition: selection`),
+  },
+]

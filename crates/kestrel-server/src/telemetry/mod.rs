@@ -92,10 +92,18 @@ impl EventRow {
                 r.file_op = enum_str(op);
             }
             EventData::RegistrySet {
-                key, value_name, ..
+                key,
+                value_name,
+                data,
+                op,
             } => {
                 r.reg_key = key.clone();
                 r.reg_value = value_name.clone();
+                // `op` column: set / delete_value / delete_key.
+                r.file_op = enum_str(op);
+                // Autorun-style values often hold a command line; make it
+                // searchable through `cmdline`.
+                r.cmdline = data.clone().unwrap_or_default();
             }
             EventData::NetConnect {
                 dst_ip,
@@ -123,20 +131,34 @@ impl EventRow {
             }
             EventData::ScriptBlock { .. } | EventData::Tamper { .. } => {}
             EventData::FileActivity(f) => {
-                r.file_path = f.sample_paths.first().cloned().unwrap_or_default();
+                // A canary hit is the most telling path; else the first sample.
+                r.file_path = f
+                    .canary_hits
+                    .first()
+                    .or_else(|| f.sample_paths.first())
+                    .cloned()
+                    .unwrap_or_default();
                 r.file_op = "activity".into();
             }
             EventData::TaskRegistered(t) => {
-                r.reg_key = t.name.clone();
+                // Task path in `file_path` (tasks live under System32\Tasks),
+                // its Exec actions in `cmdline`, run-as principal in `user`.
+                r.file_path = t.name.clone();
+                r.file_op = enum_str(&t.op);
                 r.cmdline = t.actions.join(" | ");
+                r.user_name = t.user.clone().unwrap_or_default();
             }
             EventData::ServiceInstalled(sv) => {
-                r.reg_key = sv.name.clone();
-                r.image = sv.image_path.clone();
+                r.reg_key = format!(r"HKLM\SYSTEM\CurrentControlSet\Services\{}", sv.name);
+                r.file_path = sv.image_path.clone();
+                r.cmdline = sv.image_path.clone();
+                r.file_op = "install".into();
+                r.user_name = sv.account.clone().unwrap_or_default();
             }
             EventData::WmiSubscription(w) => {
-                r.reg_key = w.filter.clone();
+                r.reg_key = format!(r"{}\{}", w.namespace, w.filter);
                 r.cmdline = w.consumer.clone();
+                r.file_op = "bind".into();
             }
         }
         r
@@ -212,6 +234,10 @@ pub const EVENT_KINDS: &[&str] = &[
     "debug_attach",
     "script_block",
     "tamper",
+    "file_activity",
+    "task_registered",
+    "service_installed",
+    "wmi_subscription",
 ];
 
 /// Build the WHERE clause (never containing user values) plus its parameters.

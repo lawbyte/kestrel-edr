@@ -81,7 +81,7 @@ Status rule: `isolated` if health.isolated; else `offline` if last_seen older th
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/devices?q=&status=&group_id=&limit=&cursor=` | list of Device |
-| GET | `/devices/:id` | `{device: Device, duplicates: [{id, hostname, first_seen, last_seen, decommissioned}], inventory: Inventory, recent_alerts: [Alert row], effective_policy: Policy, hardening: [{control, desired, applied, source}]}` |
+| GET | `/devices/:id` | `{device: Device, duplicates: [{id, hostname, first_seen, last_seen, decommissioned}], inventory: Inventory, recent_alerts: [Alert row], effective_policy: Policy, hardening: [{control, desired, applied: bool\|null, source, report_only?: true, pending_reboot?: true}]}` |
 | PATCH | `/devices/:id` | `{group_id?, tags?}` (`devices.write`) |
 | DELETE | `/devices/:id` | decommission: revoke cert (`devices.write`) |
 | GET | `/devices/:id/events?kinds=process_start,net_connect&q=&from=&to=&limit=` | `{items: [Event + {device_id}]}` from ClickHouse, newest first |
@@ -91,6 +91,10 @@ Status rule: `isolated` if health.isolated; else `offline` if last_seen older th
 | POST | `/devices/:id/uninstall-token/rotate` | → `{pending_token, token_active: false, sent: bool, message}` (`devices.write`; audit `device.uninstall_token_rotated`). The new token is stored as pending and sent to the agent as `ServerPayload::SetUninstallToken` now (`sent: true`) or on its next connect. When the agent acks that message the token becomes current (audit `device.uninstall_token_activated`, `uninstall_token_pending` → false); until then the previous token keeps working. Rotating again before the ack supersedes the earlier pending token, which is then never promoted |
 | POST | `/devices/:id/merge` | `{device_id}`: move that device's alerts, incidents, actions, quarantine and reviews into `:id`, then decommission it (`devices.write`) → Device |
 | POST | `/devices/:id/duplicates/dismiss` | `{device_id}`: the two are separate machines; clears the flag on both (`devices.write`) → 204 |
+
+Hardening rows (`/devices/:id` and dashboard `hardening_coverage`) cover the v1.1 controls too: `wdigest_off`, `asr_lsass`, `lsa_protection`, `report_vulnerable_driver_blocklist`, `task_scheduler_log`. A stored policy that predates a control counts with the control's `Hardening::default()` value. `applied` is `null` when the agent has not reported the control (older agent). `report_only: true` marks `report_vulnerable_driver_blocklist`: `applied` then means "Windows has the blocklist on"; Kestrel never changes it and the console never counts it as drift. `pending_reboot: true` is set when the agent reports `AgentHealth.hardening["<control>_pending_reboot"] = true` (LSA protection is configured but needs a reboot the agent never triggers); the console shows "Pending reboot" instead of "Drifted". **Contract gap:** the agent-side key `lsa_protection_pending_reboot` is a proposal of this server/console change — the Windows hardening module must emit it.
+
+Device event timelines and hunt results render the v1.1 events (`file_activity`, `task_registered`, `service_installed`, `wmi_subscription`, `registry_set` with `op`, `process_access` with `return_code`) in plain words; the raw JSON stays one click away.
 
 ### Groups & enrollment
 
@@ -113,7 +117,9 @@ Alerts are grouped into incidents server-side: same device + same root process t
 
 `Incident = {id, title, severity, priority: 0-100, status: "open"|"in_progress"|"resolved"|"dismissed", classification: null|"true_positive"|"false_positive"|"benign", assignee: User|null, device_id, hostname, user, created_at, updated_at, alert_count, rule_ids: [string], attack: [string], data_at_risk: [DataCategory], contained: bool}`
 
-Priority = max alert severity base score + 10 if any `data_at_risk` + 10 if exfil-stage rule (ST-04/ST-14) fired + 5 if not contained, capped at 100. Title auto-generated, e.g. `"Credential theft by setup_x64.exe on FIN-LAPTOP-07"`.
+Priority = max alert severity base score + 10 if any `data_at_risk` + 10 if an **impact-stage** rule fired + 5 if not contained, capped at 100. Impact stage (v1.1) = an exfiltration-stage stealer rule (ST-04/ST-14) **or any ransomware `RW-xx` or credential-dumping `CD-xx` rule** — encryption and a finished OS-credential dump are where the damage is done, like stolen data leaving the device. Persistence (`PS-xx`) alone does not add it. SigmaHQ pack hits (`SIG-*`) never add it; the builtin they corroborate does.
+
+Title auto-generated, first match wins: all alerts `TP-*` → `"Agent tampering on {host}"`; any `RW-*` → `"Ransomware activity by {image} on {host}"`; any `data_at_risk` → `"Credential theft by {image} on {host}"`; any `CD-*` → `"Credential dumping by {image} on {host}"`; exfil-stage → `"Possible data exfiltration by …"`; any `PS-*` → `"Persistence planted by {image} on {host}"`; else `"{top rule name}: {image} on {host}"`. `{image}` is the first non-system process of the tree (the payload, not explorer/services).
 
 | Method | Path | Notes |
 |---|---|---|
@@ -127,14 +133,18 @@ Priority = max alert severity base score + 10 if any `data_at_risk` + 10 if exfi
 | PATCH | `/alerts` | bulk `{ids: [..], status}` |
 
 `IncidentDetail = Incident + {`
-- `storyline: string` — plain-language markdown narrative built from alerts in time order
+- `storyline: string` — plain-language markdown narrative built from alerts in time order. Evidence is rendered in words under each alert: `file_activity` as *"renamed 412 files in 37 folders within 10 s, new extension `.k3str` (95%), 96 on network shares; created `readme.txt` in 37 folders (likely ransom note)"*, scheduled tasks / services / WMI subscriptions with their action or command, registry sets and deletions, `process_access` to lsass with its mask and, when `return_code ≠ 0`, *"refused by Windows (status 0xc0000022)"*. Family blocks (`> …` quote): RW → active ransomware, keep isolated, check shares and backups, do not pay; CD → every account that logged on is compromised; PS → whether the entry was removed (with vault backup ids from `ActionOutcome.artifact`) or is still in place, and to compare autoruns against a clean device.
 - `alerts: [AlertRow]`
 - `process_tree: [{guid, parent_guid, pid, image, cmdline, user, start_ts, exit_ts, signer, signed, sha256, path_class, alert_rule_ids: [string], is_root: bool}]`
 - `timeline: [{ts, kind: "alert"|"action"|"comment"|"status", title, detail, actor}]`
 - `evidence: [Event]` (merged, dedup, ≤200)
 - `network: [{ts, process_guid, image, dst_ip, dst_port, dst_host, blocked: bool}]`
 - `actions: [ResponseActionRow]`
-- `checklist: [{id, text, kind: "done"|"approve"|"manual", done: bool, action?: ResponseAction}]` — Huntress-style: what the agent already did / one-click actions awaiting approval / manual steps (e.g. revoke sessions per `DataCategory::remediation()`)
+- `checklist: [{id, text, kind: "done"|"approve"|"manual", done: bool, action?: ResponseAction}]` — Huntress-style: what the agent already did / one-click actions awaiting approval / manual steps (e.g. revoke sessions per `DataCategory::remediation()`). v1.1 family steps (deduplicated per incident):
+  - **RW-xx**: keep isolated and powered on; verify offline/immutable backups and surviving VSS before restoring; check every writable share for the new extension; do not pay, preserve the ransom note + one encrypted sample; reset passwords of accounts used on the host; assess PDPA (PDPC, 3 days) / UU PDP (3×24 h) notification. Isolation is an approval when not already done.
+  - **CD-xx**: reset passwords of every account that logged on (admins first); rotate service-account and local-admin credentials (force a LAPS rotation); look for lateral movement from the host; if a domain admin logged on, krbtgt double reset; make sure no dump file remains; enable LSA protection + WDigest-off.
+  - **PS-xx** (and CD-07/CD-12 registry evidence): an `approve` item with a `remove_autorun` action per persistence entry in the evidence that Kestrel knows how to remove safely — scheduled task (`\Path`), service (name), WMI consumer (quoted name), Run/RunOnce value, IFEO `Debugger`, SilentProcessExit value, Startup-folder file, and WDigest `UseLogonCredential` restored with `restore_data: "dword:0"`. Never for entries containing "kestrel"; Winlogon/AppInit/COM and other locations become manual steps. Plus a `collect_triage` approval and "compare the autoruns list with a clean device". Done items for a successful `remove_autorun` name the vault backup (`ActionOutcome.artifact`).
+  - The "where did it come from" step is added for ST, RW, CD and PS incidents.
 - `comments: [{id, author: User, body, ts}]`
 `}`
 
@@ -142,7 +152,9 @@ Priority = max alert severity base score + 10 if any `data_at_risk` + 10 if exfi
 
 `ResponseActionRow = {id, device_id, hostname, incident_id, action: ResponseAction, status: "pending"|"sent"|"succeeded"|"failed"|"expired", requested_by: User|null (null = automatic), comment, created_at, completed_at, result_detail, artifact: string|null}`
 
-`artifact` is `ActionOutcome.artifact` (quarantine id, triage path, WFP filter id). Quarantine ids come from it when present, else from parsing `result_detail`.
+`artifact` is `ActionOutcome.artifact` (quarantine id, triage path, WFP filter id, or for `remove_autorun` the id of the vault backup of the removed entry). Quarantine ids come from it when present, else from parsing `result_detail`. `remove_autorun` backups are **not** listed in `/quarantine` (there is no restore action for them yet — `RestoreAutorun` is deferred).
+
+`POST /devices/:id/actions` validates `remove_autorun` (privilege `response.file`): `location` 1-1024 printable characters and never containing "kestrel"; `registry_value` → absolute `HKLM\…`/`HKU\…` key; `scheduled_task` → starts with `\`; `startup_file` → path inside a `\Start Menu\Programs\Startup\` folder; `service`/`wmi_subscription` → bare name; `restore_data` only for `registry_value`; `value_name`/`restore_data` ≤ 2048 chars, no NUL. The console only issues it from incident checklist approvals, behind a confirmation dialog.
 
 | GET | `/actions?device_id=&status=&limit=&cursor=` |
 
@@ -153,9 +165,9 @@ Priority = max alert severity base score + 10 if any `data_at_risk` + 10 if exfi
 | GET | `/policies` | `[{id, name, version, updated_at, group_count, device_count}]` |
 | GET | `/policies/:id` | `Policy` (kestrel-common) |
 | POST | `/policies` | `{name, clone_from?}` |
-| PUT | `/policies/:id` | full `Policy`; server bumps `version`, pushes to agents (`policies.write`) |
+| PUT | `/policies/:id` | full `Policy`; server bumps `version`, pushes to agents (`policies.write`). v1.1 adds `sensors: {file_activity, ransomware_canaries, persistence, credential_access}` (all default true) and the hardening controls listed under Devices; the policy editor has a Sensors section and shows each new control's caveat (LSA protection needs a reboot and can block unsigned LSA plug-ins; the ASR LSASS rule only works where Defender is the active AV; the driver blocklist is report-only) |
 | DELETE | `/policies/:id` | 409 if assigned |
-| GET | `/rules` | `[RuleMeta + {enabled_custom: bool, hits_7d: int}]` — builtin catalog from `Engine::catalog()` plus custom rules |
+| GET | `/rules` | `[RuleMeta + {enabled_custom: bool, hits_7d: int}]` — builtin catalog from `Engine::catalog()` plus custom rules and the SigmaHQ pack. The console groups by `category` (incl. `ransomware`, `credential_dumping`, `persistence`) with icon + label, and treats a `sigma` rule whose `license` is DRL and whose `references` contain a commit-pinned `https://github.com/SigmaHQ/sigma/blob/<40-hex>/…` URL as a **SigmaHQ pack** rule: it shows the author, "Detection Rule License (DRL) 1.1" and that upstream link |
 | POST | `/rules` | custom Sigma rule `{source}` → validated server-side (compile with kestrel-detect) (`rules.write`) |
 | PATCH/DELETE | `/rules/:id` | custom rules only |
 | GET/POST | `/exclusions` | `Exclusion` (+ `{policy_id, created_by, created_at}`); POST may include `{from_alert_id}` to prefill. Rejected (400): `TP-*` rule ids, path values that start with a wildcard, are a bare wildcard / drive root / whole system or user folder, or wildcard below fewer than two literal folders; wildcards in image/signer values. `policy_id: null` (global) needs `policies.write` |
@@ -186,7 +198,22 @@ Agents can only file review requests for their own alerts; `user` is pseudonymis
 
 ### Hunt (v1: simple)
 
-`POST /hunt` `{query: string, from, to, limit}` — `query` is a filter expression over the ClickHouse `events` table: `field op value` joined by `and`/`or`, ops `=`, `!=`, `~` (contains, case-insensitive), `>`/`<` for numbers. Fields: `event_type, image, cmdline, file_path, dst_ip, dst_port, dns_qname, signer, sha256, user, hostname, device_id`. Server parses into a parameterised SQL (never string-concatenated). → `{items: [Event + {device_id, hostname}], elapsed_ms}`.
+`POST /hunt` `{query: string, from, to, limit}` — `query` is a filter expression over the ClickHouse `events` table: `field op value` joined by `and`/`or`, ops `=`, `!=`, `~` (contains, case-insensitive), `>`/`<` for numbers. Fields: `event_type, image, cmdline, file_path, dst_ip, dst_port, dns_qname, signer, sha256, user, hostname, device_id, reg_key, reg_value, target_image, granted_access, return_code, op, new_ext`. Numeric fields (`dst_port`, `granted_access`, `return_code`) accept decimal or `0x` hex and reject `~`. Server parses into a parameterised SQL (never string-concatenated). → `{items: [Event + {device_id, hostname}], elapsed_ms}`.
+
+Column mapping per event type (both backends; the full event JSON is always kept in `raw` and returned):
+
+| event_type | file_path | cmdline | reg_key | reg_value | op (`file_op`) | other |
+|---|---|---|---|---|---|---|
+| `process_start` | — | command line | — | — | — | image, user, signer, sha256 |
+| `file_access` / `image_load` | path | — | — | — | file op | signer (image_load) |
+| `registry_set` | — | value data | key | value name | `set` / `delete_value` / `delete_key` | |
+| `process_access` (+ remote_thread, thread_context, debug_attach) | — | — | — | — | — | `target_image`, `granted_access`; `return_code` (from `raw`) |
+| `file_activity` | first canary hit, else first sample path | — | — | — | `activity` | `new_ext` = `top_new_ext` (from `raw`) |
+| `task_registered` | task path (`\Folder\Name`) | Exec actions joined by ` \| ` | — | — | `created` / `updated` / `deleted` | `user` = run-as principal |
+| `service_installed` | ImagePath | ImagePath | `HKLM\SYSTEM\CurrentControlSet\Services\<name>` | — | `install` | `user` = service account |
+| `wmi_subscription` | — | consumer (+ command) | `<namespace>\<filter>` | — | `bind` | |
+
+`reg_value`, `return_code` and `new_ext` read the stored JSON in the Postgres fallback (`raw->>…`); ClickHouse uses the `reg_value` column and `JSONExtract*` on `raw`. No schema migration was needed. Example hunts: `target_image ~ lsass.exe and return_code != 0`, `event_type = file_activity and new_ext = k3str`, `event_type = task_registered and cmdline ~ appdata`, `reg_key ~ \CurrentVersion\Run and op = set`.
 
 ### Users, tokens, settings, audit
 

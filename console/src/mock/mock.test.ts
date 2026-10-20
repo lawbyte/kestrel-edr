@@ -20,7 +20,8 @@ describe('mock API', () => {
     const page = (await handleMock('GET', '/incidents', q('sort=priority&limit=500'), undefined)).body as Page<Incident>
     for (const i of page.items) {
       const base = { info: 5, low: 20, medium: 45, high: 70, critical: 90 }[i.severity]
-      const exp = Math.min(100, base + (i.data_at_risk.length ? 10 : 0) + (i.rule_ids.some((r) => r === 'ST-04' || r === 'ST-14') ? 10 : 0) + (i.contained ? 0 : 5))
+      const impact = i.rule_ids.some((r) => r === 'ST-04' || r === 'ST-14' || r.startsWith('RW-') || r.startsWith('CD-'))
+      const exp = Math.min(100, base + (i.data_at_risk.length ? 10 : 0) + (impact ? 10 : 0) + (i.contained ? 0 : 5))
       expect(i.priority).toBe(exp)
     }
     const pr = page.items.map((i) => i.priority)
@@ -40,7 +41,18 @@ describe('mock API', () => {
     expect(dash.alert_trend).toHaveLength(14)
     expect(dash.devices.total).toBe(db.devices.length)
     const dd = (await handleMock('GET', `/devices/${db.devices[0].id}`, q(), undefined)).body as DeviceDetail
-    expect(dd.hardening.length).toBe(8)
+    expect(dd.hardening.length).toBe(13)
+  })
+  it('seeds ransomware, credential-dumping and persistence incidents', async () => {
+    const page = (await handleMock('GET', '/incidents', q('limit=500'), undefined)).body as Page<Incident>
+    const titles = page.items.map((i) => i.title).join('\n')
+    expect(titles).toMatch(/Ransomware activity by lblview\.exe on OPS-DT-009/)
+    expect(titles).toMatch(/Credential dumping by rundll32\.exe on SRV-APP-02/)
+    expect(titles).toMatch(/Persistence planted by PDF_Converter_Pro_Setup\.exe on HR-LT-006/)
+    const ps = page.items.find((i) => i.hostname === 'HR-LT-006' && i.rule_ids.includes('PS-05'))!
+    const d = (await handleMock('GET', `/incidents/${ps.id}`, q(), undefined)).body as IncidentDetail
+    expect(d.actions.some((a) => a.action.type === 'remove_autorun' && a.artifact)).toBe(true)
+    expect(d.checklist.some((c) => c.kind === 'approve' && c.action?.type === 'remove_autorun')).toBe(true)
   })
   it('runs hunts with the shared parser and rejects bad queries', async () => {
     const ok = (await handleMock('POST', '/hunt', q(), { query: 'dns_qname = api.telegram.org', from: 0, to: Date.now() + 1, limit: 100 })).body as HuntResponse

@@ -120,3 +120,18 @@ describe('suggestField', () => {
     expect(suggestField('dst')).toEqual(['dst_ip', 'dst_port'])
   })
 })
+
+describe('general-malware hunt fields', () => {
+  it('parses hex masks and evaluates lsass access records', () => {
+    const r = parseHunt('target_image ~ lsass.exe and granted_access = 0x1fffff and return_code != 0')
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    const lsass = 'C:\\Windows\\System32\\lsass.exe'
+    expect(evaluate(r.ast, { target_image: lsass, granted_access: 0x1fffff, return_code: 0xc0000022 })).toBe(true)
+    expect(evaluate(r.ast, { target_image: lsass, granted_access: 0x1fffff, return_code: 0 })).toBe(false)
+  })
+  it('rejects contains on numeric fields', () => {
+    expect(parseHunt('return_code ~ 5').ok).toBe(false)
+    expect(parseHunt('new_ext = k3str and op = activity').ok).toBe(true)
+  })
+})

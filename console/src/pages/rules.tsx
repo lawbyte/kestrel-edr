@@ -1,13 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ColumnDef } from '@tanstack/react-table'
-import { ExternalLink, FileCode2, Plus, Trash2, X } from 'lucide-react'
+import { ExternalLink, FileCode2, Plus, ShieldCheck, Trash2, X } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { toast } from 'sonner'
 import { api, qk } from '@/api/endpoints'
 import { ApiError } from '@/api/client'
-import type { RuleCategory, RuleRow, Severity } from '@/api/types'
-import { ModeBadge, SeverityBadge, SeverityIcon } from '@/components/badges'
+import type { RuleRow, Severity } from '@/api/types'
+import { CategoryBadge, ModeBadge, SeverityBadge, SeverityIcon } from '@/components/badges'
 import { AttackChips, EmptyState, ErrorState, LoadingRows, PageHeader } from '@/components/common'
 import { DataTable } from '@/components/data-table'
 import { FilterChip, SearchInput, useUrlList, useUrlString } from '@/components/filters'
@@ -16,9 +16,20 @@ import { Dialog, DialogContent } from '@/components/ui/dialog'
 import { Sheet } from '@/components/ui/sheet'
 import { Switch } from '@/components/ui/misc'
 import { useAuth } from '@/lib/auth'
-import { RULE_CATEGORY_LABEL, SEVERITY_LABEL } from '@/lib/labels'
+import { RULE_CATEGORY_HINT, RULE_CATEGORY_ORDER, SEVERITY_LABEL } from '@/lib/labels'
+import { DRL_URL, ruleSource, SOURCE_LABEL, upstreamUrl, type RuleSource } from '@/lib/rules'
 import { cn } from '@/lib/utils'
 import { SIGMA_TEMPLATE } from '@/lib/sigma-template'
+
+const groupByCategory = (r: RuleRow) => ({
+  key: r.category,
+  label: (
+    <span className="inline-flex items-center gap-2">
+      <CategoryBadge category={r.category} className="font-medium text-fg" />
+      <span className="hidden text-xs font-normal text-fg-subtle md:inline">{RULE_CATEGORY_HINT[r.category]}</span>
+    </span>
+  ),
+})
 
 export default function Rules() {
   const [sp, setSp] = useSearchParams()
@@ -42,10 +53,10 @@ export default function Rules() {
     )
   const rows = (list.data ?? [])
     .filter((r) => !cats.length || cats.includes(r.category))
-    .filter((r) => !kinds.length || kinds.includes(r.kind))
+    .filter((r) => !kinds.length || kinds.includes(ruleSource(r)))
     .filter((r) => !sev.length || sev.includes(r.severity))
-    .filter((r) => !q || `${r.id} ${r.name} ${r.description} ${(r.attack ?? []).join(' ')}`.toLowerCase().includes(q.toLowerCase()))
-    .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))
+    .filter((r) => !q || `${r.id} ${r.name} ${r.description} ${(r.attack ?? []).join(' ')} ${r.author ?? ''}`.toLowerCase().includes(q.toLowerCase()))
+    .sort((a, b) => RULE_CATEGORY_ORDER.indexOf(a.category) - RULE_CATEGORY_ORDER.indexOf(b.category) || a.id.localeCompare(b.id, undefined, { numeric: true }))
   const cols = useMemo<ColumnDef<RuleRow, unknown>[]>(
     () => [
       { header: 'ID', accessorKey: 'id', size: 120, cell: ({ row }) => <span className="font-mono text-xs">{row.original.id}</span> },
@@ -56,14 +67,35 @@ export default function Rules() {
           <div className="min-w-0 max-w-[520px]">
             <p className="font-medium">{row.original.name}</p>
             <p className="truncate text-xs text-fg-muted">{row.original.description}</p>
-            {row.original.kind !== 'builtin' && row.original.author ? <p className="text-[11px] text-fg-subtle">by {row.original.author}{row.original.license ? ` · ${row.original.license}` : ''}</p> : null}
+            {row.original.kind !== 'builtin' && row.original.author ? (
+              <p className="text-[11px] text-fg-subtle">
+                {ruleSource(row.original) === 'sigmahq' ? 'SigmaHQ · ' : ''}by {row.original.author}
+                {row.original.license ? ` · ${/DRL/i.test(row.original.license) ? 'DRL 1.1' : row.original.license}` : ''}
+              </p>
+            ) : null}
           </div>
         ),
       },
-      { header: 'Category', accessorKey: 'category', size: 140, cell: ({ row }) => <span className="text-sm text-fg-muted">{RULE_CATEGORY_LABEL[row.original.category]}</span> },
+      { header: 'Source', id: 'source', accessorFn: (r) => ruleSource(r), size: 110, cell: ({ row }) => <span className="whitespace-nowrap text-xs text-fg-muted">{SOURCE_LABEL[ruleSource(row.original)]}</span> },
       { header: 'Severity', id: 'sev', accessorFn: (r) => ['info', 'low', 'medium', 'high', 'critical'].indexOf(r.severity), size: 100, cell: ({ row }) => <SeverityBadge severity={row.original.severity} /> },
-      { header: 'ATT&CK', id: 'attack', enableSorting: false, cell: ({ row }) => <AttackChips ids={row.original.attack ?? []} max={2} /> },
+      { header: 'ATT&CK', id: 'attack', enableSorting: false, size: 190, cell: ({ row }) => <AttackChips ids={row.original.attack ?? []} max={2} /> },
       { header: 'Default', accessorKey: 'default_mode', size: 80, cell: ({ row }) => <ModeBadge mode={row.original.default_mode} /> },
+      {
+        header: 'Day one',
+        id: 'day1',
+        accessorFn: (r) => (r.protect_day_one ? 1 : 0),
+        size: 100,
+        cell: ({ row }) =>
+          row.original.protect_day_one ? (
+            <span className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-medium text-ok" title="Low false-positive rate: safe to protect immediately">
+              <ShieldCheck className="size-3.5" aria-hidden /> Safe
+            </span>
+          ) : (
+            <span className="whitespace-nowrap text-xs text-fg-subtle" title="Run in Audit for about two weeks first">
+              Audit first
+            </span>
+          ),
+      },
       { header: 'Hits 7d', accessorKey: 'hits_7d', size: 80, cell: ({ row }) => <span className={cn('tabular', row.original.hits_7d ? 'font-medium' : 'text-fg-subtle')}>{row.original.hits_7d}</span> },
     ],
     [],
@@ -73,18 +105,18 @@ export default function Rules() {
     <div className="flex h-full flex-col">
       <PageHeader
         title="Rules"
-        description="Built-in stealer (ST) and tamper (TP) rules, plus your custom Sigma rules. Choose each rule’s mode per policy."
+        description="Built-in rules for stealers (ST), ransomware (RW), credential dumping (CD), persistence (PS) and agent tamper (TP), the SigmaHQ pack and your own Sigma rules. Choose each rule’s mode per policy."
         actions={can('rules.write') ? <Button variant="primary" size="sm" onClick={() => setAdding(true)}><Plus /> Add Sigma rule</Button> : null}
       >
         <div className="mt-4 flex flex-wrap items-center gap-2">
           <SearchInput value={q} onChange={setQ} placeholder="Search rules or ATT&CK ids…" className="w-64" />
-          <FilterChip label="Category" value={cats} onChange={setCats} options={(Object.keys(RULE_CATEGORY_LABEL) as RuleCategory[]).map((c) => ({ value: c, label: RULE_CATEGORY_LABEL[c] }))} />
-          <FilterChip label="Source" value={kinds} onChange={setKinds} options={[{ value: 'builtin', label: 'Built-in' }, { value: 'sigma', label: 'Custom Sigma' }]} />
+          <FilterChip label="Category" value={cats} onChange={setCats} options={RULE_CATEGORY_ORDER.map((c) => ({ value: c, label: <CategoryBadge category={c} className="text-fg" /> }))} />
+          <FilterChip label="Source" value={kinds} onChange={setKinds} options={(Object.keys(SOURCE_LABEL) as RuleSource[]).map((k) => ({ value: k, label: SOURCE_LABEL[k] }))} />
           <FilterChip label="Severity" value={sev} onChange={setSev} options={(['critical', 'high', 'medium', 'low'] as Severity[]).map((s) => ({ value: s, label: <span className="inline-flex items-center gap-1.5"><SeverityIcon severity={s} className="size-3.5" />{SEVERITY_LABEL[s]}</span> }))} />
         </div>
       </PageHeader>
       <div className="min-h-0 flex-1 bg-surface">
-        {list.error ? <ErrorState error={list.error} onRetry={() => list.refetch()} /> : list.isPending ? <LoadingRows /> : <DataTable label="Rules" data={rows} columns={cols} getRowId={(r) => r.id} keyboard activeId={selected} onActiveChange={(id) => id && selected && select(id)} onRowClick={(r) => select(r.id)} rowClassName={(r) => (r.kind !== 'builtin' && !r.enabled_custom ? 'opacity-60' : undefined)} empty={<EmptyState title="No rules match" />} />}
+        {list.error ? <ErrorState error={list.error} onRetry={() => list.refetch()} /> : list.isPending ? <LoadingRows /> : <DataTable label="Rules" data={rows} columns={cols} getRowId={(r) => r.id} groupBy={groupByCategory} groupSummary={(rs) => <span className="text-xs tabular text-fg-subtle">{rs.length} rule{rs.length === 1 ? '' : 's'} · {rs.filter((r) => r.protect_day_one).length} safe on day one</span>} keyboard activeId={selected} onActiveChange={(id) => id && selected && select(id)} onRowClick={(r) => select(r.id)} rowClassName={(r) => (r.kind !== 'builtin' && !r.enabled_custom ? 'opacity-60' : undefined)} empty={<EmptyState title="No rules match" />} />}
       </div>
       <Sheet open={!!current} onOpenChange={(o) => !o && select(null)} label="Rule details drawer">
         {current ? <RuleDetail rule={current} onClose={() => select(null)} /> : null}
@@ -114,7 +146,7 @@ function RuleDetail({ rule, onClose }: { rule: RuleRow; onClose: () => void }) {
     <>
       <div className="flex items-center gap-2 border-b border-border px-4 py-2.5">
         <span className="font-mono text-sm">{rule.id}</span>
-        <span className="text-xs text-fg-subtle">{rule.kind === 'builtin' ? 'Built-in' : 'Custom Sigma'}</span>
+        <span className="text-xs text-fg-subtle">{SOURCE_LABEL[ruleSource(rule)]}</span>
         <Button size="icon-sm" variant="ghost" className="ml-auto" aria-label="Close" onClick={onClose}>
           <X />
         </Button>
@@ -123,7 +155,7 @@ function RuleDetail({ rule, onClose }: { rule: RuleRow; onClose: () => void }) {
         <div>
           <div className="mb-2 flex flex-wrap items-center gap-2">
             <SeverityBadge severity={rule.severity} />
-            <span className="text-xs text-fg-muted">{RULE_CATEGORY_LABEL[rule.category]}</span>
+            <CategoryBadge category={rule.category} className="text-xs" />
             <span className="text-xs text-fg-muted">· default</span>
             <ModeBadge mode={rule.default_mode} />
           </div>
@@ -154,7 +186,29 @@ function RuleDetail({ rule, onClose }: { rule: RuleRow; onClose: () => void }) {
               <dt className="text-xs text-fg-subtle">Author</dt>
               <dd>
                 {rule.author}
-                {rule.license ? <span className="text-fg-muted"> · {rule.license}</span> : null}
+                {rule.license && !/DRL/i.test(rule.license) ? <span className="text-fg-muted"> · {rule.license}</span> : null}
+              </dd>
+            </div>
+          ) : null}
+          {rule.kind === 'sigma' && /DRL/i.test(rule.license ?? '') ? (
+            <div>
+              <dt className="text-xs text-fg-subtle">Licence</dt>
+              <dd>
+                <a href={DRL_URL} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 text-accent-text hover:underline">
+                  Detection Rule License (DRL) 1.1 <ExternalLink className="size-3" />
+                </a>
+                <p className="text-xs text-fg-muted">The author is credited on every alert this rule raises.</p>
+              </dd>
+            </div>
+          ) : null}
+          {upstreamUrl(rule) ? (
+            <div>
+              <dt className="text-xs text-fg-subtle">Upstream rule</dt>
+              <dd>
+                <a href={upstreamUrl(rule)!} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 break-all text-accent-text hover:underline">
+                  {upstreamUrl(rule)!.replace(/^https?:\/\/(www\.)?github\.com\//, '').replace(/\/blob\/([0-9a-f]{8})[0-9a-f]{32}\//, '@$1/')} <ExternalLink className="size-3 shrink-0" />
+                </a>
+                <p className="text-xs text-fg-muted">Pinned to the vendored SigmaHQ commit. Editing or deleting this rule stops pack updates for it.</p>
               </dd>
             </div>
           ) : null}

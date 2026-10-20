@@ -53,7 +53,7 @@ export interface AlertOpts {
   data?: DataCategory[]
   evidence?: KEvent[]
   /** Automatic response the agent took (Protect mode), dt relative to the alert. */
-  auto?: { action: ResponseAction; ok?: boolean; detail: string; after?: number }[]
+  auto?: { action: ResponseAction; ok?: boolean; detail: string; after?: number; artifact?: string }[]
   mode?: RuleMode
 }
 
@@ -68,6 +68,8 @@ export interface FinalizeOpts {
   comments?: { author: User; body: string; dt: number }[]
   statusChanges?: { dt: number; title: string; actor: string }[]
   updatedDt?: number
+  /** Override the computed title (e.g. to name the payload rather than a LOLBin it ran). */
+  title?: string
 }
 
 export class Story {
@@ -193,7 +195,7 @@ export class Story {
     if (!meta) throw new Error(`unknown rule ${ruleId}`)
     const mode = o.mode ?? this.ruleModes[ruleId] ?? meta.default_mode
     const ts = this.t(dt)
-    const outcomes: ActionOutcome[] = (o.auto ?? []).map((a) => ({ action: a.action, ok: a.ok ?? true, detail: a.detail, ts: ts + (a.after ?? 400) }))
+    const outcomes: ActionOutcome[] = (o.auto ?? []).map((a) => ({ action: a.action, ok: a.ok ?? true, detail: a.detail, ts: ts + (a.after ?? 400), artifact: a.artifact ?? null }))
     for (const out of outcomes) {
       this.actions.push({
         id: uuid(),
@@ -207,6 +209,7 @@ export class Story {
         created_at: out.ts - 120,
         completed_at: out.ts,
         result_detail: out.detail ?? '',
+        artifact: out.artifact ?? null,
       })
     }
     const ancestry: ProcessInfo[] = []
@@ -263,7 +266,8 @@ export class Story {
     const data = Array.from(new Set(alerts.flatMap((a) => a.data_at_risk ?? [])))
     const ruleIds = Array.from(new Set(alerts.map((a) => a.rule_id)))
     const attack = Array.from(new Set(alerts.flatMap((a) => a.attack ?? [])))
-    const exfil = ruleIds.some((r) => r === 'ST-04' || r === 'ST-14')
+    // Impact stage (+10): exfiltration-stage stealer rules, any ransomware or credential-dumping rule.
+    const exfil = ruleIds.some((r) => r === 'ST-04' || r === 'ST-14' || r.startsWith('RW-') || r.startsWith('CD-'))
     const priority = Math.min(100, SEVERITY_BASE[sev] + (data.length ? 10 : 0) + (exfil ? 10 : 0) + (o.contained ? 0 : 5))
     const alertStatus: AlertStatus = o.status === 'resolved' || o.status === 'dismissed' ? 'closed' : o.status === 'in_progress' ? 'acknowledged' : 'new'
     for (const a of alerts) a.status = alertStatus
@@ -271,8 +275,14 @@ export class Story {
     const top = alerts.find((a) => a.severity === sev) ?? alerts[0]
     const actor = basename(top.process.image)
     const cats = new Set(alerts.map((a) => this.rules.get(a.rule_id)?.category))
-    const title = cats.has('tripwire')
+    const title = cats.has('ransomware')
+      ? `Ransomware activity by ${actor} on ${this.dev.hostname}`
+      : cats.has('tripwire')
       ? `Canary tripped by ${actor} on ${this.dev.hostname}`
+      : cats.has('credential_dumping')
+        ? `Credential dumping by ${actor} on ${this.dev.hostname}`
+      : cats.has('persistence')
+        ? `Persistence planted by ${actor} on ${this.dev.hostname}`
       : cats.has('tamper')
         ? `Agent tamper attempt on ${this.dev.hostname}`
         : cats.has('exfiltration') || cats.has('credential_access')
@@ -283,7 +293,8 @@ export class Story {
 
     const checklist: ChecklistItem[] = []
     for (const act of this.actions.filter((x) => x.requested_by == null && x.status === 'succeeded')) {
-      checklist.push({ id: hexId(8), kind: 'done', text: `${describeAction(act.action)} — done automatically by the agent`, done: true, action: act.action })
+      const backup = act.action.type === 'remove_autorun' && act.artifact ? ` (backup ${act.artifact} in the quarantine vault)` : ''
+      checklist.push({ id: hexId(8), kind: 'done', text: `${describeAction(act.action)}${backup} — done automatically by the agent`, done: true, action: act.action })
     }
     for (const ap of o.approve ?? []) checklist.push({ id: hexId(8), kind: 'approve', text: ap.text, done: !!ap.done, action: ap.action })
     const who = this.dev.logged_on_user?.split('\\').pop() ?? 'the user'
@@ -316,7 +327,7 @@ export class Story {
     const createdAt = alerts[0].ts
     const inc: IncidentDetail = {
       id: this.id,
-      title,
+      title: o.title ?? title,
       severity: sev,
       priority,
       status: o.status,

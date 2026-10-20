@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Ban, Bot, ChevronLeft, ChevronRight, FileArchive, Lock, LockOpen, MessageSquare, PackageSearch, ShieldBan, Skull, Siren, Activity as ActivityIcon, Wifi } from 'lucide-react'
+import { Anchor, Ban, Bot, ChevronLeft, ChevronRight, FileArchive, Lock, LockOpen, MessageSquare, PackageSearch, ShieldBan, Skull, Siren, Activity as ActivityIcon, Wifi } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { toast } from 'sonner'
@@ -206,17 +206,24 @@ function Count({ n }: { n: number }) {
 }
 
 const STAGES = [
-  { key: 'delivery', label: 'Delivery', rules: ['ST-10', 'ST-11', 'ST-12', 'ST-15', 'SIG-'] },
+  { key: 'delivery', label: 'Delivery', rules: ['ST-10', 'ST-11', 'ST-12', 'ST-15'] },
   { key: 'execution', label: 'Execution', rules: ['ST-12', 'ST-13', 'ST-15'] },
   { key: 'collection', label: 'Credential access', rules: ['ST-01', 'ST-02', 'ST-03', 'ST-05', 'ST-06', 'ST-07', 'ST-08', 'ST-09', 'ST-16'] },
   { key: 'exfil', label: 'Exfiltration', rules: ['ST-04', 'ST-14'] },
 ]
+/** General-malware stages, shown only when one of their rules fired. */
+const EXTRA_STAGES = [
+  { key: 'persistence', label: 'Persistence', rules: ['PS-'] },
+  { key: 'creddump', label: 'Credential dumping', rules: ['CD-'] },
+  { key: 'impact', label: 'Impact (ransomware)', rules: ['RW-'] },
+]
 
 function KillChain({ alerts }: { alerts: AlertRow[] }) {
   const hit = (rules: string[]) => alerts.some((a) => rules.some((r) => (r.endsWith('-') ? a.rule_id.startsWith(r) : a.rule_id === r)))
+  const stages = [...STAGES, ...EXTRA_STAGES.filter((s) => hit(s.rules))]
   return (
     <ol className="mt-4 flex flex-wrap items-center gap-1 border-t border-border pt-3 text-xs" aria-label="Attack stages reached">
-      {STAGES.map((s, i) => {
+      {stages.map((s, i) => {
         const on = hit(s.rules)
         return (
           <li key={s.key} className="flex items-center gap-1">
@@ -225,7 +232,7 @@ function KillChain({ alerts }: { alerts: AlertRow[] }) {
               {s.label}
               <span className="sr-only">{on ? ' reached' : ' not seen'}</span>
             </span>
-            {i < STAGES.length - 1 ? <ChevronRight className="size-3 text-fg-subtle" aria-hidden /> : null}
+            {i < stages.length - 1 ? <ChevronRight className="size-3 text-fg-subtle" aria-hidden /> : null}
           </li>
         )
       })}
@@ -262,6 +269,7 @@ function AlertList({ alerts, onExclude, onSelectProcess }: { alerts: AlertRow[];
               {a.actions.map((o, i) => (
                 <span key={i} className={cn('inline-flex items-center gap-1 rounded px-1.5 py-px', o.ok ? 'bg-ok-soft text-ok' : 'bg-danger-soft text-danger')}>
                   <Bot className="size-3" /> {describeAction(o.action)}
+                  {o.ok && o.action.type === 'remove_autorun' && o.artifact ? <span className="font-mono opacity-80">· backup {o.artifact}</span> : null}
                 </span>
               ))}
             </div>
@@ -421,7 +429,7 @@ function FragmentRow({ children }: { children: React.ReactNode }) {
 
 function ActionsList({ inc }: { inc: IncidentDetail }) {
   if (!inc.actions.length) return <EmptyState title="No response actions yet" />
-  const icon = (t: string) => (t === 'kill_process' ? Skull : t === 'quarantine_file' ? FileArchive : t === 'isolate_host' ? Lock : t === 'release_host' ? LockOpen : t === 'collect_triage' ? PackageSearch : Ban)
+  const icon = (t: string) => (t === 'kill_process' ? Skull : t === 'quarantine_file' ? FileArchive : t === 'isolate_host' ? Lock : t === 'release_host' ? LockOpen : t === 'collect_triage' ? PackageSearch : t === 'remove_autorun' ? Anchor : Ban)
   return (
     <ul className="divide-y divide-border rounded-lg border border-border bg-surface">
       {[...inc.actions].sort((a, b) => b.created_at - a.created_at).map((a) => {
@@ -436,6 +444,11 @@ function ActionsList({ inc }: { inc: IncidentDetail }) {
                 {a.comment ? ` · “${a.comment}”` : ''}
               </p>
               {a.result_detail ? <p className="text-xs text-fg-subtle">{a.result_detail}</p> : null}
+              {a.artifact && a.action.type === 'remove_autorun' ? (
+                <p className="text-xs text-fg-muted">
+                  Original backed up to the quarantine vault as <span className="font-mono">{a.artifact}</span>
+                </p>
+              ) : null}
             </div>
             <div className="flex flex-col items-end gap-0.5">
               <ActionStatusBadge status={a.status} />

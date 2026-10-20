@@ -1,7 +1,7 @@
 import { Fragment, type ReactNode } from 'react'
 import { cn } from '@/lib/utils'
 
-/** Minimal, XSS-safe markdown (headings, paragraphs, lists, **bold**, *em*, `code`, [links](https://…)). Produces React nodes only. */
+/** Minimal, XSS-safe markdown (headings, paragraphs, lists, > quotes, **bold**, *em*, `code`, [links](https://…)). Produces React nodes only. */
 export function Markdown({ source, className }: { source: string; className?: string }) {
   const blocks: ReactNode[] = []
   const lines = source.replace(/\r\n/g, '\n').split('\n')
@@ -20,6 +20,12 @@ export function Markdown({ source, className }: { source: string; className?: st
       i++
       continue
     }
+    if (/^>\s?/.test(line)) {
+      const quote: string[] = []
+      while (i < lines.length && /^>\s?/.test(lines[i])) quote.push(lines[i++].replace(/^>\s?/, ''))
+      blocks.push(<blockquote key={key++}>{inline(quote.join(' '))}</blockquote>)
+      continue
+    }
     if (/^\s*([-*]|\d+\.)\s+/.test(line)) {
       const ordered = /^\s*\d+\./.test(line)
       const items: ReactNode[] = []
@@ -31,7 +37,7 @@ export function Markdown({ source, className }: { source: string; className?: st
       continue
     }
     const para: string[] = []
-    while (i < lines.length && lines[i].trim() && !/^(#{1,3})\s/.test(lines[i]) && !/^\s*([-*]|\d+\.)\s+/.test(lines[i])) para.push(lines[i++])
+    while (i < lines.length && lines[i].trim() && !/^(#{1,3})\s/.test(lines[i]) && !/^>\s?/.test(lines[i]) && !/^\s*([-*]|\d+\.)\s+/.test(lines[i])) para.push(lines[i++])
     blocks.push(<p key={key++}>{inline(para.join(' '))}</p>)
   }
   return <div className={cn('prose-k', className)}>{blocks}</div>

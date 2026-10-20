@@ -83,6 +83,10 @@ export const EVENT_KINDS = [
   'debug_attach',
   'script_block',
   'tamper',
+  'file_activity',
+  'task_registered',
+  'service_installed',
+  'wmi_subscription',
 ] as const
 export type EventKind = (typeof EVENT_KINDS)[number]
 
@@ -128,7 +132,58 @@ export interface TargetProcess {
   target_pid: number
   target_guid?: string | null
   target_image: string
+  /** Access mask: granted (Sysmon 10) or desired (Kernel-Audit-API-Calls). */
   granted_access?: number
+  /** NTSTATUS of the open (0 = success); non-zero only reported for lsass, e.g. refused by LSA protection. */
+  return_code?: number
+}
+
+export type RegistryOp = 'set' | 'delete_value' | 'delete_key'
+
+/** Per-process file activity summary from the ransomware sensor (`EventData::FileActivity`). */
+export interface FileActivity {
+  window_ms: number
+  files_touched: number
+  dirs: number
+  renames?: number
+  ext_changes?: number
+  overwrites?: number
+  new_files?: number
+  deletes?: number
+  net_paths?: number
+  top_new_ext?: string | null
+  /** Share of ext_changes using top_new_ext, 0-100. */
+  top_ext_pct?: number
+  note_name?: string | null
+  note_dirs?: number
+  canary_hits?: string[]
+  sample_paths?: string[]
+}
+
+export type TaskOp = 'created' | 'updated' | 'deleted'
+export interface TaskChange {
+  name: string
+  op: TaskOp
+  user?: string | null
+  actions?: string[]
+  hidden?: boolean
+  triggers?: string[]
+}
+
+export interface ServiceInstall {
+  name: string
+  image_path: string
+  /** 0 boot, 1 system, 2 auto, 3 demand, 4 disabled. */
+  start_type?: number | null
+  /** 1 = kernel driver, 0x10 own process, 0x20 shared process. */
+  service_type?: number | null
+  account?: string | null
+}
+
+export interface WmiBinding {
+  namespace: string
+  filter: string
+  consumer: string
 }
 
 export type EventData =
@@ -136,7 +191,7 @@ export type EventData =
   | { type: 'process_stop'; exit_code?: number | null }
   | { type: 'image_load'; path: string; signer?: string | null; signed?: SignatureState }
   | { type: 'file_access'; path: string; op: FileOp }
-  | { type: 'registry_set'; key: string; value_name: string; data?: string | null }
+  | { type: 'registry_set'; key: string; value_name: string; data?: string | null; op?: RegistryOp }
   | {
       type: 'net_connect'
       proto: NetProto
@@ -154,6 +209,10 @@ export type EventData =
   | ({ type: 'debug_attach' } & TargetProcess)
   | { type: 'script_block'; engine: string; content: string }
   | { type: 'tamper'; kind: TamperKind; detail: string }
+  | ({ type: 'file_activity' } & FileActivity)
+  | ({ type: 'task_registered' } & TaskChange)
+  | ({ type: 'service_installed' } & ServiceInstall)
+  | ({ type: 'wmi_subscription' } & WmiBinding)
 
 /** `Event` with its `EventData` flattened in (serde `flatten` + `tag = "type"`). */
 export type KEvent = { ts: TimestampMs; pid: number; guid: string } & EventData
@@ -179,6 +238,9 @@ export type RuleCategory =
   | 'tripwire'
   | 'tamper'
   | 'custom'
+  | 'ransomware'
+  | 'credential_dumping'
+  | 'persistence'
 
 export interface RuleMeta {
   id: string
@@ -215,6 +277,18 @@ export type ResponseAction =
   | { type: 'apply_hardening' }
   | { type: 'scan'; path?: string | null }
   | { type: 'collect_triage' }
+  | {
+      type: 'remove_autorun'
+      kind: AutorunKind
+      /** Registry key, Startup file path, task path, service name or WMI consumer name. */
+      location: string
+      value_name?: string | null
+      /** RegistryValue only: write this data (REG_SZ or `dword:N`) instead of deleting the value. */
+      restore_data?: string | null
+    }
+
+/** Persistence mechanism targeted by `remove_autorun`. */
+export type AutorunKind = 'registry_value' | 'startup_file' | 'scheduled_task' | 'service' | 'wmi_subscription'
 
 export type ResponseActionType = ResponseAction['type']
 
@@ -223,6 +297,8 @@ export interface ActionOutcome {
   ok: boolean
   detail?: string
   ts: TimestampMs
+  /** Structured result: quarantine id, triage path, WFP filter id, or the vault backup id of a removed autorun. */
+  artifact?: string | null
 }
 
 // ---------------------------------------------------------------- policy.rs
@@ -260,6 +336,24 @@ export interface Hardening {
   dpapi_debug_channel: boolean
   asr_rules: boolean
   browser_disable_remote_debugging: boolean
+  /** WDigest UseLogonCredential = 0 (no cleartext passwords in LSASS). */
+  wdigest_off: boolean
+  /** Defender ASR "Block credential stealing from LSASS" (added without touching other ASR rules). */
+  asr_lsass: boolean
+  /** LSA protection (RunAsPPL = 2). Takes effect after a reboot the agent never triggers. */
+  lsa_protection: boolean
+  /** Report (never toggle) the Microsoft vulnerable-driver blocklist state. */
+  report_vulnerable_driver_blocklist: boolean
+  /** Enable the Microsoft-Windows-TaskScheduler/Operational log. */
+  task_scheduler_log: boolean
+}
+
+/** Optional sensor groups (`Policy.sensors`); all default to on. */
+export interface SensorSettings {
+  file_activity: boolean
+  ransomware_canaries: boolean
+  persistence: boolean
+  credential_access: boolean
 }
 export type HardeningControl = Exclude<keyof Hardening, 'mode'>
 
@@ -310,6 +404,8 @@ export interface Policy {
   ioc_block_ttl_secs: number
   /** Indicator hits block the destination for every program instead of only the offending one. */
   ioc_block_host_wide: boolean
+  /** Optional sensor groups; absent on servers older than v1.1 (treat as all on). */
+  sensors?: SensorSettings
 }
 
 export interface PolicySummary {
@@ -437,8 +533,13 @@ export interface DuplicateDevice {
 export interface HardeningState {
   control: HardeningControl | string
   desired: boolean
-  applied: boolean
+  /** null when the agent has not reported this control (older agent). */
+  applied: boolean | null
   source: string
+  /** Kestrel only reports this control's state and never changes it. */
+  report_only?: boolean
+  /** Configured on the device but waiting for a reboot (LSA protection). */
+  pending_reboot?: boolean
 }
 
 export interface DeviceDetail {
