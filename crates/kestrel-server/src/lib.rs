@@ -26,6 +26,7 @@ pub mod settings;
 pub mod sigmapack;
 pub mod state;
 pub mod telemetry;
+pub mod updates;
 
 use crate::{
     auth::{LoginThrottle, RateLimiter},
@@ -251,12 +252,21 @@ pub async fn serve(
     })
     .max_decoding_message_size(grpc::MAX_PAYLOAD + 1024 * 1024)
     .max_encoding_message_size(grpc::MAX_PAYLOAD);
+    // Signed update packages placed in `<AGENT_DIR>/updates/` are also served
+    // on the agent port (`GET /downloads/updates/<file>`, HTTP/2): agents pin
+    // the agent CA, which only this listener presents. Read-only, no
+    // directory listing, path-safe (tower-http ServeDir).
+    let packages = Router::new().nest_service(
+        updates::PACKAGE_PATH.trim_end_matches('/'),
+        ServeDir::new(state.cfg.agent_dir.join("updates")),
+    );
+    let routes = tonic::service::Routes::from(packages).add_service(svc);
     let router = tonic::transport::Server::builder()
         .tls_config(tls)?
         .http2_keepalive_interval(Some(Duration::from_secs(30)))
         .http2_keepalive_timeout(Some(Duration::from_secs(20)))
         .tcp_keepalive(Some(Duration::from_secs(60)))
-        .add_service(svc);
+        .add_routes(routes);
     let grpc_task = tokio::spawn(async move {
         router
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(grpc))

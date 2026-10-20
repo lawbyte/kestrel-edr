@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Command } from 'cmdk'
 import { Dialog as D } from 'radix-ui'
-import { Activity, BookOpenCheck, Crosshair, FileArchive, Gauge, Keyboard, Laptop, MessageSquareMore, Moon, Search, Settings, ShieldBan, Siren, SlidersHorizontal, Zap, Users, KeyRound, Bell, ScrollText, Download } from 'lucide-react'
+import { Activity, BookOpenCheck, Crosshair, FileArchive, Gauge, Keyboard, Laptop, MessageSquareMore, Moon, Search, Settings, ShieldBan, Siren, SlidersHorizontal, Zap, Users, KeyRound, Bell, ScrollText, Download, CloudDownload } from 'lucide-react'
 import { useState } from 'react'
 import { useNavigate } from 'react-router'
 import { api, qk } from '@/api/endpoints'
@@ -21,6 +21,7 @@ const PAGES = [
   { to: '/rules', label: 'Rules', icon: BookOpenCheck },
   { to: '/exclusions', label: 'Exclusions & IOCs', icon: ShieldBan },
   { to: '/quarantine', label: 'Quarantine', icon: FileArchive },
+  { to: '/updates', label: 'Agent updates', icon: CloudDownload },
   { to: '/reviews', label: 'Review requests', icon: MessageSquareMore },
   { to: '/settings/users', label: 'Users & roles', icon: Users },
   { to: '/settings/tokens', label: 'API tokens', icon: KeyRound },

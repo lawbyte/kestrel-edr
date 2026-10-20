@@ -513,6 +513,9 @@ impl AgentService for AgentSvc {
                         Some(AgentPayload::Inventory(inv)) => {
                             ingest::inventory(&state, &sess, &inv).await
                         }
+                        Some(AgentPayload::UpdateResult { version, ok, error }) => {
+                            crate::updates::on_result(&state, device_id, &version, ok, &error).await
+                        }
                         Some(AgentPayload::RenewCertificate { csr_pem }) => {
                             match renew_certificate(&state, device_id, &sess.serial, &csr_pem).await
                             {

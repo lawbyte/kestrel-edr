@@ -1030,6 +1030,7 @@ pub fn checklist_for(alert: &Alert, hostname: &str, user: Option<&str>) -> Vec<C
             port: None,
             image: None,
             ttl_secs: None,
+            ioc_id: None,
         };
         let already = alert.actions.iter().any(|o| {
             o.ok && matches!(&o.action, ResponseAction::BlockDestination { ip: i, .. } if *i == ip)

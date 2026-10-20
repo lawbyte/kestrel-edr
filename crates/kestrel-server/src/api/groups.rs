@@ -6,6 +6,7 @@ use crate::{
     error::{ApiError, ApiResult},
     policy_svc,
     state::AppState,
+    updates,
 };
 use axum::{extract::State, http::StatusCode, Json};
 use kestrel_common::now_ms;
@@ -27,17 +28,18 @@ struct GroupRow {
     description: String,
     policy_id: String,
     is_default: bool,
+    update_ring: String,
     device_count: i64,
 }
 
 impl GroupRow {
     fn to_api(&self) -> Value {
         json!({"id": self.id, "name": self.name, "description": self.description, "policy_id": self.policy_id,
-               "device_count": self.device_count, "is_default": self.is_default})
+               "device_count": self.device_count, "is_default": self.is_default, "update_ring": self.update_ring})
     }
 }
 
-const GROUP_SELECT: &str = "SELECT g.id, g.name, g.description, g.policy_id, g.is_default, \
+const GROUP_SELECT: &str = "SELECT g.id, g.name, g.description, g.policy_id, g.is_default, g.update_ring, \
     (SELECT count(*) FROM devices d WHERE d.group_id = g.id AND d.decommissioned_at IS NULL) AS device_count FROM groups g";
 
 async fn load_group(st: &AppState, id: Uuid) -> ApiResult<GroupRow> {
@@ -65,6 +67,7 @@ pub struct CreateGroup {
     #[serde(default)]
     description: String,
     policy_id: Option<String>,
+    update_ring: Option<String>,
 }
 
 async fn policy_exists(st: &AppState, id: &str) -> ApiResult<()> {
@@ -90,15 +93,22 @@ pub async fn create(
         .policy_id
         .unwrap_or_else(|| crate::db::DEFAULT_POLICY_ID.to_string());
     policy_exists(&st, &policy_id).await?;
+    let ring = b.update_ring.unwrap_or_else(|| "broad".to_string());
+    if !updates::valid_group_ring(&ring) {
+        return Err(ApiError::bad_request(
+            "update_ring must be canary, early, broad or pinned",
+        ));
+    }
     let id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO groups (id, name, description, policy_id, created_at) VALUES ($1,$2,$3,$4,$5)",
+        "INSERT INTO groups (id, name, description, policy_id, created_at, update_ring) VALUES ($1,$2,$3,$4,$5,$6)",
     )
     .bind(id)
     .bind(name)
     .bind(&b.description)
     .bind(&policy_id)
     .bind(now_ms())
+    .bind(&ring)
     .execute(&st.db)
     .await?;
     audit::log(
@@ -106,7 +116,7 @@ pub async fn create(
         &p.actor(),
         "group.create",
         id.to_string(),
-        json!({"name": name, "policy_id": policy_id}),
+        json!({"name": name, "policy_id": policy_id, "update_ring": ring}),
     )
     .await;
     Ok(Json(load_group(&st, id).await?.to_api()))
@@ -118,6 +128,7 @@ pub struct PatchGroup {
     description: Option<String>,
     #[serde(default, deserialize_with = "double_option")]
     policy_id: Option<Option<String>>,
+    update_ring: Option<String>,
 }
 
 pub async fn update(
@@ -161,14 +172,37 @@ pub async fn update(
             policy_svc::bump_and_push(&st, Some(&pid)).await?;
         }
     }
+    let mut ring_changed = false;
+    if let Some(ring) = &b.update_ring {
+        if !updates::valid_group_ring(ring) {
+            return Err(ApiError::bad_request(
+                "update_ring must be canary, early, broad or pinned",
+            ));
+        }
+        if *ring != g.update_ring {
+            sqlx::query("UPDATE groups SET update_ring = $2 WHERE id = $1")
+                .bind(id)
+                .bind(ring)
+                .execute(&st.db)
+                .await?;
+            ring_changed = true;
+        }
+    }
     audit::log(
         &st.db,
         &p.actor(),
         "group.update",
         id.to_string(),
-        json!({"name": b.name, "description": b.description, "policy_id": b.policy_id}),
+        json!({"name": b.name, "description": b.description, "policy_id": b.policy_id,
+               "update_ring": b.update_ring, "previous_update_ring": ring_changed.then_some(&g.update_ring)}),
     )
     .await;
+    if ring_changed {
+        // Connected members may now be in a ring with an enabled release.
+        if let Err(e) = updates::deliver_to_connected(&st, updates::Scope::Group(id)).await {
+            tracing::warn!(error = %e, "update delivery after ring change failed");
+        }
+    }
     Ok(Json(load_group(&st, id).await?.to_api()))
 }
 

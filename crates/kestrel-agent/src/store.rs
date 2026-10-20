@@ -47,7 +47,8 @@ impl Priority {
             | AgentPayload::RenewCertificate { .. } => Priority::Heartbeat,
             AgentPayload::Alert(_)
             | AgentPayload::ActionResult { .. }
-            | AgentPayload::ReviewRequest(_) => Priority::High,
+            | AgentPayload::ReviewRequest(_)
+            | AgentPayload::UpdateResult { .. } => Priority::High,
         }
     }
 }
@@ -63,6 +64,7 @@ pub fn payload_kind(p: &AgentPayload) -> &'static str {
         AgentPayload::Inventory(_) => "inventory",
         AgentPayload::Ack { .. } => "ack",
         AgentPayload::RenewCertificate { .. } => "renew_certificate",
+        AgentPayload::UpdateResult { .. } => "update_result",
     }
 }
 

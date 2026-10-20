@@ -23,6 +23,7 @@ pub const ALL_PRIVILEGES: &[&str] = &[
     "settings.write",
     "audit.read",
     "tokens.write",
+    "updates.write",
 ];
 
 pub const DEFAULT_POLICY_ID: &str = "default";

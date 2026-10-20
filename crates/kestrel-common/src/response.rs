@@ -47,6 +47,12 @@ pub enum ResponseAction {
         image: Option<String>,
         #[serde(default)]
         ttl_secs: Option<u64>,
+        /// Id of the Block IOC whose hit created this block (set by the
+        /// detection engine only). When a new policy no longer contains that
+        /// id as a Block IOC, the agent lifts the block (M10). Blocks without
+        /// it (other rules, analysts) are never lifted by reconciliation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ioc_id: Option<String>,
     },
     /// Block all network traffic for one executable image via WFP.
     BlockImageNetwork {

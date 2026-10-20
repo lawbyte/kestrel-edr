@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import {
   Activity,
   BookOpenCheck,
+  CloudDownload,
   Crosshair,
   FileArchive,
   Gauge,
@@ -109,6 +110,7 @@ export function AppLayout() {
       label: 'Configure',
       items: [
         { to: '/policies', label: 'Policies', icon: SlidersHorizontal, hint: 'G P' },
+        { to: '/updates', label: 'Agent updates', icon: CloudDownload },
         { to: '/rules', label: 'Rules', icon: BookOpenCheck },
         { to: '/exclusions', label: 'Exclusions & IOCs', icon: ShieldBan },
         { to: '/quarantine', label: 'Quarantine', icon: FileArchive },

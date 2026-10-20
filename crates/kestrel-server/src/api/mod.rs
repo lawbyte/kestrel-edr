@@ -13,6 +13,7 @@ mod quarantine;
 mod rules;
 mod settings_routes;
 mod sse;
+mod updates;
 mod users;
 
 use crate::{error::ApiError, state::AppState};
@@ -289,6 +290,14 @@ pub fn router() -> Router<AppState> {
         )
         .route("/audit-log", get(settings_routes::audit_log))
         .route("/audit-log/verify", get(settings_routes::audit_verify))
+        // agent updates (offline-signed releases, staged rings)
+        .route("/updates/status", get(updates::status))
+        .route(
+            "/updates/releases",
+            get(updates::list).post(updates::register),
+        )
+        .route("/updates/releases/:id/promote", post(updates::promote))
+        .route("/updates/releases/:id/halt", post(updates::halt))
         // live updates
         .route("/events/stream", get(sse::stream))
         .fallback(not_found)

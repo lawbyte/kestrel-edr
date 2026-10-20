@@ -34,7 +34,7 @@ Built-in roles (`roles` table, editable later):
 | `analyst` | `read`, `incidents.write`, `response.process`, `response.file`, `response.network`, `response.collect`, `exclusions.write`, `iocs.write` |
 | `readonly` | `read` |
 
-Other privileges: `policies.write`, `rules.write`, `devices.write`, `users.write`, `settings.write`, `audit.read`, `tokens.write`.
+Other privileges: `policies.write`, `rules.write`, `devices.write`, `users.write`, `settings.write`, `audit.read`, `tokens.write`, `updates.write` (register / promote / halt agent releases; admin only via `*`).
 
 ### Auth
 
@@ -98,12 +98,12 @@ Device event timelines and hunt results render the v1.1 events (`file_activity`,
 
 ### Groups & enrollment
 
-`Group = {id, name, description, policy_id, device_count}`
+`Group = {id, name, description, policy_id, device_count, is_default, update_ring}` — `update_ring` is `canary` | `early` | `broad` (default) | `pinned` (never auto-updates).
 
 | Method | Path |
 |---|---|
-| GET/POST | `/groups` (POST `{name, description, policy_id}`) |
-| PATCH/DELETE | `/groups/:id` |
+| GET/POST | `/groups` (POST `{name, description, policy_id, update_ring?}`) |
+| PATCH/DELETE | `/groups/:id` (PATCH any of `{name, description, policy_id, update_ring}`; a ring change immediately offers the ring's release to connected members) |
 | GET | `/enrollment-tokens` → `[{id, group_id, group_name, token_prefix, created_at, expires_at, max_uses, uses, revoked}]` |
 | POST | `/enrollment-tokens` `{group_id, expires_in_days (default 7, 1-90), max_uses (default 50, 1-10000)}` → includes full `token` **once** plus `install_command` (PowerShell one-liner with msiexec properties) |
 | DELETE | `/enrollment-tokens/:id` (revoke) |
@@ -175,7 +175,7 @@ Title auto-generated, first match wins: all alerts `TP-*` → `"Agent tampering 
 | GET | `/exclusions/preview?kind=&value=&rule_id=` | `{matching_alerts_30d: int, sample: [AlertRow]}` — scope preview before saving |
 | GET/POST | `/iocs`, DELETE `/iocs/:id` | `Ioc` (+ `{created_by, created_at, hits}`); POST bulk accepts `{items:[...], confirm_broad?}`. IP IOCs wider than /16 (IPv6 /48) or in private/loopback/link-local ranges need `confirm_broad: true` (per item or bulk); wider than /8 (IPv6 /32) are always refused |
 
-IOC-triggered network blocks (`BlockDestination` issued by the engine on an IOC network/DNS hit) are scoped to the offending image (`image` set) unless the policy sets `ioc_block_host_wide`, and always carry `ttl_secs` = `policy.ioc_block_ttl_secs` (default 86400, at least 60). Deleting an IOC does not lift blocks already in place; they expire with their TTL.
+IOC-triggered network blocks (`BlockDestination` issued by the engine on an IOC network/DNS hit) are scoped to the offending image (`image` set) unless the policy sets `ioc_block_host_wide`, and always carry `ttl_secs` = `policy.ioc_block_ttl_secs` (default 86400, at least 60). They also carry `ioc_id` (the IOC's id; `#[serde(default)]`, omitted when unset). When the agent applies a newer server policy it lifts every WFP block it created for an IOC id that is no longer a Block IOC in that policy (deleted, changed to Audit/Allow, or out of scope after a group move) via `Platform::reconcile_ioc_blocks` (M10). Blocks without `ioc_id` (ST-04 and other rules, analyst commands) are never lifted this way; the tag is honoured only for engine-originated actions. Untouched blocks still expire with their TTL.
 
 Policy fields added by the 2026-10-21 security fixes (serde defaults, so older stored policies load unchanged), validated on `PUT /policies/:id`:
 
@@ -229,9 +229,29 @@ Secrets (`client_secret`, SMTP password, webhook secret) are write-only: GET ret
 
 Validation: `oidc.enabled` needs an https issuer, `client_id` and at least one `allowed_domains` entry (an empty list denies every SSO login); `oidc.default_role` cannot be a `*` role. Webhook/Slack/Teams URLs and the OIDC issuer must resolve to public addresses (private ranges only via `KESTREL_OUTBOUND_ALLOW_CIDRS`; redirects are not followed). A private syslog host needs `syslog.allow_private`; link-local / metadata addresses are always refused. `session_max_days` 1-90.
 
+### Agent updates (signed releases, staged rings)
+
+The server never holds the signing key. `KESTREL_UPDATE_PUBKEY` (base64 Ed25519 public key, the same value the agent is built with) must be set, or registration is refused. Read endpoints need `read`; writes need `updates.write` and are audit-logged (`update.release_register`, `update.release_rejected`, `update.release_promote`, `update.release_halt`).
+
+| Method | Path | Body → Response |
+|---|---|---|
+| GET | `/updates/status` | → `{signing_key_configured, public_key, package_base_url, server_version, rings: [{ring: canary\|early\|broad\|pinned, groups: [{id, name}], devices, versions: [{version, count}], target: {id, version}\|null}]}` |
+| GET | `/updates/releases` | → `[UpdateRelease]`, newest version first |
+| POST | `/updates/releases` | `{manifest: UpdateManifest (object, or a JSON string of it), notes?}` → `UpdateRelease`. 400: key not configured, bad format, signature does not verify, server-hosted package missing or its SHA-256 differs; 409: version already registered |
+| POST | `/updates/releases/:id/promote` | `{ring: canary\|early\|broad}` → `UpdateRelease & {delivered_now}`. Rings strictly in order; 409 when out of order, already enabled or halted |
+| POST | `/updates/releases/:id/halt` | `{reason?}` → `UpdateRelease`. Terminal; 409 when already halted |
+
+`UpdateRelease = {id, version, url, sha256, signature, notes, created_by, created_by_name, created_at, state: staged|rolling|complete|halted, halted_at, halted_by, halted_by_name, halt_reason, next_ring, rings: [UpdateRingHealth × 3], recent_failures: [{device_id, hostname, error, at}] (≤ 20)}`
+
+`UpdateRingHealth = {ring, enabled, enabled_at, enabled_by, enabled_by_name, devices, on_target, delivered, succeeded, failed, pending, offline_24h}` — `devices`: non-decommissioned devices whose group is in the ring; `on_target`: of those, `agent_version >= release`; `offline_24h`: delivered, not succeeded, device not seen for > 24 h.
+
+Manifest checks (`kestrel_common::update::check_manifest_format`): version `[v]N.N[.N[.N]][-pre|+build]` (≤ 64 chars); url absolute `https://`, no whitespace / user info (≤ 2048); sha256 64 hex digits; signature base64 Ed25519 over `kestrel-update-v1\n{version}\n{url}\n{sha256}`. A URL whose host is one of `KESTREL_PUBLIC_HOSTNAME` must be `https://<host>:<KESTREL_GRPC_PUBLIC_PORT>/downloads/updates/<file>` (`[A-Za-z0-9._-]`, no sub-directories); the file must exist in `<AGENT_DIR>/updates/` (`deploy/installers/updates/`) with the manifest's SHA-256. Those files are served read-only at that path **on the agent port** (HTTP/2, agent-CA certificate), because agents trust only the pinned agent CA for their own server. Any other host is an external URL that agents verify against public web PKI roots (no client certificate is presented).
+
+Ring of a device = its group's `update_ring` (devices without a group use the default group's). Delivery target per ring = newest non-halted release enabled for it.
+
 ### Live updates
 
-`GET /events/stream` — Server-Sent Events: `event: incident` / `alert` / `device` / `action` with JSON `{id, type: "created"|"updated"}` so the console refreshes rows without polling. The session (or API token) is re-validated every 60 s; when it is no longer valid the server sends `event: session` `{"type":"expired"}` and closes the stream.
+`GET /events/stream` — Server-Sent Events: `event: incident` / `alert` / `device` / `action` / `update_release` with JSON `{id, type: "created"|"updated"}` so the console refreshes rows without polling. The session (or API token) is re-validated every 60 s; when it is no longer valid the server sends `event: session` `{"type":"expired"}` and closes the stream.
 
 ### Agent transport rules (server side)
 
@@ -240,7 +260,8 @@ Validation: `oidc.enabled` needs an https issuer, `client_id` and at least one `
 - `Hello.outbox_epoch` (random UUID created with the agent's outbox database, constant across restarts) change → the per-device seq high-water mark resets to 0 (`TP-SRV-OUTBOX-RESET`). Agents that send no epoch keep the old behaviour.
 - Heartbeats: duplicates are detected by `seq`; `ts` is clamped to server time.
 - `ServerPayload::SetUninstallToken{token}` carries a rotated uninstall token. The server tracks its seq like `Command` / `Policy` / `Rules` and promotes the pending token when the agent acks that seq and the token is still the pending one. It is re-sent after `Hello` while a rotation is pending and is never queued in `pending_messages` (no plaintext token at rest outside the sealed column).
-- `ServerPayload::Update(UpdateManifest)`: `signature` is base64 Ed25519 over the UTF-8 bytes of `kestrel-update-v1\n{version}\n{url}\n{sha256}` (fields trimmed, sha256 lower-case hex; version and url must not contain line breaks), verified against the key embedded at build time (`KESTREL_UPDATE_PUBKEY`). The server does not send updates yet.
+- `ServerPayload::Update(UpdateManifest)`: `signature` is base64 Ed25519 over the UTF-8 bytes of `kestrel-update-v1\n{version}\n{url}\n{sha256}` (fields trimmed, sha256 lower-case hex; version and url must not contain line breaks), verified against the key embedded at build time (`KESTREL_UPDATE_PUBKEY`). The server sends it only for releases an administrator registered and promoted to the device's ring (see "Agent updates"): after `Hello` and when a ring is promoted (connected agents), never to decommissioned or `pinned` devices, and only when the newest non-halted release enabled for the ring is newer than `Hello.agent_version` (`kestrel_common::update::is_newer`). It is not acked or queued; it is re-offered on every `Hello` until the device reports the version.
+- `AgentPayload::UpdateResult{version, ok, error}` (new, additive): the agent reports a failed update (no embedded key, bad signature, download error, hash mismatch, installer did not start) once per version + error. The server marks that device's delivery `failed`. Success is inferred from a later `Hello` with `agent_version >= version`. Older servers drop the message as malformed and ack it.
 
 ### Agent transport rules (agent side)
 

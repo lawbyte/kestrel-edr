@@ -354,6 +354,7 @@ export const PRIVILEGES = [
   'settings.write',
   'audit.read',
   'tokens.write',
+  'updates.write',
 ] as const
 
 export const ROLE_PRIVILEGES: Record<string, string[]> = {

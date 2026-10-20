@@ -348,6 +348,18 @@ impl Core {
         if let Err(e) = self.store.kv_set_json(store::KV_POLICY, &p) {
             tracing::warn!("persisting policy failed: {e:#}");
         }
+        // M10: a server-delivered policy is authoritative for IOCs. Lift the
+        // WFP blocks earlier IOC hits created for indicators that are no
+        // longer Block IOCs (deleted, demoted to Audit/Allow, or out of scope
+        // after a group move). Blocks from other rules / analysts are untagged
+        // and never touched.
+        let keep = block_ioc_ids(&p);
+        let me = self.clone();
+        tokio::spawn(async move {
+            for d in me.platform.reconcile_ioc_blocks(&keep).await {
+                tracing::info!("IOC no longer blocked by policy; lifted: {d}");
+            }
+        });
         self.install_policy(p);
         true
     }
@@ -870,6 +882,16 @@ pub fn auto_release_due(
     now - reference >= (hours as i64).saturating_mul(3_600_000)
 }
 
+/// Ids of the Block IOCs in `p`: IOC-created WFP blocks whose id is not in
+/// this set are lifted when the policy is applied (M10).
+pub fn block_ioc_ids(p: &Policy) -> std::collections::BTreeSet<String> {
+    p.iocs
+        .iter()
+        .filter(|i| i.action == kestrel_common::IocAction::Block && !i.id.is_empty())
+        .map(|i| i.id.clone())
+        .collect()
+}
+
 /// Plain-language severity → whether to pop a tray notification.
 pub(crate) fn should_push(sev: Severity, acted: bool) -> bool {
     acted || sev >= Severity::Critical
@@ -894,5 +916,30 @@ mod tests {
         // disabled / unknown isolation start
         assert!(!auto_release_due(Some(0), None, 1000 * H, 0));
         assert!(!auto_release_due(None, None, 1000 * H, 72));
+    }
+
+    #[test]
+    fn block_ioc_ids_only_block_iocs() {
+        use kestrel_common::{Ioc, IocAction, IocKind, Policy};
+        let ioc = |id: &str, action| Ioc {
+            id: id.into(),
+            kind: IocKind::Domain,
+            value: format!("{id}.example"),
+            action,
+            description: String::new(),
+        };
+        let p = Policy {
+            iocs: vec![
+                ioc("b1", IocAction::Block),
+                ioc("a1", IocAction::Audit),
+                ioc("w1", IocAction::Allow),
+                ioc("b2", IocAction::Block),
+                ioc("", IocAction::Block),
+            ],
+            ..Policy::default()
+        };
+        let ids: Vec<String> = super::block_ioc_ids(&p).into_iter().collect();
+        assert_eq!(ids, ["b1", "b2"]);
+        assert!(super::block_ioc_ids(&Policy::default()).is_empty());
     }
 }

@@ -33,6 +33,10 @@ pub struct Config {
     /// Private ranges outbound HTTP (webhooks, OIDC) may reach
     /// (`KESTREL_OUTBOUND_ALLOW_CIDRS`); everything private is blocked otherwise.
     pub outbound_allow: Vec<ipnet::IpNet>,
+    /// Base64 Ed25519 public key that agent release manifests must be signed
+    /// with (`KESTREL_UPDATE_PUBKEY`). Unset: release registration is refused.
+    /// The matching private key never touches the server.
+    pub update_pubkey: Option<String>,
     /// Run background jobs (retention, status) — disabled in some tests.
     pub run_jobs: bool,
 }
@@ -120,6 +124,14 @@ impl Config {
             trusted_proxies: parse_nets("KESTREL_TRUSTED_PROXIES")?,
             setup_code: env("KESTREL_SETUP_CODE"),
             outbound_allow: parse_nets("KESTREL_OUTBOUND_ALLOW_CIDRS")?,
+            update_pubkey: match env("KESTREL_UPDATE_PUBKEY") {
+                Some(k) => {
+                    crate::updates::parse_pubkey(&k)
+                        .map_err(|e| anyhow::anyhow!("KESTREL_UPDATE_PUBKEY: {e}"))?;
+                    Some(k.trim().to_string())
+                }
+                None => None,
+            },
             run_jobs: true,
         })
     }

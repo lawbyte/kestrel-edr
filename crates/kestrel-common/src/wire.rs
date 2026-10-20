@@ -45,6 +45,16 @@ pub enum AgentPayload {
     RenewCertificate {
         csr_pem: String,
     },
+    /// Outcome of a `ServerPayload::Update` the agent could not complete
+    /// (signature, download, hash or installer start failed). Success is not
+    /// reported here: the server sees the new `agent_version` in the next
+    /// `Hello`. Older servers drop this message as malformed (and ack it).
+    UpdateResult {
+        version: String,
+        ok: bool,
+        #[serde(default)]
+        error: String,
+    },
 }
 
 /// Server → agent.

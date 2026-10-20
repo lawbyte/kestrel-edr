@@ -252,6 +252,11 @@ pub struct BlockRecord {
     #[serde(default)]
     pub expires_at: Option<i64>,
     pub created_at: i64,
+    /// Block IOC whose hit created this block (`BlockDestination.ioc_id`).
+    /// `None` for every other block (detection rules, analysts); only tagged
+    /// blocks are ever lifted by [`WfpState::take_lifted_ioc_blocks`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ioc_id: Option<String>,
 }
 
 /// Persisted WFP state (`<state>\wfp_state.json`). Filters are persistent in
@@ -324,6 +329,21 @@ impl WfpState {
             .partition(|b| b.expires_at.map(|e| e <= now).unwrap_or(false));
         self.blocks = keep;
         expired
+    }
+
+    /// M10: remove and return the IOC-created blocks whose IOC is no longer a
+    /// Block IOC (`block_iocs` = ids of the Block IOCs in the newly applied
+    /// policy). Blocks without an IOC tag are never returned.
+    pub fn take_lifted_ioc_blocks(
+        &mut self,
+        block_iocs: &std::collections::BTreeSet<String>,
+    ) -> Vec<BlockRecord> {
+        let (lifted, keep): (Vec<_>, Vec<_>) = self
+            .blocks
+            .drain(..)
+            .partition(|b| b.ioc_id.as_ref().is_some_and(|id| !block_iocs.contains(id)));
+        self.blocks = keep;
+        lifted
     }
 
     /// Every filter key this agent owns.
@@ -533,6 +553,54 @@ mod tests {
     }
 
     #[test]
+    fn ioc_blocks_lifted_only_when_ioc_gone() {
+        let rec = |id: &str, ioc: Option<&str>| BlockRecord {
+            id: id.into(),
+            description: String::new(),
+            filter_keys: vec![format!("k-{id}")],
+            expires_at: Some(1_000),
+            created_at: 0,
+            ioc_id: ioc.map(str::to_string),
+        };
+        let mut s = WfpState {
+            blocks: vec![
+                rec("st04", None),              // ST-04 destination block
+                rec("analyst", None),           // analyst command
+                rec("kept", Some("ioc-1")),     // IOC still a Block IOC
+                rec("deleted", Some("ioc-2")),  // IOC deleted
+                rec("deleted2", Some("ioc-2")), // second hit of the same IOC
+                rec("demoted", Some("ioc-3")),  // IOC changed to Audit/Allow
+            ],
+            ..Default::default()
+        };
+        let keep: std::collections::BTreeSet<String> = ["ioc-1".to_string()].into();
+        let lifted = s.take_lifted_ioc_blocks(&keep);
+        let ids: Vec<&str> = lifted.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, ["deleted", "deleted2", "demoted"]);
+        let left: Vec<&str> = s.blocks.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(left, ["st04", "analyst", "kept"]);
+        // Idempotent; an empty Block-IOC set lifts every remaining IOC block
+        // but never untagged ones.
+        assert!(s.take_lifted_ioc_blocks(&keep).is_empty());
+        let lifted = s.take_lifted_ioc_blocks(&Default::default());
+        assert_eq!(lifted.len(), 1);
+        assert_eq!(s.blocks.len(), 2);
+        // Old state files (no ioc_id) still load; the tag round-trips.
+        let old: BlockRecord =
+            serde_json::from_str(r#"{"id":"x","description":"","filter_keys":[],"created_at":0}"#)
+                .unwrap();
+        assert_eq!(old.ioc_id, None);
+        let j = serde_json::to_string(&rec("y", Some("ioc-9"))).unwrap();
+        assert_eq!(
+            serde_json::from_str::<BlockRecord>(&j)
+                .unwrap()
+                .ioc_id
+                .as_deref(),
+            Some("ioc-9")
+        );
+    }
+
+    #[test]
     fn state_ttl() {
         let mut s = WfpState::default();
         s.blocks.push(BlockRecord {
@@ -541,6 +609,7 @@ mod tests {
             filter_keys: vec!["k1".into()],
             expires_at: Some(100),
             created_at: 0,
+            ioc_id: None,
         });
         s.blocks.push(BlockRecord {
             id: "b".into(),
@@ -548,6 +617,7 @@ mod tests {
             filter_keys: vec!["k2".into()],
             expires_at: None,
             created_at: 0,
+            ioc_id: None,
         });
         s.isolation_filters = vec!["k3".into()];
         assert_eq!(s.all_keys().len(), 3);

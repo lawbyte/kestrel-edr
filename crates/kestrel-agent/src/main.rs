@@ -102,6 +102,33 @@ enum Cmd {
         #[arg(long)]
         detect: bool,
     },
+    /// Release signing (owner, offline): create an Ed25519 update signing key.
+    /// Writes the private key (owner-only permissions) and public key files
+    /// and prints the base64 public key for KESTREL_UPDATE_PUBKEY.
+    #[command(hide = true)]
+    UpdateKeygen {
+        /// Directory for kestrel-update-signing.key / .pub (keep it offline).
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Release signing (owner, offline): print the signed manifest JSON for
+    /// an agent MSI, to paste into the console (Agent updates → Register).
+    #[command(hide = true)]
+    UpdateSign {
+        /// Private key file from `update-keygen`.
+        #[arg(long)]
+        key: PathBuf,
+        /// Version of the agent inside the MSI (e.g. 1.4.0).
+        #[arg(long)]
+        version: String,
+        /// HTTPS URL agents download the MSI from, e.g.
+        /// https://<server>:8443/downloads/updates/KestrelAgent-1.4.0.msi
+        #[arg(long)]
+        url: String,
+        /// The MSI file (its SHA-256 goes into the manifest).
+        #[arg(long)]
+        file: PathBuf,
+    },
 }
 
 #[derive(Args, Debug, Clone)]
@@ -162,6 +189,29 @@ fn real_main() -> Result<()> {
         .unwrap_or_else(config::default_state_dir);
     match cli.cmd {
         Cmd::Run { console } => run(state_dir, console),
+        Cmd::UpdateKeygen { out } => {
+            let g = kestrel_agent::update::keygen(&out)?;
+            eprintln!(
+                "Private key: {} (keep it offline and backed up; anyone holding it can push code to every agent)",
+                g.key_file.display()
+            );
+            eprintln!("Public key file: {}", g.pub_file.display());
+            eprintln!("Set KESTREL_UPDATE_PUBKEY to this value when building the agent and on the server:");
+            println!("{}", g.public_key);
+            Ok(())
+        }
+        Cmd::UpdateSign {
+            key,
+            version,
+            url,
+            file,
+        } => {
+            let sk = kestrel_agent::update::load_signing_key(&key)?;
+            let sha = kestrel_agent::update::sha256_file(&file)?;
+            let m = kestrel_agent::update::sign_release(&sk, &version, &url, &sha)?;
+            println!("{}", serde_json::to_string_pretty(&m)?);
+            Ok(())
+        }
         other => {
             let _log = logging::init(None, true);
             let rt = tokio::runtime::Builder::new_multi_thread()
@@ -204,7 +254,7 @@ fn run(state_dir: PathBuf, console: bool) -> Result<()> {
 
 async fn dispatch(state_dir: PathBuf, cmd: Cmd) -> Result<()> {
     match cmd {
-        Cmd::Run { .. } => unreachable!(),
+        Cmd::Run { .. } | Cmd::UpdateKeygen { .. } | Cmd::UpdateSign { .. } => unreachable!(),
         Cmd::Install {
             server,
             group_tag,

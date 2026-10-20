@@ -198,6 +198,19 @@ pub trait Platform: Send + Sync {
     /// Whether the host is currently network-isolated (WFP state).
     fn is_isolated(&self) -> bool;
 
+    /// M10: lift the network blocks created for IOC hits
+    /// (`BlockDestination.ioc_id`) whose IOC is not in `block_iocs` (the ids of
+    /// the Block IOCs in the policy just applied). Blocks created by other
+    /// rules or by analysts carry no IOC id and are never touched. Returns a
+    /// description of each block removed. Default: nothing to lift.
+    async fn reconcile_ioc_blocks(
+        &self,
+        block_iocs: &std::collections::BTreeSet<String>,
+    ) -> Vec<String> {
+        let _ = block_iocs;
+        Vec::new()
+    }
+
     /// User profile directories to plant canaries into.
     fn user_profiles(&self) -> Vec<String>;
     /// Plant (or refresh) canary files; returns paths successfully written.

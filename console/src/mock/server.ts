@@ -25,6 +25,10 @@ import { DAY, HOUR, MIN, NOW, POLICY_UPDATED, inventoryFor, policySummary } from
 import { liveIncident } from './scenarios'
 import { fullAlerts, toAlertRow } from './story'
 import { hexId, int, uuid } from './rng'
+import { MockUpdates, UpdateError, seedUpdates } from './updates'
+import { parseManifest } from '@/lib/updates'
+import type { GroupUpdateRing, UpdateRing } from '@/api/types'
+import { GROUP_UPDATE_RINGS } from '@/api/types'
 
 type Handler = (req: { params: Record<string, string>; query: URLSearchParams; body: unknown; method: string }) => unknown
 
@@ -41,6 +45,12 @@ const notFound = (what = 'Resource') => new HttpError(404, 'not_found', `${what}
 const bad = (m: string) => new HttpError(400, 'bad_request', m)
 
 export const db = new MockDb()
+export const updates = new MockUpdates(
+  () => db.devices,
+  () => db.groups,
+)
+seedUpdates(updates, db.devices, db.groups, db.users)
+db.refreshDevices()
 const live = new Set<(e: LiveEvent) => void>()
 export function subscribeMockLive(fn: (e: LiveEvent) => void) {
   live.add(fn)
@@ -432,20 +442,30 @@ function issueAction(d: Device, action: ResponseAction, u: User, comment: string
 // ------------------------------------------------------------------ groups & enrollment
 
 route('GET', '/groups', () => (me(), db.refreshDevices(), db.groups))
+function checkRing(r: unknown): GroupUpdateRing {
+  if (!GROUP_UPDATE_RINGS.includes(r as GroupUpdateRing)) throw bad(`update_ring must be one of ${GROUP_UPDATE_RINGS.join(', ')}`)
+  return r as GroupUpdateRing
+}
 route('POST', '/groups', ({ body }) => {
   const u = me()
-  const b = body as { name: string; description: string; policy_id: string | null }
+  const b = body as { name: string; description: string; policy_id: string | null; update_ring?: GroupUpdateRing }
   if (!b.name?.trim()) throw bad('Name is required')
-  const g = { id: `grp-${hexId(6)}`, name: b.name, description: b.description ?? '', policy_id: b.policy_id, device_count: 0 }
+  const update_ring = b.update_ring === undefined ? 'broad' : checkRing(b.update_ring)
+  const g = { id: `grp-${hexId(6)}`, name: b.name, description: b.description ?? '', policy_id: b.policy_id, device_count: 0, is_default: false, update_ring }
   db.groups.push(g)
-  db.log(u, 'group.create', g.name)
+  db.log(u, 'group.create', g.name, { update_ring })
+  emit({ kind: 'group', id: g.id, type: 'created' })
   return g
 })
 route('PATCH', '/groups/:id', ({ params, body }) => {
   const u = me()
   const g = db.groups.find((x) => x.id === params.id)
   if (!g) throw notFound('Group')
-  Object.assign(g, body)
+  const b = body as { name?: string; description?: string; policy_id?: string | null; update_ring?: GroupUpdateRing }
+  if (b.update_ring !== undefined) g.update_ring = checkRing(b.update_ring)
+  if (b.name !== undefined) g.name = b.name
+  if (b.description !== undefined) g.description = b.description
+  if (b.policy_id !== undefined) g.policy_id = b.policy_id
   for (const d of db.devices.filter((x) => x.group_id === g.id)) {
     const p = db.policies.find((x) => x.id === g.policy_id)
     d.group_name = g.name
@@ -453,12 +473,14 @@ route('PATCH', '/groups/:id', ({ params, body }) => {
     d.policy_name = p?.name ?? null
   }
   db.log(u, 'group.update', g.name, body as Record<string, unknown>)
+  emit({ kind: 'group', id: g.id, type: 'updated' })
   return g
 })
 route('DELETE', '/groups/:id', ({ params }) => {
   const u = me()
   const g = db.groups.find((x) => x.id === params.id)
   if (!g) throw notFound('Group')
+  if (g.is_default) throw new HttpError(409, 'conflict', 'The default group cannot be deleted')
   if (db.devices.some((d) => d.group_id === g.id)) throw new HttpError(409, 'conflict', 'Move this group’s devices to another group first')
   db.groups = db.groups.filter((x) => x.id !== g.id)
   db.log(u, 'group.delete', g.name)
@@ -931,6 +953,60 @@ route('GET', '/audit-log', ({ query }) => {
   return page(items, query)
 })
 route('GET', '/audit-log/verify', () => (me(), db.verifyAudit()))
+
+// ------------------------------------------------------------------ agent updates
+
+function requireUpdatesWrite(u: User) {
+  const privs = ROLE_PRIVILEGES[u.role] ?? ['read']
+  if (!privs.includes('*') && !privs.includes('updates.write')) throw new HttpError(403, 'forbidden', 'You need the updates.write privilege')
+}
+function wrapUpdate<T>(f: () => T): T {
+  try {
+    return f()
+  } catch (e) {
+    if (e instanceof UpdateError) throw new HttpError(e.status, e.status === 409 ? 'conflict' : e.status === 404 ? 'not_found' : 'bad_request', e.message)
+    throw e
+  }
+}
+route('GET', '/updates/status', () => (me(), db.refreshDevices(), updates.status()))
+route('GET', '/updates/releases', () => (me(), db.refreshDevices(), updates.list()))
+route('POST', '/updates/releases', ({ body }) => {
+  const u = me()
+  requireUpdatesWrite(u)
+  const b = (body ?? {}) as { manifest?: unknown; notes?: string }
+  const parsed = parseManifest(JSON.stringify(b.manifest ?? null))
+  if (!parsed.ok) throw bad(`invalid manifest: ${parsed.error}`)
+  const r = wrapUpdate(() => updates.register(parsed.manifest, (b.notes ?? '').slice(0, 4000), u))
+  db.log(u, 'update.register', r.manifest.version, { sha256: r.manifest.sha256, url: r.manifest.url })
+  emit({ kind: 'update_release', id: r.id, type: 'registered' })
+  return updates.view(r)
+})
+route('POST', '/updates/releases/:id/promote', ({ params, body }) => {
+  const u = me()
+  requireUpdatesWrite(u)
+  const ring = (body as { ring?: UpdateRing } | undefined)?.ring as UpdateRing
+  const out = wrapUpdate(() => updates.promote(params.id, ring, u))
+  db.log(u, 'update.promote', out.release.manifest.version, { ring, delivered_now: out.delivered_now })
+  emit({ kind: 'update_release', id: params.id, type: 'promoted' })
+  if (out.delivered_ids.length) {
+    // Connected agents download, verify and install; a later Hello reports the new version.
+    setTimeout(() => {
+      updates.settle(params.id, out.delivered_ids)
+      emit({ kind: 'update_release', id: params.id, type: 'delivery' })
+      for (const id of out.delivered_ids) emit({ kind: 'device', id, type: 'updated' })
+    }, 6000)
+  }
+  return { ...updates.view(out.release), delivered_now: out.delivered_now }
+})
+route('POST', '/updates/releases/:id/halt', ({ params, body }) => {
+  const u = me()
+  requireUpdatesWrite(u)
+  const reason = String((body as { reason?: string } | undefined)?.reason ?? '').slice(0, 2000)
+  const r = wrapUpdate(() => updates.halt(params.id, reason, u))
+  db.log(u, 'update.halt', r.manifest.version, { reason })
+  emit({ kind: 'update_release', id: r.id, type: 'halted' })
+  return updates.view(r)
+})
 
 // ------------------------------------------------------------------ dispatcher
 

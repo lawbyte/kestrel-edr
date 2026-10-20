@@ -43,8 +43,11 @@ prost = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls-pemfile = "2"
-hyper = { version = "1", features = ["client", "http1"] }
+hyper = { version = "1", features = ["client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+# Public web PKI for update packages hosted outside the Kestrel server (the
+# package itself is trusted through its Ed25519 signature + SHA-256).
+webpki-roots = "1"
 http-body-util = "0.1"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem", "crypto"] }
 # Certificate expiry / public-key checks for renewal (pure Rust, no verify feature).

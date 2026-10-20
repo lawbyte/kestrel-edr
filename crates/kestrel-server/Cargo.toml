@@ -44,6 +44,8 @@ sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"
 base64 = "0.22"
+# Verifies offline-signed agent release manifests (never signs).
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 rand = "0.8"
 subtle = "2"
 zstd = "0.13"

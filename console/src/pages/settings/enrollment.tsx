@@ -3,7 +3,10 @@ import { Download, Plus, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { api, qk } from '@/api/endpoints'
-import type { CreatedEnrollmentToken, Group } from '@/api/types'
+import type { CreatedEnrollmentToken, Group, GroupUpdateRing } from '@/api/types'
+import { GROUP_UPDATE_RINGS } from '@/api/types'
+import { RingBadge } from '@/components/badges'
+import { RING_HINT, RING_LABEL } from '@/lib/updates'
 import { CopyButton } from '@/components/copy-button'
 import { Mono } from '@/components/common'
 import { Button } from '@/components/ui/button'
@@ -86,15 +89,19 @@ export default function EnrollmentTab() {
         </ul>
       </SettingsSection>
 
-      <SettingsSection title="Device groups" description="Groups decide which policy a device gets." footer={can('devices.write') ? <Button size="sm" onClick={() => setGroupDlg('new')}><Plus /> New group</Button> : null}>
+      <SettingsSection title="Device groups" description="Groups decide which policy a device gets and in which update ring it receives new agent versions." footer={can('devices.write') ? <Button size="sm" onClick={() => setGroupDlg('new')}><Plus /> New group</Button> : null}>
         <ul className="-my-2 divide-y divide-border">
           {groups.data.map((g) => (
             <li key={g.id} className="flex flex-wrap items-center gap-3 py-2.5">
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium">{g.name}</p>
+                <p className="text-sm font-medium">
+                  {g.name}
+                  {g.is_default ? <span className="ml-1.5 text-xs font-normal text-fg-subtle">(default)</span> : null}
+                </p>
                 <p className="text-xs text-fg-muted">{g.description}</p>
               </div>
               <span className="text-xs text-fg-muted">{policies.data?.find((p) => p.id === g.policy_id)?.name ?? 'No policy'}</span>
+              <RingBadge ring={g.update_ring ?? 'broad'} />
               <span className="w-20 text-right text-xs tabular text-fg-subtle">{g.device_count} devices</span>
               {can('devices.write') ? (
                 <Button size="sm" variant="ghost" onClick={() => setGroupDlg(g)}>
@@ -201,12 +208,17 @@ function GroupDialog({ group, onClose }: { group: Group | null; onClose: () => v
   const [name, setName] = useState(group?.name ?? '')
   const [desc, setDesc] = useState(group?.description ?? '')
   const [pol, setPol] = useState(group?.policy_id ?? 'pol-default')
+  const [ring, setRing] = useState<GroupUpdateRing>(group?.update_ring ?? 'broad')
   const m = useMutation({
-    mutationFn: () => (group ? api.patchGroup(group.id, { name, description: desc, policy_id: pol }) : api.createGroup({ name, description: desc, policy_id: pol })),
+    mutationFn: () =>
+      group
+        ? api.patchGroup(group.id, { name, description: desc, policy_id: pol, update_ring: ring })
+        : api.createGroup({ name, description: desc, policy_id: pol, update_ring: ring }),
     onSuccess: () => {
       toast.success(group ? 'Group updated' : 'Group created')
       void qc.invalidateQueries({ queryKey: qk.groups })
       void qc.invalidateQueries({ queryKey: ['devices'] })
+      void qc.invalidateQueries({ queryKey: ['updates'] })
       onClose()
     },
     onError: (e) => toast.error('Group not saved', { description: (e as Error).message }),
@@ -227,7 +239,7 @@ function GroupDialog({ group, onClose }: { group: Group | null; onClose: () => v
         title={group ? `Edit ${group.name}` : 'New group'}
         footer={
           <>
-            {group ? (
+            {group && !group.is_default ? (
               <Button variant="danger-outline" size="sm" className="mr-auto" onClick={() => del.mutate()}>
                 Delete
               </Button>
@@ -257,6 +269,21 @@ function GroupDialog({ group, onClose }: { group: Group | null; onClose: () => v
               ))}
             </select>
           </Field>
+          <fieldset className="space-y-1.5">
+            <legend className="text-sm font-medium">Update ring</legend>
+            <p className="text-xs text-fg-muted">When devices in this group receive a new agent release. Releases are promoted canary → early → broad.</p>
+            <div className="space-y-1">
+              {GROUP_UPDATE_RINGS.map((r) => (
+                <label key={r} className={cn('flex cursor-pointer items-start gap-2.5 rounded-md border px-2.5 py-2 text-sm', ring === r ? 'border-accent bg-accent-soft' : 'border-border hover:bg-surface-2')}>
+                  <input type="radio" name="g-ring" value={r} checked={ring === r} onChange={() => setRing(r)} className="mt-0.5 accent-[var(--accent)]" />
+                  <span className="min-w-0">
+                    <span className="font-medium">{RING_LABEL[r]}</span>
+                    <span className="block text-xs text-fg-muted">{RING_HINT[r]}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
         </div>
       </DialogContent>
     </Dialog>

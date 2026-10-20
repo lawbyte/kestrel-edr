@@ -560,6 +560,17 @@ impl Wfp {
         description: String,
         ttl_secs: Option<u64>,
     ) -> Result<(String, String), String> {
+        self.block_tagged(specs, description, ttl_secs, None)
+    }
+
+    /// [`Wfp::block`] remembering the Block IOC that caused it (M10).
+    pub fn block_tagged(
+        &self,
+        specs: Vec<FilterSpec>,
+        description: String,
+        ttl_secs: Option<u64>,
+        ioc_id: Option<String>,
+    ) -> Result<(String, String), String> {
         let e = Engine::open()?;
         let keys = e.add_filters(&specs)?;
         let now = kestrel_common::now_ms();
@@ -572,6 +583,7 @@ impl Wfp {
             filter_keys: keys,
             expires_at,
             created_at: now,
+            ioc_id,
         });
         self.persist(&s);
         let detail = match ttl_secs {
@@ -579,6 +591,34 @@ impl Wfp {
             None => format!("{description} (block {id}, no expiry)"),
         };
         Ok((id, detail))
+    }
+
+    /// M10: remove the blocks created for IOC hits whose IOC is no longer a
+    /// Block IOC in the applied policy. Returns descriptions removed; a block
+    /// whose filters could not be deleted stays recorded (retried next time).
+    pub fn lift_ioc_blocks(&self, block_iocs: &std::collections::BTreeSet<String>) -> Vec<String> {
+        let Ok(mut s) = self.state.lock() else {
+            return vec![];
+        };
+        let lifted = s.take_lifted_ioc_blocks(block_iocs);
+        if lifted.is_empty() {
+            return vec![];
+        }
+        let mut out = Vec::new();
+        match Engine::open() {
+            Ok(e) => {
+                for b in &lifted {
+                    if e.delete_filters(&b.filter_keys).is_ok() {
+                        out.push(b.description.clone());
+                    } else {
+                        s.blocks.push(b.clone());
+                    }
+                }
+            }
+            Err(_) => s.blocks.extend(lifted),
+        }
+        self.persist(&s);
+        out
     }
 
     /// Remove expired blocks. Returns descriptions removed.

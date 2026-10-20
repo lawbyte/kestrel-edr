@@ -365,6 +365,7 @@ impl Inner {
                 port,
                 image,
                 ttl_secs,
+                ioc_id,
             } => {
                 let Ok(addr) = ip.trim().parse::<IpAddr>() else {
                     return (false, format!("not an IP address: {ip}"), None);
@@ -384,8 +385,14 @@ impl Inner {
                     (None, Some(i)) => format!("blocked outbound {addr} for {i}"),
                     (None, None) => format!("blocked outbound {addr}"),
                 };
+                // Only engine IOC hits tag blocks for M10 reconciliation; an
+                // analyst command carrying a tag is treated as untagged so
+                // policy changes never lift a manual block.
+                let tag = ioc_id
+                    .clone()
+                    .filter(|t| !t.is_empty() && origin == ActionOrigin::Engine);
                 self.wfp
-                    .block(specs, what, *ttl_secs)
+                    .block_tagged(specs, what, *ttl_secs, tag)
                     .map_or_else(|e| (false, e, None), |(id, d)| (true, d, Some(id)))
             }
             ResponseAction::BlockImageNetwork { image, ttl_secs } => {
@@ -669,6 +676,22 @@ impl Platform for WindowsPlatform {
 
     fn is_isolated(&self) -> bool {
         self.inner.wfp.isolated.load(Ordering::SeqCst)
+    }
+
+    async fn reconcile_ioc_blocks(
+        &self,
+        block_iocs: &std::collections::BTreeSet<String>,
+    ) -> Vec<String> {
+        let inner = self.inner.clone();
+        let keep = block_iocs.clone();
+        tokio::task::spawn_blocking(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                inner.wfp.lift_ioc_blocks(&keep)
+            }))
+            .unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default()
     }
 
     fn user_profiles(&self) -> Vec<String> {

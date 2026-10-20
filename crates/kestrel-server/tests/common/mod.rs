@@ -77,6 +77,14 @@ impl TestServer {
     }
 
     pub async fn start_with(clickhouse: bool) -> Option<TestServer> {
+        Self::start_custom(clickhouse, |_| {}).await
+    }
+
+    /// Start with a config tweak (e.g. `update_pubkey`, `agent_dir`).
+    pub async fn start_custom(
+        clickhouse: bool,
+        tweak: impl FnOnce(&mut Config),
+    ) -> Option<TestServer> {
         let admin_url = match admin_db_url() {
             Some(u) => u,
             None => {
@@ -128,8 +136,11 @@ impl TestServer {
             trusted_proxies: vec![],
             setup_code: Some(TEST_SETUP_CODE.into()),
             outbound_allow: vec![],
+            update_pubkey: None,
             run_jobs: false,
         };
+        let mut cfg = cfg;
+        tweak(&mut cfg);
         let https = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let grpc = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let state = kestrel_server::build_state(cfg).await.expect("build state");

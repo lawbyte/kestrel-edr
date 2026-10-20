@@ -109,7 +109,7 @@ You need:
 
 ```powershell
 cargo test -p kestrel-common -p kestrel-detect -p kestrel-win -p kestrel-agent
-$env:KESTREL_UPDATE_PUBKEY = '<base64 Ed25519 public key>'   # optional: enables signed auto-update
+$env:KESTREL_UPDATE_PUBKEY = '<base64 Ed25519 public key>'   # optional: enables signed auto-update (see "Signed agent updates")
 cargo build -p kestrel-agent --release                       # target\release\kestrel-agent.exe
 
 # ETW smoke test (elevated shell): sensors only, no server
@@ -129,6 +129,39 @@ cd tray; npm ci; npm run tauri build -- --no-bundle         # tray\src-tauri\tar
 It needs an elevated shell. Stop a running `KestrelAgent` service first, because the ETW session names (`Kestrel-Core`, `Kestrel-IO`, `Kestrel-ProcCmd`) are shared.
 
 The agent embeds no update key unless `KESTREL_UPDATE_PUBKEY` is set at build time. Without the key, update manifests from the server are refused.
+
+## Signed agent updates (owner, offline)
+
+Agents only install releases signed with the owner's Ed25519 update key, and the server only distributes them; it never sees the private key. Do this once, on a trusted machine that is not the Kestrel server (ideally offline), and back the key up somewhere safe: anyone holding it can push code to every agent, and losing it means re-deploying agents with a new key by hand.
+
+```powershell
+# 1. Create the key pair (refuses to overwrite). The private key file gets an
+#    owner + SYSTEM only ACL (0600 on Linux); the public key is printed.
+kestrel-agent update-keygen --out D:\kestrel-signing
+#    -> D:\kestrel-signing\kestrel-update-signing.key  (secret)
+#    -> D:\kestrel-signing\kestrel-update-signing.pub  (base64 public key)
+
+# 2. Build every agent with the public key embedded (agents built without it
+#    refuse all remote updates).
+$env:KESTREL_UPDATE_PUBKEY = Get-Content D:\kestrel-signing\kestrel-update-signing.pub
+cargo build -p kestrel-agent --release      # then build + Authenticode-sign the MSI as below
+
+# 3. Give the server the same public key (deploy/.env):
+#    KESTREL_UPDATE_PUBKEY=<base64 public key>
+#    Without it, release registration in the console is refused.
+
+# 4. For each release: put the MSI where agents can fetch it and sign a manifest.
+#    Server-hosted: copy it to deploy/installers/updates/ and use the AGENT port
+#    (agents trust only the agent CA there; the web port's certificate is different):
+copy installer\KestrelAgent.msi deploy\installers\updates\KestrelAgent-1.4.0.msi
+kestrel-agent update-sign --key D:\kestrel-signing\kestrel-update-signing.key `
+  --version 1.4.0 `
+  --url https://kestrel.example.sg:8443/downloads/updates/KestrelAgent-1.4.0.msi `
+  --file deploy\installers\updates\KestrelAgent-1.4.0.msi
+#    External hosting (any https URL with a publicly trusted certificate) works too.
+```
+
+`update-sign` prints the manifest JSON (`version`, `url`, `sha256`, `signature`; the signature covers `kestrel-update-v1\n{version}\n{url}\n{sha256}`). In the console, **Agent updates → Register release**, paste it, then promote the release ring by ring (canary → early → broad), checking each ring's health in between; **Halt** stops further delivery. The version passed to `--version` must be the version the MSI's agent reports (the workspace `version` in `Cargo.toml`), otherwise agents keep being re-offered the release. Groups choose their ring under **Settings → Enrollment**.
 
 ## MSI (WiX v6)
 

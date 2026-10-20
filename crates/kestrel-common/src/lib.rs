@@ -13,6 +13,7 @@ pub mod policy;
 pub mod response;
 pub mod rules;
 pub mod tray;
+pub mod update;
 pub mod wire;
 
 pub use alert::*;

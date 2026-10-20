@@ -1,7 +1,8 @@
-import { AlertOctagon, AlertTriangle, Circle, ChevronDown, Info, ShieldCheck, ShieldAlert, ShieldX, ShieldQuestion, Wifi, WifiOff, Activity, Lock, CheckCircle2, XCircle, Clock, Send, Hourglass, FolderDown, FolderClock, FolderOpen, Network, HardDrive, Download, SquareTerminal, KeyRound, Globe, Upload, Radar, ShieldOff, FileCode2, FileLock2, Fingerprint, Anchor } from 'lucide-react'
-import type { ActionStatus, DeviceStatus, IncidentStatus, PathClass, RuleCategory, RuleMode, Severity, SignatureState } from '@/api/types'
+import { AlertOctagon, AlertTriangle, Circle, ChevronDown, Info, ShieldCheck, ShieldAlert, ShieldX, ShieldQuestion, Wifi, WifiOff, Activity, Lock, CheckCircle2, XCircle, Clock, Send, Hourglass, FolderDown, FolderClock, FolderOpen, Network, HardDrive, Download, SquareTerminal, KeyRound, Globe, Upload, Radar, ShieldOff, FileCode2, FileLock2, Fingerprint, Anchor, Bird, Sunrise, Pin, CircleDashed, Rocket, OctagonPause } from 'lucide-react'
+import type { ActionStatus, DeviceStatus, GroupUpdateRing, UpdateReleaseState, IncidentStatus, PathClass, RuleCategory, RuleMode, Severity, SignatureState } from '@/api/types'
 import { ACTION_STATUS_LABEL, DEVICE_STATUS_LABEL, INCIDENT_STATUS_LABEL, PATH_CLASS_LABEL, RULE_CATEGORY_LABEL, SEVERITY_LABEL, SIGNATURE_LABEL } from '@/lib/labels'
 import { cn } from '@/lib/utils'
+import { RELEASE_STATE_LABEL, RING_HINT, RING_LABEL } from '@/lib/updates'
 import { Tooltip } from './ui/misc'
 import type { ReactNode } from 'react'
 
@@ -168,6 +169,36 @@ export function CategoryBadge({ category, className, iconOnly }: { category: Rul
     <span className={cn('inline-flex items-center gap-1.5 whitespace-nowrap text-sm text-fg-muted', className)}>
       <Icon className="size-3.5 shrink-0" aria-hidden />
       {iconOnly ? <span className="sr-only">{RULE_CATEGORY_LABEL[category]}</span> : RULE_CATEGORY_LABEL[category]}
+    </span>
+  )
+}
+
+const RING_ICON: Record<GroupUpdateRing, typeof Bird> = { canary: Bird, early: Sunrise, broad: Globe, pinned: Pin }
+/** Update ring: icon + label. */
+export function RingBadge({ ring, className }: { ring: GroupUpdateRing; className?: string }) {
+  const Icon = RING_ICON[ring]
+  return (
+    <span className={cn('inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-surface-2 px-1.5 py-0.5 text-xs font-medium text-fg-muted', className)} title={RING_HINT[ring]}>
+      <Icon className="size-3.5" aria-hidden />
+      {RING_LABEL[ring]}
+    </span>
+  )
+}
+
+const RELEASE_STATE: Record<UpdateReleaseState, { icon: typeof Bird; cls: string }> = {
+  staged: { icon: CircleDashed, cls: 'text-fg-muted border-border' },
+  rolling: { icon: Rocket, cls: 'text-accent-text border-accent/40 bg-accent-soft' },
+  complete: { icon: CheckCircle2, cls: 'text-ok border-ok/30 bg-ok-soft' },
+  halted: { icon: OctagonPause, cls: 'text-danger border-danger/30 bg-danger-soft' },
+}
+/** Release state is always icon + label (never colour alone). */
+export function ReleaseStateBadge({ state }: { state: UpdateReleaseState }) {
+  const s = RELEASE_STATE[state]
+  const Icon = s.icon
+  return (
+    <span className={cn('inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-px text-xs font-medium', s.cls)}>
+      <Icon className="size-3.5" aria-hidden />
+      {RELEASE_STATE_LABEL[state]}
     </span>
   )
 }

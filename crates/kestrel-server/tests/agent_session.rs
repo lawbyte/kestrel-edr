@@ -346,7 +346,8 @@ async fn full_agent_session() {
             ip: "203.0.113.7".into(),
             port: None,
             image: None,
-            ttl_secs: None
+            ttl_secs: None,
+            ioc_id: None
         }
     );
     st.ack(cseq).await;

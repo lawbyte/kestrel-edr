@@ -30,14 +30,21 @@ export const api = {
 
   // groups & enrollment
   groups: () => http.get<T.Group[]>('/groups'),
-  createGroup: (b: { name: string; description: string; policy_id: string | null }) => http.post<T.Group>('/groups', b),
-  patchGroup: (id: string, b: Partial<Pick<T.Group, 'name' | 'description' | 'policy_id'>>) => http.patch<T.Group>(`/groups/${id}`, b),
+  createGroup: (b: { name: string; description: string; policy_id: string | null; update_ring?: T.GroupUpdateRing }) => http.post<T.Group>('/groups', b),
+  patchGroup: (id: string, b: Partial<Pick<T.Group, 'name' | 'description' | 'policy_id' | 'update_ring'>>) => http.patch<T.Group>(`/groups/${id}`, b),
   deleteGroup: (id: string) => http.del(`/groups/${id}`),
   enrollmentTokens: () => http.get<T.EnrollmentToken[]>('/enrollment-tokens'),
   createEnrollmentToken: (b: { group_id: string; expires_in_days: number; max_uses: number }) =>
     http.post<T.CreatedEnrollmentToken>('/enrollment-tokens', b),
   revokeEnrollmentToken: (id: string) => http.del(`/enrollment-tokens/${id}`),
   installer: () => http.get<T.InstallerMeta>('/agent/installer'),
+
+  // signed agent updates (staged rings)
+  updateStatus: () => http.get<T.UpdateStatus>('/updates/status'),
+  updateReleases: () => http.get<T.UpdateRelease[]>('/updates/releases'),
+  registerRelease: (b: { manifest: T.UpdateManifest; notes?: string }) => http.post<T.UpdateRelease>('/updates/releases', b),
+  promoteRelease: (id: string, ring: T.UpdateRing) => http.post<T.PromotedUpdateRelease>(`/updates/releases/${id}/promote`, { ring }),
+  haltRelease: (id: string, reason?: string) => http.post<T.UpdateRelease>(`/updates/releases/${id}/halt`, { reason }),
 
   // incidents & alerts
   incidents: (q: { status?: string; severity?: string; assignee?: string; device_id?: string; q?: string; sort?: string; limit?: number; cursor?: string } = {}) =>
@@ -113,6 +120,8 @@ export const qk = {
   groups: ['groups'] as const,
   enrollmentTokens: ['enrollment-tokens'] as const,
   installer: ['installer'] as const,
+  updateStatus: ['updates', 'status'] as const,
+  updateReleases: ['updates', 'releases'] as const,
   incidents: (q?: object) => ['incidents', q ?? {}] as const,
   incident: (id: string) => ['incident', id] as const,
   alerts: (q?: object) => ['alerts', q ?? {}] as const,

@@ -270,7 +270,15 @@ export type ResponseAction =
   | { type: 'quarantine_file'; path: string; sha256?: string | null }
   | { type: 'restore_file'; quarantine_id: string }
   | { type: 'delete_quarantined'; quarantine_id: string }
-  | { type: 'block_destination'; ip: string; port?: number | null; image?: string | null; ttl_secs?: number | null }
+  | {
+      type: 'block_destination'
+      ip: string
+      port?: number | null
+      image?: string | null
+      ttl_secs?: number | null
+      /** Set by the agent when an IOC hit created the block (analysts never set it). */
+      ioc_id?: string | null
+    }
   | { type: 'block_image_network'; image: string; ttl_secs?: number | null }
   | { type: 'isolate_host'; allow_ips?: string[] }
   | { type: 'release_host' }
@@ -557,6 +565,10 @@ export interface Group {
   description: string
   policy_id: string | null
   device_count: number
+  /** The built-in group devices fall back to; it cannot be deleted. */
+  is_default: boolean
+  /** Staged auto-update ring of the group's devices (`pinned` = never auto-update). */
+  update_ring: GroupUpdateRing
 }
 
 export interface EnrollmentToken {
@@ -849,9 +861,96 @@ export interface ApiErrorBody {
   error: { code: string; message: string }
 }
 
-export type LiveEventType = 'incident' | 'alert' | 'device' | 'action'
+export type LiveEventType = 'incident' | 'alert' | 'device' | 'action' | 'group' | 'update_release'
 export interface LiveEvent {
   kind: LiveEventType
   id: string
-  type: 'created' | 'updated'
+  /** `created` / `updated` for most kinds; `update_release` may carry other verbs (registered, promoted, halted, delivery). */
+  type: string
+}
+
+// ---------------------------------------------------------------- agent updates
+
+export type UpdateRing = 'canary' | 'early' | 'broad'
+export type GroupUpdateRing = UpdateRing | 'pinned'
+export const UPDATE_RINGS: UpdateRing[] = ['canary', 'early', 'broad']
+export const GROUP_UPDATE_RINGS: GroupUpdateRing[] = ['canary', 'early', 'broad', 'pinned']
+
+/** Produced offline by `kestrel-agent update-sign`; signature is base64 Ed25519. */
+export interface UpdateManifest {
+  version: string
+  url: string
+  sha256: string
+  signature: string
+}
+export interface UpdateRingHealth {
+  ring: UpdateRing
+  enabled: boolean
+  enabled_at: TimestampMs | null
+  enabled_by: string | null
+  enabled_by_name: string | null
+  /** Non-decommissioned devices whose group is in this ring. */
+  devices: number
+  /** Of those, agent_version >= release version. */
+  on_target: number
+  /** Devices the server sent this release to. */
+  delivered: number
+  /** A later Hello reported the new version. */
+  succeeded: number
+  /** The agent reported an update failure. */
+  failed: number
+  /** Delivered, not yet succeeded or failed. */
+  pending: number
+  /** Delivered, not succeeded, device not seen for more than 24 h. */
+  offline_24h: number
+}
+export interface UpdateFailure {
+  device_id: string
+  hostname: string
+  error: string
+  at: TimestampMs
+}
+export type UpdateReleaseState = 'staged' | 'rolling' | 'complete' | 'halted'
+export interface UpdateRelease {
+  id: string
+  version: string
+  url: string
+  sha256: string
+  signature: string
+  notes: string
+  created_by: string | null
+  created_by_name: string | null
+  created_at: TimestampMs
+  /** staged = no ring enabled; rolling = some rings; complete = broad enabled; halted. */
+  state: UpdateReleaseState
+  halted_at: TimestampMs | null
+  halted_by: string | null
+  halted_by_name: string | null
+  halt_reason: string
+  /** Ring a promote would enable next (null when complete or halted). */
+  next_ring: UpdateRing | null
+  /** Always 3 entries in order canary, early, broad. */
+  rings: UpdateRingHealth[]
+  /** Newest first, at most 20. */
+  recent_failures: UpdateFailure[]
+}
+export type PromotedUpdateRelease = UpdateRelease & { delivered_now: number }
+export interface UpdateRingSummary {
+  ring: GroupUpdateRing
+  groups: { id: string; name: string }[]
+  devices: number
+  /** Agent versions in this ring, most common first. */
+  versions: { version: string; count: number }[]
+  /** Newest non-halted release enabled for this ring (null for pinned). */
+  target: { id: string; version: string } | null
+}
+export interface UpdateStatus {
+  signing_key_configured: boolean
+  /** Base64 Ed25519 public key configured on the server (KESTREL_UPDATE_PUBKEY). */
+  public_key: string | null
+  /** Where server-hosted packages must be referenced from. */
+  package_base_url: string
+  server_version: string
+  /** canary, early, broad, pinned. */
+  rings: UpdateRingSummary[]
 }

@@ -164,6 +164,13 @@ pub async fn hello(
         Ok(None) => {}
         Err(e) => tracing::warn!(%device_id, error = %e, "pending uninstall token unreadable"),
     }
+    // Staged agent update: settle earlier deliveries and offer the newest
+    // release enabled for this device's ring (never blocks the session).
+    match crate::updates::on_hello(state, device_id, &h.agent_version).await {
+        Ok(Some(p)) => out.push(p),
+        Ok(None) => {}
+        Err(e) => tracing::warn!(%device_id, error = %e, "agent update offer failed"),
+    }
     Ok(out)
 }
 

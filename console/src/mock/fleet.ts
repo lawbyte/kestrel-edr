@@ -153,15 +153,15 @@ export function ruleModes(p: Policy, defaults: Record<string, RuleMode>): Record
 // ------------------------------------------------------------------ groups
 
 export const GROUPS: Group[] = [
-  { id: 'grp-fin', name: 'Finance', description: 'Finance and treasury laptops', policy_id: 'pol-finance', device_count: 0 },
-  { id: 'grp-exec', name: 'Executives', description: 'C-suite and their assistants', policy_id: 'pol-finance', device_count: 0 },
-  { id: 'grp-hr', name: 'HR', description: 'People team', policy_id: 'pol-default', device_count: 0 },
-  { id: 'grp-sales', name: 'Sales', description: 'Account managers (often travelling)', policy_id: 'pol-default', device_count: 0 },
-  { id: 'grp-ops', name: 'Operations', description: 'Warehouse and dispatch desktops', policy_id: 'pol-default', device_count: 0 },
-  { id: 'grp-mkt', name: 'Marketing', description: 'Marketing and design', policy_id: 'pol-default', device_count: 0 },
-  { id: 'grp-eng', name: 'Engineering', description: 'Developers and data team', policy_id: 'pol-eng', device_count: 0 },
-  { id: 'grp-it', name: 'IT', description: 'IT administrators', policy_id: 'pol-default', device_count: 0 },
-  { id: 'grp-srv', name: 'Servers', description: 'File, print and app servers', policy_id: 'pol-servers', device_count: 0 },
+  { id: 'grp-fin', name: 'Finance', description: 'Finance and treasury laptops', policy_id: 'pol-finance', device_count: 0, is_default: false, update_ring: 'broad' },
+  { id: 'grp-exec', name: 'Executives', description: 'C-suite and their assistants', policy_id: 'pol-finance', device_count: 0, is_default: false, update_ring: 'broad' },
+  { id: 'grp-hr', name: 'HR', description: 'People team', policy_id: 'pol-default', device_count: 0, is_default: false, update_ring: 'broad' },
+  { id: 'grp-sales', name: 'Sales', description: 'Account managers (often travelling)', policy_id: 'pol-default', device_count: 0, is_default: false, update_ring: 'early' },
+  { id: 'grp-ops', name: 'Operations', description: 'Warehouse and dispatch desktops', policy_id: 'pol-default', device_count: 0, is_default: false, update_ring: 'broad' },
+  { id: 'grp-mkt', name: 'Marketing', description: 'Marketing and design', policy_id: 'pol-default', device_count: 0, is_default: false, update_ring: 'early' },
+  { id: 'grp-eng', name: 'Engineering', description: 'Developers and data team', policy_id: 'pol-eng', device_count: 0, is_default: false, update_ring: 'canary' },
+  { id: 'grp-it', name: 'IT', description: 'IT administrators', policy_id: 'pol-default', device_count: 0, is_default: false, update_ring: 'canary' },
+  { id: 'grp-srv', name: 'Servers', description: 'File, print and app servers', policy_id: 'pol-servers', device_count: 0, is_default: false, update_ring: 'pinned' },
 ]
 
 // ------------------------------------------------------------------ devices

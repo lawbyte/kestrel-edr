@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { Alert, KEvent, Policy, ResponseAction } from './types'
-import { DATA_CATEGORIES, EVENT_KINDS, SEVERITIES } from './types'
+import type { Alert, Group, KEvent, Policy, ResponseAction, UpdateRelease } from './types'
+import { DATA_CATEGORIES, EVENT_KINDS, GROUP_UPDATE_RINGS, SEVERITIES } from './types'
 import { DATA_CATEGORY_LABEL, DATA_CATEGORY_REMEDIATION, EVENT_KIND_LABEL, actionPrivilege, describeAction } from '@/lib/labels'
 import { pathClassOf } from '@/lib/pathclass'
 import { describeEvent } from '@/lib/events'
@@ -129,5 +129,21 @@ describe('describeEvent', () => {
     expect(describeEvent(lsass)).toBe('Opened lsass.exe (PID 700) with access 0x1fffff — refused by Windows (0xc0000022 access denied)')
     expect(describeAction({ type: 'remove_autorun', kind: 'registry_value', location: 'HKLM\\Run', value_name: 'x' })).toBe('Remove registry value HKLM\\Run\\x')
     expect(describeAction({ type: 'remove_autorun', kind: 'service', location: 'evil' })).toBe('Disable service evil')
+  })
+})
+
+describe('agent update contract', () => {
+  it('parses the update JSON shapes from the server', () => {
+    const rel = JSON.parse(
+      '{"id":"r1","version":"1.4.0","url":"https://x/a.msi","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","signature":"s","notes":"","created_by":null,"created_by_name":null,"created_at":1,"state":"rolling","halted_at":null,"halted_by":null,"halted_by_name":null,"halt_reason":"","next_ring":"early","rings":[{"ring":"canary","enabled":true,"enabled_at":2,"enabled_by":"u","enabled_by_name":"Priya","devices":3,"on_target":2,"delivered":3,"succeeded":2,"failed":1,"pending":0,"offline_24h":0}],"recent_failures":[{"device_id":"d","hostname":"IT-LT-002","error":"hash mismatch","at":3}]}',
+    ) as UpdateRelease
+    expect(rel.next_ring).toBe('early')
+    expect(rel.rings[0].pending).toBe(0)
+    const g = JSON.parse('{"id":"g","name":"IT","description":"","policy_id":null,"device_count":3,"is_default":false,"update_ring":"pinned"}') as Group
+    expect(GROUP_UPDATE_RINGS).toContain(g.update_ring)
+  })
+  it('accepts the agent-set ioc_id on block_destination', () => {
+    const a = JSON.parse('{"type":"block_destination","ip":"1.2.3.4","port":443,"ioc_id":"ioc-1"}') as ResponseAction
+    expect(a.type === 'block_destination' && a.ioc_id).toBe('ioc-1')
   })
 })

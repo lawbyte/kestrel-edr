@@ -185,7 +185,8 @@ fn critical_processes_are_never_killed() {
             ip: "149.154.167.220".into(),
             port: None,
             image: Some(r"C:\Windows\explorer.exe".into()),
-            ttl_secs: Some(86400)
+            ttl_secs: Some(86400),
+            ioc_id: None
         }],
         "system image: block destinations for this image instead of the whole image"
     );
@@ -328,7 +329,8 @@ fn ioc_network_and_dns() {
                 ip: "185.234.72.19".into(),
                 port: None,
                 image: Some(r"C:\Users\alice\AppData\Local\Temp\n.exe".into()),
-                ttl_secs: Some(24 * 3600)
+                ttl_secs: Some(24 * 3600),
+                ioc_id: Some("ioc-185.234.72.0/24".into())
             },
             ResponseAction::KillProcess {
                 pid: 70,
@@ -396,7 +398,8 @@ fn ioc_network_and_dns() {
             ip: "185.234.72.30".into(),
             port: None,
             image: None,
-            ttl_secs: Some(3600)
+            ttl_secs: Some(3600),
+            ioc_id: Some("ioc-185.234.72.0/24".into())
         }));
     unsigned_temp(&mut e, "hw2", 74);
     let out = e.process(&connect(8, "hw2", 74, "93.184.216.34", 443));

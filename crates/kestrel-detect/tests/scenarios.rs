@@ -85,7 +85,8 @@ fn lumma_clickfix_default_policy() {
                 ip: "149.154.167.220".into(),
                 port: None,
                 image: None,
-                ttl_secs: Some(86400)
+                ttl_secs: Some(86400),
+                ioc_id: None
             },
             ResponseAction::QuarantineFile {
                 path: r"C:\Users\alice\AppData\Local\Temp\x7f3a\svc_upd.exe".into(),
@@ -782,7 +783,8 @@ fn st04_parent_uploads_for_suspended_child() {
         ip: "185.234.72.19".into(),
         port: None,
         image: None,
-        ttl_secs: Some(86400)
+        ttl_secs: Some(86400),
+        ioc_id: None
     }));
     assert!(
         d.alert.evidence.iter().any(|x| x.guid == g("ldr")),

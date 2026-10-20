@@ -24,6 +24,7 @@ const PolicyEditor = lazy(() => import('./pages/policy-editor'))
 const Rules = lazy(() => import('./pages/rules'))
 const Exclusions = lazy(() => import('./pages/exclusions'))
 const Quarantine = lazy(() => import('./pages/quarantine'))
+const Updates = lazy(() => import('./pages/updates'))
 const Reviews = lazy(() => import('./pages/reviews'))
 const SettingsPage = lazy(() => import('./pages/settings'))
 
@@ -58,6 +59,7 @@ const routes = [
       { path: 'rules', element: <Page><Rules /></Page> },
       { path: 'exclusions', element: <Page><Exclusions /></Page> },
       { path: 'quarantine', element: <Page><Quarantine /></Page> },
+      { path: 'updates', element: <Page><Updates /></Page> },
       { path: 'reviews', element: <Page><Reviews /></Page> },
       { path: 'settings/:tab?', element: <Page><SettingsPage /></Page> },
       { path: '*', element: <Navigate to="/" replace /> },

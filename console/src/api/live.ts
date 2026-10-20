@@ -21,12 +21,12 @@ async function start() {
   }
   const connect = () => {
     const es = new EventSource(`${API_BASE}/events/stream`, { withCredentials: true })
-    const kinds: LiveEventType[] = ['incident', 'alert', 'device', 'action']
+    const kinds: LiveEventType[] = ['incident', 'alert', 'device', 'action', 'group', 'update_release']
     for (const k of kinds) {
       es.addEventListener(k, (m) => {
         try {
-          const d = JSON.parse((m as MessageEvent).data) as { id: string; type: 'created' | 'updated' }
-          dispatch({ kind: k, id: d.id, type: d.type })
+          const d = JSON.parse((m as MessageEvent).data) as { id?: unknown; type?: unknown }
+          dispatch({ kind: k, id: String(d.id ?? ''), type: String(d.type ?? 'updated') })
         } catch {
           /* ignore malformed */
         }
@@ -67,6 +67,15 @@ export function useLiveInvalidation() {
           case 'device':
             void qc.invalidateQueries({ queryKey: ['devices'] })
             void qc.invalidateQueries({ queryKey: ['device', e.id] })
+            // Agent versions feed the update ring overview and release health.
+            void qc.invalidateQueries({ queryKey: ['updates'] })
+            break
+          case 'group':
+            void qc.invalidateQueries({ queryKey: ['groups'] })
+            void qc.invalidateQueries({ queryKey: ['updates'] })
+            break
+          case 'update_release':
+            void qc.invalidateQueries({ queryKey: ['updates'] })
             break
           case 'action':
             void qc.invalidateQueries({ queryKey: ['actions'] })

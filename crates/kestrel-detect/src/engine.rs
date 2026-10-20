@@ -1598,6 +1598,7 @@ impl EngineState {
                         port: Some(*port),
                         image: None,
                         ttl_secs: Some(BLOCK_TTL_SECS),
+                        ioc_id: None,
                     });
                 }
             }
@@ -2556,14 +2557,16 @@ impl EngineState {
     }
 
     /// Destination block for an IOC hit: per offending image unless the
-    /// policy asks for host-wide blocks, always with a TTL (M10).
-    fn ioc_block(&self, ip: &str, p: &ProcessInfo) -> ResponseAction {
+    /// policy asks for host-wide blocks, always with a TTL, tagged with the
+    /// IOC id so the agent can lift it when the IOC is deleted (M10).
+    fn ioc_block(&self, ip: &str, p: &ProcessInfo, ioc_id: &str) -> ResponseAction {
         let per_image = !self.policy.ioc_block_host_wide && !p.image.is_empty();
         ResponseAction::BlockDestination {
             ip: ip.to_string(),
             port: None,
             image: per_image.then(|| p.image.clone()),
             ttl_secs: Some(self.policy.ioc_block_ttl_secs.max(60)),
+            ioc_id: Some(ioc_id.to_string()).filter(|s| !s.is_empty()),
         }
     }
 
@@ -2580,6 +2583,7 @@ impl EngineState {
                     port,
                     image: Some(p.image.clone()).filter(|s| !s.is_empty()),
                     ttl_secs: Some(BLOCK_TTL_SECS),
+                    ioc_id: None,
                 })
                 .collect()
         }
@@ -2612,7 +2616,7 @@ impl EngineState {
             if h.action == IocAction::Allow {
                 return;
             }
-            let mut actions = vec![self.ioc_block(&ip_norm, &proc_)];
+            let mut actions = vec![self.ioc_block(&ip_norm, &proc_, &h.id)];
             if !browser {
                 actions.push(kill(&proc_, true));
             }
@@ -2756,6 +2760,7 @@ impl EngineState {
             port: None,
             image: None,
             ttl_secs: Some(BLOCK_TTL_SECS),
+            ioc_id: None,
         });
         hit.actions.push(quarantine(&rp));
         hit.escalation_ip = Some((ip_norm, dst_port));
@@ -2795,8 +2800,10 @@ impl EngineState {
             if h.action == IocAction::Allow {
                 return;
             }
-            let mut actions: Vec<ResponseAction> =
-                ips.iter().map(|ip| self.ioc_block(ip, &proc_)).collect();
+            let mut actions: Vec<ResponseAction> = ips
+                .iter()
+                .map(|ip| self.ioc_block(ip, &proc_, &h.id))
+                .collect();
             if !browser {
                 actions.push(kill(&proc_, true));
             }

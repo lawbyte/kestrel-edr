@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { TreeNode } from '@/api/types'
-import { DeviceStatusBadge, SeverityBadge } from './badges'
+import { DeviceStatusBadge, ReleaseStateBadge, RingBadge, SeverityBadge } from './badges'
 import { Markdown } from './markdown'
 import { ProcessTree, buildForest } from './process-tree'
 import { DataAtRiskPanel, priorityFactors } from './incident-parts'
@@ -42,6 +42,21 @@ describe('DeviceStatusBadge', () => {
   it('shows a text label, not only a coloured dot', () => {
     render(<DeviceStatusBadge status="isolated" />)
     expect(screen.getByText('Isolated')).toBeInTheDocument()
+  })
+})
+
+describe('update badges', () => {
+  it('label release state and ring in text, not only colour', () => {
+    render(
+      <>
+        <ReleaseStateBadge state="halted" />
+        <ReleaseStateBadge state="rolling" />
+        <RingBadge ring="pinned" />
+      </>,
+    )
+    expect(screen.getByText('Halted')).toBeInTheDocument()
+    expect(screen.getByText('Rolling out')).toBeInTheDocument()
+    expect(screen.getByText('Pinned')).toBeInTheDocument()
   })
 })
 
