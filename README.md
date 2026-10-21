@@ -228,64 +228,40 @@ For data flow, the detection pipeline and the security model, see [docs/ARCHITEC
 
 ## Quick start
 
-### 1. Server (Docker Compose)
+The illustrated, step-by-step version of this section, with a screenshot for every step, is the **[Step-by-step install guide](https://lawbyte.github.io/kestrel-edr/guide/quick-start)**.
+
+### 1. Start the server (Docker Compose)
 
 ```bash
-git clone https://github.com/lawbyte/kestrel-edr.git && cd kestrel-edr/deploy
+git clone https://github.com/lawbyte/kestrel-edr.git
+cd kestrel-edr/deploy
 cp .env.example .env
-sed -i "s|^KESTREL_MASTER_KEY=.*|KESTREL_MASTER_KEY=$(openssl rand -base64 32)|" .env
-$EDITOR .env        # KESTREL_PUBLIC_HOSTNAME, POSTGRES_PASSWORD, CLICKHOUSE_PASSWORD
+nano .env                       # set the four values below
+mkdir -p installers && cp /path/to/KestrelAgent.msi installers/
 docker compose up -d --build
+docker compose logs kestrel-server | grep "SETUP CODE"
 ```
 
-Then:
+| `.env` setting | Value |
+|---|---|
+| `KESTREL_MASTER_KEY` | `openssl rand -base64 32`. Keep a copy outside the server. |
+| `KESTREL_PUBLIC_HOSTNAME` | The name or IP your PCs use to reach the server. The first one in the list goes into the installers. |
+| `POSTGRES_PASSWORD`, `CLICKHOUSE_PASSWORD` | Long random values. |
 
-1. Open `https://<KESTREL_PUBLIC_HOSTNAME>/` and complete first-run setup: the one-time setup code (printed in the server log, `docker compose logs kestrel-server | grep "SETUP CODE"`, or set with `KESTREL_SETUP_CODE`), the organisation name and the first admin.
-2. Back up `KESTREL_MASTER_KEY` separately from the database.
+`KestrelAgent.msi` comes from the `kestrel-windows` artifact of the latest green [CI run](https://github.com/lawbyte/kestrel-edr/actions/workflows/ci.yml), or from [building it yourself](https://lawbyte.github.io/kestrel-edr/build/). PCs reach the server on TCP 443 (console, installer download) and 8443 (agents).
 
-Ports, TLS, backup, upgrades and sizing are covered in [deploy/README.md](deploy/README.md).
+### 2. Set up the console
 
-### 2. Agent (MSI)
+Open `https://<your server>/`, accept the self-signed certificate warning, and enter the setup code, your organisation name and the first administrator account.
 
-1. In the console, open **Devices → Enrollment tokens** and create a token. The console shows a PowerShell/`msiexec` one-liner, for example:
+### 3. Install the agent on a PC
 
-   ```powershell
-   msiexec.exe /i KestrelAgent.msi /qn SERVER=edr.example.internal:8443 TOKEN=kte_… CA_B64=<base64 agent CA>
-   ```
+1. In the console: **Devices**, then **Install agent**. Choose the remote-access profile, then the group and how long the installer stays valid. Download `Install-Kestrel-<profile>.cmd`.
+2. On the PC (until the binaries are code-signed), add a Defender exclusion in an administrator PowerShell: `Add-MpPreference -ExclusionPath 'C:\Program Files\Kestrel'`.
+3. Double-click the `.cmd` and approve the administrator prompt, or deploy it with Group Policy, Intune or an RMM as `Install-Kestrel-<profile>.cmd /quiet`.
+4. The PC appears under **Devices** within seconds. The employee sees the Kestrel tray icon at the next sign-in.
 
-2. Download `KestrelAgent.msi` from `https://<server>/downloads/KestrelAgent.msi`. It is served when the file is placed in `deploy/installers/`.
-3. Run the command elevated, or deploy it with GPO, Intune or your RMM tool. Tokens default to 7 days and 50 uses; create one per rollout wave.
-4. Make sure `SERVER` uses a name that is listed in `KESTREL_PUBLIC_HOSTNAME`. The agent pins the internal agent CA and verifies that name.
-
-The server issues a per-device **uninstall token** at enrollment. Find it on the device page (**Uninstall token → Reveal**, audit-logged; **Rotate** sends a new one to the agent, which becomes current once the agent confirms it). Uninstall with `msiexec /x KestrelAgent.msi /qn UNINSTALL_TOKEN=<token>`; the agent refuses removal without it. The agent renews its client certificate by itself 30 days before it expires.
-
-The MSI does three things:
-
-* installs `kestrel-agent.exe` and `kestrel-tray.exe` into `C:\Program Files\Kestrel`
-* creates `C:\ProgramData\Kestrel`, accessible to SYSTEM and Administrators only
-* enrolls the device and registers the `KestrelAgent` service
-
-The device appears under **Devices** within seconds. Its device page shows sensor health: ETW, events lost, DPAPI channel, AMSI and outbox.
-
-### 3. Tray
-
-The tray app starts at every user logon through the `HKLM\…\Run` key the MSI sets. It shows protected/attention/isolated/offline status, recent blocks in plain language, a **Request review** button, and the organisation's IT contact and monitoring notice. To set the contact and notice, open the console and go to **Policies → Branding & notice**.
-
-### 4. Console
-
-These are the main screens:
-
-* **Overview**: what needs attention
-* **Incidents**: the triage queue, with keyboard navigation
-* **Devices**: sensor health, timeline, process tree and live response
-* **Hunt**
-* **Policies**: rule modes, suspend window, isolation auto-release and indicator blocks, hardening, privacy and telemetry, canaries and exfil domains, branding
-* **Rules and Exclusions & IOCs**: exclusions show a scope preview before you save them
-* **Quarantine**
-* **Review requests**
-* **Settings**: users, SSO, MFA, notifications, retention, API tokens and the audit log
-
-Screenshots taken against a real server are in [docs/screenshots/](docs/screenshots/) (`lab-*` show data from the Windows lab VM), and mock-mode screenshots are in `console/screenshots/`.
+Uninstalling needs the device's uninstall token (device page, **Uninstall token**, **Reveal**; the reveal is audit-logged): `msiexec /x <product code> /qn UNINSTALL_TOKEN=<token>`. See [Enroll devices](https://lawbyte.github.io/kestrel-edr/deploy/enroll) for mass deployment, upgrades and uninstall, and [Deploy the server](https://lawbyte.github.io/kestrel-edr/deploy/server) for TLS, backups, upgrades and sizing.
 
 ## Development workflow
 

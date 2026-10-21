@@ -12,7 +12,7 @@ $EDITOR .env        # KESTREL_PUBLIC_HOSTNAME, POSTGRES_PASSWORD, CLICKHOUSE_PAS
 docker compose up -d --build
 ```
 
-Open `https://<KESTREL_PUBLIC_HOSTNAME>/`, complete first-run setup (the one-time setup code from `docker compose logs kestrel-server | grep "SETUP CODE"` or `KESTREL_SETUP_CODE`, organisation name + first admin), then **Devices → Enrollment tokens** to get the PowerShell install one-liner for endpoints.
+Open `https://<KESTREL_PUBLIC_HOSTNAME>/`, complete first-run setup (the one-time setup code from `docker compose logs kestrel-server | grep "SETUP CODE"` or `KESTREL_SETUP_CODE`, organisation name + first admin), then **Devices**, **Install agent** to create an installer for your PCs. The illustrated walkthrough is the [step-by-step install guide](https://lawbyte.github.io/kestrel-edr/guide/quick-start).
 
 Check health: `docker compose ps` (all `healthy`) and `curl -k https://localhost/api/auth/setup-status`.
 

@@ -1,108 +1,259 @@
-# Quick start
+# Step-by-step install
 
-This page gets a server running, enrolls one **test** Windows machine and shows it online in the console. It takes about 30 minutes once you have an MSI.
+This guide takes you from nothing to one Windows PC protected by Kestrel and visible in the console. Every screenshot on this page was taken while following these exact steps: a fresh clone of the GitHub repository on a Linux server, and a Windows 11 PC.
 
-::: danger Use a disposable test machine
-The agent kills processes, quarantines files, installs firewall (WFP) filters that can cut network access, changes AppLocker and plants decoy files in user profiles. Install it only on a test VM you can throw away, not on your own workstation. See [Testing safely](./testing).
+Plan for about 30 minutes.
+
+::: danger Start with a test PC
+The agent can kill processes, quarantine files, block network access and plant decoy files. Install it on a test PC or virtual machine first, not on someone's work laptop. Roll out to real users only after a test period in Audit mode (see [Next steps](#next-steps)).
 :::
 
 ## What you need
 
-* A Linux host or a Windows PC with Docker Desktop, reachable from the test machine on TCP 443 and 8443.
-* A DNS name or IP address for the server that the test machine can reach.
-* A Windows 10 or 11 (64-bit) test VM.
-* `KestrelAgent.msi`. Build it with [Build from source](../build/), or take it from the `kestrel-windows` artifact of the Windows CI job.
+| Item | Notes |
+|---|---|
+| A server with Docker | Linux (Ubuntu 22.04 or 24.04 recommended) with Docker Engine and the Compose plugin, or a Windows PC with Docker Desktop. 2 vCPU and 4 GB RAM are enough for up to about 100 PCs. |
+| A name or IP for the server | The PCs must reach it on TCP **443** (console and installer download) and **8443** (agent connection). |
+| A Windows 10 or 11 PC, 64-bit | The PC you will protect. You need an administrator account on it. |
+| `KestrelAgent.msi` | The agent installer. See step 2. |
 
-## 1. Start the server
+## Part A: start the server
 
-On Linux:
+### 1. Download Kestrel and create the settings file
 
-```bash
-git clone https://github.com/lawbyte/kestrel-edr.git && cd kestrel-edr/deploy
+On the server:
+
+::: code-group
+
+```bash [Linux]
+git clone https://github.com/lawbyte/kestrel-edr.git
+cd kestrel-edr/deploy
 cp .env.example .env
-sed -i "s|^KESTREL_MASTER_KEY=.*|KESTREL_MASTER_KEY=$(openssl rand -base64 32)|" .env
-$EDITOR .env        # KESTREL_PUBLIC_HOSTNAME, POSTGRES_PASSWORD, CLICKHOUSE_PASSWORD
 ```
 
-On Windows (PowerShell, Docker Desktop running), generate the master key with .NET and paste it into `.env`:
-
-```powershell
+```powershell [Windows (Docker Desktop)]
+git clone https://github.com/lawbyte/kestrel-edr.git
 cd kestrel-edr\deploy
 Copy-Item .env.example .env
-$b = New-Object byte[] 32
-[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
-[Convert]::ToBase64String($b)      # paste as KESTREL_MASTER_KEY=... in .env
-notepad .env                       # also set KESTREL_PUBLIC_HOSTNAME, POSTGRES_PASSWORD, CLICKHOUSE_PASSWORD
 ```
 
-In `.env`, set at least:
+:::
 
-| Variable | Value |
+Open `.env` in a text editor (`nano .env` on Linux, `notepad .env` on Windows) and set these four values:
+
+| Setting | What to put |
 |---|---|
-| `KESTREL_MASTER_KEY` | The random base64 key you generated. Back it up separately from the database. |
-| `KESTREL_PUBLIC_HOSTNAME` | The name or IP the test machine uses to reach the server. The **first** name in the list is the one installers use. |
-| `POSTGRES_PASSWORD`, `CLICKHOUSE_PASSWORD` | Long random values. |
+| `KESTREL_MASTER_KEY` | A random key. Create one with the command below. **Keep a copy somewhere safe**: without it a restored backup cannot be read and every PC has to be enrolled again. |
+| `KESTREL_PUBLIC_HOSTNAME` | The DNS name or IP address the PCs use to reach this server, for example `edr.example.com` or `192.168.1.20`. You can list several, separated by commas; the **first** one is written into the installers. |
+| `POSTGRES_PASSWORD` | A long random password. |
+| `CLICKHOUSE_PASSWORD` | Another long random password. |
 
-Copy the MSI into `deploy/installers/` so the server can serve it and generate installer scripts:
+Create the random values:
 
-```bash
-cp /path/to/KestrelAgent.msi installers/
+::: code-group
+
+```bash [Linux]
+openssl rand -base64 32    # use as KESTREL_MASTER_KEY
+openssl rand -hex 24       # use as POSTGRES_PASSWORD, run again for CLICKHOUSE_PASSWORD
 ```
 
-Start the stack and check it:
+```powershell [Windows]
+$b = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); [Convert]::ToBase64String($b)
+```
+
+:::
+
+### 2. Put the agent installer next to the server
+
+The server hands out the agent installer to your PCs, so it needs a copy of `KestrelAgent.msi` in `deploy/installers/`. Get the MSI in one of two ways:
+
+* **Download it from GitHub Actions** (needs a free GitHub account): open [Actions, workflow ci](https://github.com/lawbyte/kestrel-edr/actions/workflows/ci.yml), click the latest run with a green check on `main`, scroll to **Artifacts**, download **kestrel-windows** and unzip it.
+* **Build it yourself** on Windows: see [Build from source](../build/).
+
+Then copy it into place:
+
+::: code-group
+
+```bash [Linux]
+mkdir -p installers
+cp ~/Downloads/KestrelAgent.msi installers/KestrelAgent.msi
+```
+
+```powershell [Windows]
+New-Item -ItemType Directory -Force installers | Out-Null
+Copy-Item $HOME\Downloads\KestrelAgent.msi installers\KestrelAgent.msi
+```
+
+:::
+
+::: warning The agent binaries are not code-signed yet
+Microsoft Defender can flag the unsigned agent. Until a signed release is available, add a Defender exclusion on each PC before installing (step 8).
+:::
+
+### 3. Start the server
+
+Still in the `deploy` folder:
 
 ```bash
 docker compose up -d --build
-docker compose ps                                    # all services "healthy"
-curl -k https://localhost/api/healthz
 ```
 
-The first build compiles the server and the console inside Docker and takes several minutes.
+The first start builds the server image and takes about 10 to 20 minutes. Later starts take seconds. Wait until all three containers report `healthy`:
 
-## 2. First-run setup
+```text
+$ docker compose ps
+NAME                       STATUS
+deploy-clickhouse-1        Up 11 seconds (healthy)
+deploy-kestrel-server-1    Up 5 seconds (healthy)
+deploy-postgres-1          Up 11 seconds (healthy)
+```
 
-1. Get the one-time setup code from the server log:
+### 4. Get the one-time setup code
 
-   ```bash
-   docker compose logs kestrel-server | grep "SETUP CODE"
-   ```
+The server prints a setup code the first time it starts. It proves that the person setting up the console has access to the server:
 
-   In PowerShell use `docker compose logs kestrel-server | Select-String "SETUP CODE"`. You can also set your own code with `KESTREL_SETUP_CODE` in `.env` before the first start.
-2. Open `https://<KESTREL_PUBLIC_HOSTNAME>/`. The certificate is self-signed until you install your own (see [TLS](../deploy/server#tls)).
-3. Enter the setup code, the organisation name and the first administrator account.
+::: code-group
 
-## 3. Create an installer
+```bash [Linux]
+docker compose logs kestrel-server | grep "SETUP CODE"
+```
 
-1. In the console, open **Devices** and click **Install agent**.
-2. Choose a remote-access profile. For a first test keep **No remote access**.
-3. Pick the device group, how many days the token is valid (1 to 90) and the maximum number of devices (1 to 10,000).
-4. Click through to **Installer ready**. Download `Install-Kestrel-none.cmd`, or copy the PowerShell one-liner. The token is shown only once.
+```powershell [Windows]
+docker compose logs kestrel-server | Select-String "SETUP CODE"
+```
 
-## 4. Install on the test machine
+:::
 
-Because the binaries are not signed yet, add a Defender exclusion on the **test VM** first, in an administrator PowerShell:
+```text
+... first-run setup pending: enter this one-time setup code in the console (KESTREL SETUP CODE: AROP-XG2Q-CQ8T)
+```
+
+Your code will be different. If your firewall is on, allow TCP 443 and 8443 now.
+
+## Part B: set up the console
+
+### 5. Create your organisation and administrator account
+
+Open `https://<your server name>/` in a browser. The server starts with its own certificate, so the browser warns that the connection is not private: choose **Advanced**, then **Continue**. (For production, install a trusted certificate, see [TLS](../deploy/server#tls).)
+
+Fill in the setup form: the setup code from step 4, your organisation name (employees see it in the Kestrel tray app), your name, email and a password. Click **Create organisation**.
+
+<Shot name="guide/01-setup" alt="First-run setup form with setup code, organisation name and administrator account" />
+
+You are signed in and see the empty overview:
+
+<Shot name="guide/02-overview-empty" alt="Empty overview dashboard after setup" />
+
+::: tip Turn on two-factor authentication now
+Open your name at the bottom left, then **Account & security**, and set up an authenticator app. See [Two-factor authentication](../console/settings#two-factor-authentication-totp).
+:::
+
+## Part C: create an installer
+
+### 6. Open the install wizard
+
+Click **Devices** in the left menu, then **Install agent** at the top right.
+
+<Shot name="guide/03-devices-empty" alt="Devices page with the Install agent button" />
+
+### 7. Choose what IT may do on the PCs
+
+The wizard has three steps.
+
+**Remote access.** Choose what IT can do on PCs installed with this installer. This is fixed on each PC when it installs; you can later make it stricter through a policy, but never looser. If you are not sure, choose **No remote access**; detection and response work the same with every choice.
+
+<Shot name="guide/04-wizard-profile" alt="Install wizard step 1: choose No remote access, remote control without guardrails, or with guardrails" />
+
+**Guardrails.** Only shown for the profile with guardrails: whether the employee must allow each session, whether IT must give a reason, session time limits and so on. The defaults are a sensible start.
+
+<Shot name="guide/05-wizard-guardrails" alt="Install wizard step 2: guardrails" />
+
+**Token.** Pick the device group, how many days the installer stays valid and how many PCs may use it. Click **Create installer**.
+
+<Shot name="guide/06-wizard-token" alt="Install wizard step 3: group, validity and maximum devices" />
+
+The installer is ready. Click **Download Install-Kestrel-....cmd**. The file contains an enrollment token, so treat it like a password and delete it when you are done. It is shown only once.
+
+<Shot name="guide/07-wizard-result" alt="Installer ready: download the .cmd file or copy the PowerShell command" />
+
+## Part D: install on the employee PC
+
+### 8. Add the Defender exclusion (unsigned builds only)
+
+On the PC, open **PowerShell as administrator** (right-click Start, **Terminal (Admin)**) and run:
 
 ```powershell
 Add-MpPreference -ExclusionPath 'C:\Program Files\Kestrel'
 ```
 
-Then copy `Install-Kestrel-none.cmd` to the VM and double-click it. It asks for administrator rights, downloads the MSI from your server, checks the MSI's SHA-256 and runs `msiexec` silently.
+To do this for many PCs, push the same exclusion with Group Policy or Intune.
 
-Check the result in an administrator PowerShell:
+### 9. Run the installer
 
-```powershell
-Get-Service KestrelAgent                                  # Running
-& 'C:\Program Files\Kestrel\kestrel-agent.exe' status     # JSON health from the running agent
+Copy the downloaded `Install-Kestrel-....cmd` to the PC (USB stick, network share or email to yourself) and double-click it.
+
+<Shot src="img/guide/08-desktop-installer.png" alt="The installer file on the Windows desktop" />
+
+Windows asks for administrator rights. Click **Yes**. If you are signed in as a standard user, Windows asks for an administrator's name and password instead.
+
+<Shot src="img/guide/09-uac.png" alt="Windows User Account Control prompt for the installer" />
+
+A window shows the progress. The installer downloads the MSI from your server, checks its SHA-256 fingerprint and installs it:
+
+<Shot src="img/guide/10-installing.png" alt="Installer window while the MSI installs" />
+
+When you see **Kestrel EDR agent installed** and **exit code 0**, press any key to close the window.
+
+<Shot src="img/guide/11-installed.png" alt="Installer finished with exit code 0" />
+
+To install on many PCs without anyone clicking, run the same file from your software deployment tool (Group Policy startup script, Intune, an RMM) as administrator or SYSTEM with the `/quiet` switch:
+
+```bat
+Install-Kestrel-none.cmd /quiet
 ```
 
-## 5. See it online
+## Part E: check that it works
 
-Open **Devices** in the console. The test machine appears within seconds. Open it to see sensor health (ETW, events lost, DPAPI audit channel, AMSI, outbox). The tray icon appears for the user at the next sign-in.
+### 10. See the PC in the console
 
-To see a detection without real malware, follow the benign emulations in [Testing safely](./testing).
+Back in the console, open **Devices**. The PC appears within a few seconds of the install.
+
+<Shot name="guide/12-devices-online" alt="Devices list with the new PC" />
+
+Click it to see its sensor health, policy, remote-access setting and the tabs for events, alerts and response.
+
+<Shot name="guide/13-device-page" alt="Device page of the new PC" />
+
+### 11. What the employee sees
+
+The Kestrel shield appears in the notification area at the next sign-in. Clicking it opens the tray app, which shows the protection status and explains anything Kestrel stopped.
+
+<Shot src="img/tray/real-desktop.png" alt="Kestrel tray app on a Windows 11 desktop" />
+
+On the PC you can also check the service from an administrator PowerShell:
+
+```powershell
+Get-Service KestrelAgent                                  # Status: Running
+& 'C:\Program Files\Kestrel\kestrel-agent.exe' status     # health of the running agent
+```
 
 ## Next steps
 
-* Production setup (TLS, backups, sizing): [Deploy the server](../deploy/server).
-* Mass deployment, uninstall and upgrades: [Enroll devices](../deploy/enroll).
-* Rollout advice: leave the default rule modes, keep everything else in Audit for about two weeks, then move rules to Protect one by one. See [Detection rules](../reference/rules#rollout-advice).
+* **Roll out carefully.** The default policy only stops threats automatically with the rules that are safe on day one. Leave everything else in Audit (alert only) for about two weeks, add exclusions for business software that triggers alerts, then switch rules to Protect one at a time. See [Detection rules](../reference/rules#rollout-advice).
+* **Try a detection** without real malware on the test PC: [Testing safely](./testing).
+* **Production setup**: trusted TLS certificate, backups, sizing and upgrades in [Deploy the server](../deploy/server).
+* **More PCs**: deployment tools, upgrades and uninstall in [Enroll devices](../deploy/enroll).
+
+## Uninstall
+
+Kestrel protects itself against removal. To uninstall it from a PC you need that PC's uninstall token:
+
+1. In the console, open the device and click **Reveal** under **Uninstall token**. Revealing it is recorded in the audit log.
+2. On the PC, in an administrator PowerShell:
+
+   ```powershell
+   $pc = (Get-ChildItem HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall | Get-ItemProperty | Where-Object DisplayName -eq 'Kestrel EDR Agent').PSChildName
+   msiexec /x $pc /qn UNINSTALL_TOKEN=<token>
+   ```
+
+3. In the console, open the device and use **Decommission device** to remove it from the list.

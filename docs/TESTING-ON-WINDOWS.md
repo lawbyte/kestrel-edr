@@ -49,7 +49,7 @@ Complete first-run setup at `https://<host>/` to create the organisation and adm
 
 ## 2. Install the agent
 
-1. In the console, go to **Devices → Enrollment tokens → New** and copy the install command.
+1. In the console, go to **Devices**, **Install agent**, create an installer and copy the install command (or download the `.cmd`).
 2. On the Windows VM, in an **elevated** PowerShell, run it. Download the MSI from `https://<host>/downloads/KestrelAgent.msi` first:
 
    ```powershell

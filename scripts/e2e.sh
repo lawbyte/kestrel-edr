@@ -24,6 +24,7 @@
 #   E2E_HTTPS_PORT / E2E_GRPC_PORT   Ports (default 18443 / 18444).
 #   CARGO_TARGET_DIR   Honoured (binaries are taken from $CARGO_TARGET_DIR/debug).
 set -euo pipefail
+python3 -c "import websockets" 2>/dev/null || { echo "e2e.sh needs the Python websockets module for the remote-desktop checks: sudo apt-get install python3-websockets (or pip install websockets)" >&2; exit 2; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"

@@ -77,7 +77,7 @@ Outbound HTTP (webhooks, Slack, Teams, OIDC) reaches only public addresses unles
 
 ### Two-factor authentication (TOTP)
 
-Each user sets up their own authenticator under **Account and security** in the user menu (bottom left), at `/account`:
+Each user sets up their own authenticator under **Account & security** in the user menu (bottom left), at `/account`:
 
 1. Click **Set up two-factor authentication**.
 2. Scan the QR code with an authenticator app (Microsoft Authenticator, Google Authenticator, 1Password, Bitwarden, Authy and other TOTP apps), or type the key shown next to it.

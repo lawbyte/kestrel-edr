@@ -11,7 +11,7 @@ hero:
     alt: Kestrel console overview
   actions:
     - theme: brand
-      text: Quick start
+      text: Step-by-step install
       link: /guide/quick-start
     - theme: alt
       text: What Kestrel is

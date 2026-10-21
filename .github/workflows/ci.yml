@@ -51,7 +51,10 @@ jobs:
         working-directory: tray
         run: npm ci && npm run build && npm test --if-present -- --run
       - name: End-to-end (server + simulated agent replays)
-        run: ./scripts/e2e.sh
+        run: |
+          # The remote-desktop checks drive the console WebSocket from Python.
+          sudo apt-get install -y --no-install-recommends python3-websockets
+          ./scripts/e2e.sh
       - name: Server image
         run: docker build -f deploy/Dockerfile -t kestrel-server:ci .
 

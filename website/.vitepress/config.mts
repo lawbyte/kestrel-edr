@@ -44,7 +44,7 @@ export default defineConfig({
         text: 'Introduction',
         items: [
           { text: 'What Kestrel is', link: '/guide/introduction' },
-          { text: 'Quick start', link: '/guide/quick-start' },
+          { text: 'Step-by-step install', link: '/guide/quick-start' },
         ],
       },
       {
