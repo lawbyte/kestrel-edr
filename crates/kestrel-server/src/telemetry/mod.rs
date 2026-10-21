@@ -96,6 +96,7 @@ impl EventRow {
                 value_name,
                 data,
                 op,
+                ..
             } => {
                 r.reg_key = key.clone();
                 r.reg_value = value_name.clone();

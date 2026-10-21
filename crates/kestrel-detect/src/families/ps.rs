@@ -2015,6 +2015,7 @@ impl Family for Persistence {
                 value_name,
                 data,
                 op,
+                ..
             } => {
                 if *op == RegistryOp::Set {
                     self.on_registry(ctx, e, key, value_name, data.as_deref().unwrap_or(""), out);

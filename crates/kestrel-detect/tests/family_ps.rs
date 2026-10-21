@@ -65,6 +65,7 @@ fn reg(ts: i64, guid: &str, pid: u32, key: &str, value: &str, data: &str) -> Eve
         guid,
         pid,
         EventData::RegistrySet {
+            attribution: Default::default(),
             key: key.into(),
             value_name: value.into(),
             data: Some(data.into()),
@@ -204,6 +205,7 @@ fn ps01_unknown_signature_is_alert_only_and_hkcu_long_form() {
         "w",
         10,
         EventData::RegistrySet {
+            attribution: Default::default(),
             key: run_key(),
             value_name: "z".into(),
             data: None,
@@ -727,6 +729,7 @@ fn malformed_input_never_panics() {
             "w",
             10,
             EventData::TaskRegistered(TaskChange {
+                attribution: Default::default(),
                 name: (*d).into(),
                 actions: vec![(*d).into()],
                 hidden: true,
@@ -739,6 +742,7 @@ fn malformed_input_never_panics() {
             "w",
             10,
             EventData::ServiceInstalled(ServiceInstall {
+                attribution: Default::default(),
                 name: (*d).into(),
                 image_path: (*d).into(),
                 ..Default::default()
@@ -749,6 +753,7 @@ fn malformed_input_never_panics() {
             "w",
             10,
             EventData::WmiSubscription(WmiBinding {
+                attribution: Default::default(),
                 namespace: "x".into(),
                 filter: (*d).into(),
                 consumer: format!("CommandLineEventConsumer=\"{d}"),

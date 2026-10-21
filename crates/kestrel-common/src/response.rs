@@ -139,8 +139,10 @@ impl ResponseAction {
             | ResponseAction::ResumeProcess { .. } => "response.process",
             ResponseAction::QuarantineFile { .. }
             | ResponseAction::RestoreFile { .. }
-            | ResponseAction::DeleteQuarantined { .. }
-            | ResponseAction::RemoveAutorun { .. } => "response.file",
+            | ResponseAction::DeleteQuarantined { .. } => "response.file",
+            // Writes / deletes persistence entries as SYSTEM: admin-only
+            // (security review v1.1 V-H2).
+            ResponseAction::RemoveAutorun { .. } => "response.persistence",
             ResponseAction::BlockDestination { .. }
             | ResponseAction::BlockImageNetwork { .. }
             | ResponseAction::IsolateHost { .. }

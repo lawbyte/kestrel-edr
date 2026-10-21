@@ -138,6 +138,9 @@ pub enum EventData {
         /// What happened to the value (older agents only report sets).
         #[serde(default)]
         op: RegistryOp,
+        /// How the writer (`pid`/`guid`) was determined.
+        #[serde(default)]
+        attribution: Attribution,
     },
     NetConnect {
         proto: NetProto,
@@ -241,6 +244,12 @@ pub struct ProcessStart {
     pub motw_zone: Option<u8>,
     #[serde(default)]
     pub file_size: Option<u64>,
+    /// Set by the sensor only for a direct child the agent itself started
+    /// (hardening PowerShell, kestrel-scan, msiexec for updates): the agent
+    /// recorded its pid + creation time when it spawned it. Never inherited by
+    /// grandchildren. Engine rules treat such processes as the agent's work.
+    #[serde(default)]
+    pub agent_spawned: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -272,6 +281,23 @@ impl TargetProcess {
     pub fn is_termination(&self) -> bool {
         self.granted_access == Self::TERMINATE
     }
+}
+
+/// How confidently an event's acting process (`pid`/`guid`) is known.
+/// Response actions against the actor (kill, rollback) require `Exact`;
+/// `Heuristic` and `None` may still remediate the object itself.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Attribution {
+    /// Reported by the kernel for this very operation (ETW header pid, or a
+    /// registry write joined on its key object).
+    #[default]
+    Exact,
+    /// Inferred by correlation (value name within a time window, the most
+    /// recent schtasks / sc / taskschd.dll hint, the last opener of a file).
+    Heuristic,
+    /// No writer could be determined (`pid` is 0).
+    None,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -330,6 +356,15 @@ pub struct FileActivity {
     /// Up to 5 example paths (privacy-filtered before upload).
     #[serde(default)]
     pub sample_paths: Vec<String>,
+    /// The writes came from the System process (pid 4): a remote client over
+    /// SMB, not a local program. No local process may be blamed.
+    #[serde(default)]
+    pub remote_writer: bool,
+    /// `canary_hits` were detected by content polling (an in-place write),
+    /// so the actor is the last process seen opening the decoy for writing
+    /// (heuristic), not the kernel-reported writer.
+    #[serde(default)]
+    pub canary_in_place: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -358,6 +393,9 @@ pub struct TaskChange {
     /// Trigger kinds, e.g. `logon`, `boot`, `time`, `idle`, `event`.
     #[serde(default)]
     pub triggers: Vec<String>,
+    /// How the creator (`pid`/`guid` of the event) was determined.
+    #[serde(default)]
+    pub attribution: Attribution,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -373,6 +411,9 @@ pub struct ServiceInstall {
     pub service_type: Option<u32>,
     #[serde(default)]
     pub account: Option<String>,
+    /// How the creator (`pid`/`guid` of the event) was determined.
+    #[serde(default)]
+    pub attribution: Attribution,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -382,6 +423,9 @@ pub struct WmiBinding {
     pub filter: String,
     /// Consumer, e.g. `CommandLineEventConsumer="x"` plus its command line when known.
     pub consumer: String,
+    /// How the creator (`pid`/`guid` of the event) was determined.
+    #[serde(default)]
+    pub attribution: Attribution,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -759,6 +803,7 @@ mod tests {
                 namespace: r"root\subscription".into(),
                 filter: "f".into(),
                 consumer: "CommandLineEventConsumer=\"c\"".into(),
+                ..Default::default()
             }),
         ] {
             let e = Event {

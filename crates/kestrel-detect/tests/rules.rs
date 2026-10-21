@@ -747,6 +747,7 @@ fn tamper_events_and_registry() {
         "evil",
         77,
         EventData::RegistrySet {
+            attribution: Default::default(),
             key: r"HKLM\SOFTWARE\Microsoft\AMSI\Providers\{2781761E-28E0-4109-99FE-B9D127C57AFE}"
                 .into(),
             value_name: String::new(),
@@ -755,13 +756,14 @@ fn tamper_events_and_registry() {
         },
     ));
     assert_eq!(rule_ids(&out), ["TP-03"]);
-    let out = e.process(&ev(5, "evil", 77, EventData::RegistrySet { key: r"HKLM\SYSTEM\CurrentControlSet\Control\WMI\Autologger\EventLog-System\{555908d1-a6d7-4695-8e1e-26931d2012f4}".into(), value_name: "Enabled".into(), data: Some("0".into()), op: Default::default() }));
+    let out = e.process(&ev(5, "evil", 77, EventData::RegistrySet { attribution: Default::default(), key: r"HKLM\SYSTEM\CurrentControlSet\Control\WMI\Autologger\EventLog-System\{555908d1-a6d7-4695-8e1e-26931d2012f4}".into(), value_name: "Enabled".into(), data: Some("0".into()), op: Default::default() }));
     assert_eq!(rule_ids(&out), ["TP-01"]);
     let out = e.process(&ev(
         6,
         "evil",
         77,
         EventData::RegistrySet {
+            attribution: Default::default(),
             key: r"HKLM\SYSTEM\CurrentControlSet\Services\KestrelAgent".into(),
             value_name: "Start".into(),
             data: Some("4".into()),
@@ -1003,6 +1005,7 @@ fn st10_typedpaths_and_pending_kill() {
         "exp",
         1,
         EventData::RegistrySet {
+            attribution: Default::default(),
             key: r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\TypedPaths".into(),
             value_name: "url1".into(),
             data: Some(
@@ -1041,6 +1044,7 @@ fn st10_typedpaths_and_pending_kill() {
         "exp",
         1,
         EventData::RegistrySet {
+            attribution: Default::default(),
             key: r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU".into(),
             value_name: "b".into(),
             data: Some("cmd\\1".into()),

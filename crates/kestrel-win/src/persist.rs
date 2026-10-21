@@ -186,6 +186,7 @@ pub fn record_from_fields(event_id: u16, f: &HashMap<String, String>) -> Option<
         eid::SCM_SERVICE_INSTALLED => {
             let name = get(f, "ServiceName")?.to_string();
             Some(PersistRecord::Service(ServiceInstall {
+                attribution: Default::default(),
                 name,
                 image_path: get(f, "ImagePath").unwrap_or_default().to_string(),
                 start_type: get(f, "StartType").and_then(start_type_from_str),
@@ -215,6 +216,7 @@ pub fn record_from_fields(event_id: u16, f: &HashMap<String, String>) -> Option<
                 }
             }
             Some(PersistRecord::Wmi(WmiBinding {
+                attribution: Default::default(),
                 namespace: get(f, "Namespace").unwrap_or_default().to_string(),
                 filter,
                 consumer,

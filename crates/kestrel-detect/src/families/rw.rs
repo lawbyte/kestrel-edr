@@ -1283,6 +1283,7 @@ impl Family for Ransomware {
                 value_name,
                 data,
                 op,
+                ..
             } => self.on_registry(ctx, e, key, value_name, data.as_deref(), *op, out),
             EventData::FileActivity(fa) => self.on_file_activity(ctx, e, fa, out),
             _ => {}

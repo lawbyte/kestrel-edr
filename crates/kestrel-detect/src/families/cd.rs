@@ -154,6 +154,7 @@ impl Family for CredDump {
                 value_name,
                 data,
                 op,
+                ..
             } => self.on_registry(ctx, e, key, value_name, data.as_deref(), *op, out),
             EventData::ServiceInstalled(s) => self.on_service(ctx, e, s, out),
             _ => {}

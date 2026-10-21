@@ -506,6 +506,7 @@ fn exclusions_never_silence_tamper_rules() {
         "r",
         120,
         EventData::RegistrySet {
+            attribution: Default::default(),
             key: r"HKLM\SOFTWARE\Microsoft\AMSI\Providers\{2781761E-28E0-4109-99FE-B9D127C57AFE}"
                 .into(),
             value_name: "".into(),

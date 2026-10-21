@@ -457,6 +457,7 @@ fn persistence_fires() {
         5000,
         "actor",
         EventData::RegistrySet {
+            attribution: Default::default(),
             key: r"HKU\S-1-5-21-1\Software\Microsoft\Windows\CurrentVersion\Run".into(),
             value_name: "Updater".into(),
             data: Some(r"C:\Users\alice\AppData\Local\Temp\upd.exe".into()),
@@ -471,6 +472,7 @@ fn persistence_fires() {
         5000,
         "actor",
         EventData::RegistrySet {
+            attribution: Default::default(),
             key: r"HKU\S-1-5-21-1\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run"
                 .into(),
             value_name: String::new(),

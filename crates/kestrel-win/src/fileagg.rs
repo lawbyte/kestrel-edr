@@ -690,6 +690,8 @@ fn summarise(st: &PidState) -> FileActivity {
         .filter(|(_, d)| *d >= NOTE_MIN_DIRS)
         .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0)));
     FileActivity {
+        remote_writer: false,
+        canary_in_place: false,
         window_ms: (last - first).clamp(0, WINDOW_MS) as u64,
         files_touched: files.len() as u32,
         dirs: dirs.len() as u32,

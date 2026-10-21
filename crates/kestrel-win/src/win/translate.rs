@@ -621,6 +621,7 @@ impl Translator {
                         sha256: facts.sha256,
                         motw_zone: facts.motw_zone,
                         file_size: facts.file_size,
+                        agent_spawned: false,
                     }),
                 };
                 if pid == self.s.self_pid {
@@ -934,6 +935,7 @@ impl Translator {
                     ts,
                     pid,
                     EventData::RegistrySet {
+                        attribution: Default::default(),
                         key,
                         value_name,
                         data: if op == RegistryOp::Set {
@@ -1121,6 +1123,7 @@ impl Translator {
                 _ => None,
             };
             let ev_data = EventData::RegistrySet {
+                attribution: Default::default(),
                 key: p.key,
                 value_name: p.value_name,
                 data,
@@ -1180,6 +1183,7 @@ impl Translator {
                 PersistRecord::Task { name, op, user } => {
                     let t = p.task.unwrap_or_default();
                     EventData::TaskRegistered(TaskChange {
+                        attribution: Default::default(),
                         name,
                         op,
                         user: user.or(t.user),

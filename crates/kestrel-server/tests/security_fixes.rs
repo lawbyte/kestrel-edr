@@ -371,6 +371,7 @@ async fn ingest_hardening() {
             sha256: None,
             motw_zone: None,
             file_size: None,
+            agent_spawned: false,
         }),
     };
     let s3 = st.send(&AgentPayload::Events { events: vec![ev] }).await;

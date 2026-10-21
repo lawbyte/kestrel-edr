@@ -635,6 +635,7 @@ fn evidence_lines(e: &Event) -> Vec<String> {
             value_name,
             data,
             op,
+            ..
         } => {
             let at = if value_name.is_empty() {
                 key.clone()
@@ -1940,6 +1941,7 @@ mod tests {
         a.data_at_risk = vec![];
         a.evidence = vec![
             ev(EventData::TaskRegistered(kestrel_common::TaskChange {
+                attribution: Default::default(),
                 name: r"\OneDrive Updater".into(),
                 op: TaskOp::Created,
                 actions: vec![r#""C:\Users\a\AppData\Roaming\u.exe" -s"#.into()],
@@ -1948,12 +1950,14 @@ mod tests {
                 user: None,
             })),
             ev(EventData::RegistrySet {
+                attribution: Default::default(),
                 key: r"HKU\S-1-5-21-1\Software\Microsoft\Windows\CurrentVersion\Run".into(),
                 value_name: "Updater".into(),
                 data: Some(r"C:\Users\a\u.exe".into()),
                 op: RegistryOp::Set,
             }),
             ev(EventData::RegistrySet {
+                attribution: Default::default(),
                 key: r"HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest".into(),
                 value_name: "UseLogonCredential".into(),
                 data: Some("1".into()),
@@ -1967,6 +1971,7 @@ mod tests {
                 },
             )),
             ev(EventData::RegistrySet {
+                attribution: Default::default(),
                 key: r"HKLM\Software\Microsoft\Windows NT\CurrentVersion\Winlogon".into(),
                 value_name: "Userinit".into(),
                 data: Some("x".into()),

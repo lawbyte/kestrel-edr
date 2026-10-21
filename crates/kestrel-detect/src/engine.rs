@@ -1136,6 +1136,7 @@ impl EngineState {
                 sha256: info.sha256.clone(),
                 motw_zone: info.motw_zone,
                 file_size: info.file_size,
+                agent_spawned: false,
             }),
         };
         self.check_process_iocs(&ev, &info);
@@ -1200,6 +1201,7 @@ impl EngineState {
                 sha256: info.sha256.clone(),
                 motw_zone: info.motw_zone,
                 file_size: info.file_size,
+                agent_spawned: false,
             }),
         };
         // Hash / certificate IOCs (dedup per indicator keeps this idempotent).
@@ -1755,6 +1757,7 @@ impl EngineState {
                 value_name,
                 data,
                 op,
+                ..
             } => {
                 if *op == RegistryOp::Set {
                     self.on_registry(e, key, value_name, data.as_deref())

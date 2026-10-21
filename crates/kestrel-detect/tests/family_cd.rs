@@ -848,6 +848,7 @@ fn cd07_protected_writer_is_not_killed_but_value_is_reverted() {
         "svc",
         1210,
         EventData::RegistrySet {
+            attribution: Default::default(),
             key: r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SilentProcessExit\lsass.exe"
                 .into(),
             value_name: "LocalDumpFolder".into(),
