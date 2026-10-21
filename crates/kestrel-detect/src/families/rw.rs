@@ -839,7 +839,10 @@ impl Ransomware {
     }
 
     fn on_terminate(&mut self, ctx: &Ctx, e: &Event, t: &TargetProcess, out: &mut Vec<FamilyHit>) {
-        if t.granted_access & 0x1 == 0 || t.return_code != 0 {
+        // A TerminateProcess call arrives as access == PROCESS_TERMINATE exactly
+        // (see `TargetProcess::is_termination`); an open whose desired mask
+        // merely includes 0x1 (OneDrive asks for 0x100411) is not a kill.
+        if !t.is_termination() || t.return_code != 0 {
             return;
         }
         let Some(actor) = ctx.process(&e.guid) else {

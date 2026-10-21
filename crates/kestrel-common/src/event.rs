@@ -260,6 +260,20 @@ pub struct TargetProcess {
     pub return_code: u32,
 }
 
+impl TargetProcess {
+    /// `PROCESS_TERMINATE`.
+    pub const TERMINATE: u32 = 0x1;
+
+    /// A `TerminateProcess` call (Kernel-Audit-API-Calls event 2). Sensors
+    /// report it with `granted_access == PROCESS_TERMINATE` and nothing else;
+    /// handle opens are only reported for masks with read/write/inject rights,
+    /// so an open never looks like this. A mask that merely *includes* 0x1
+    /// (e.g. OneDrive's `0x100411`) is an open, not a kill.
+    pub fn is_termination(&self) -> bool {
+        self.granted_access == Self::TERMINATE
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RegistryOp {

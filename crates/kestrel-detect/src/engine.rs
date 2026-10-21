@@ -2857,7 +2857,7 @@ impl EngineState {
             return; // browser broker / children
         }
         if let EventData::ProcessAccess(_) = &e.data {
-            if t.granted_access & 0x1 != 0 && !self.protected(&src) {
+            if t.is_termination() && !self.protected(&src) {
                 self.kill_intents.push_back((e.ts, src.guid.clone()));
                 if self.kill_intents.len() > 256 {
                     self.kill_intents.pop_front();

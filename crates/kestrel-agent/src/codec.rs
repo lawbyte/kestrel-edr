@@ -12,7 +12,14 @@ pub const MAX_DECOMPRESSED: usize = 64 * 1024 * 1024;
 /// Serialise `v` as JSON; compress when large or when `force_compress`.
 /// Returns `(bytes, compressed)`.
 pub fn encode<T: Serialize>(v: &T, force_compress: bool) -> Result<(Vec<u8>, bool)> {
-    let json = serde_json::to_vec(v)?;
+    let mut json = serde_json::to_vec(v)?;
+    // NUL characters (seen in real command lines) cannot be stored by the
+    // server's database; replace them before the payload leaves the device.
+    if json.windows(6).any(|w| w == b"\\u0000") {
+        let mut val: serde_json::Value = serde_json::from_slice(&json)?;
+        kestrel_common::wire::strip_nul(&mut val);
+        json = serde_json::to_vec(&val)?;
+    }
     if force_compress || json.len() > COMPRESS_THRESHOLD {
         let z = zstd::bulk::compress(&json, ZSTD_LEVEL)?;
         Ok((z, true))

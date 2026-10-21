@@ -75,10 +75,16 @@ impl Watch {
 
     fn debounce(&self) -> Duration {
         match self.spec.depth {
+            // Short: a value set and reverted within the debounce is invisible
+            // (lab VM: a 2 s AMSI FeatureBits / service-key set+revert was
+            // missed with 1 s / 3 s). The Services subtree is large, so it
+            // still coalesces bursts a little longer.
             0 => Duration::from_millis(50),
-            1 => Duration::from_millis(250),
-            _ if self.spec.path.ends_with(r"CurrentControlSet\Services") => Duration::from_secs(3),
-            _ => Duration::from_secs(1),
+            1 => Duration::from_millis(100),
+            _ if self.spec.path.ends_with(r"CurrentControlSet\Services") => {
+                Duration::from_millis(750)
+            }
+            _ => Duration::from_millis(250),
         }
     }
 }

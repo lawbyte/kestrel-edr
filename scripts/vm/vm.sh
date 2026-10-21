@@ -42,7 +42,7 @@ qemu_run() { # $@ = extra args
         -cpu host,hv_relaxed,hv_spinlocks=0x1fff,hv_vapic,hv_time \
         -smp "$CPUS" -m "$MEM" -rtc base=localtime \
         -device ahci,id=ahci \
-        -drive file="$DISK",if=none,id=d0,format=qcow2,cache=unsafe -device ide-hd,drive=d0,bus=ahci.0,bootindex=1 \
+        -drive file="$DISK",if=none,id=d0,format=qcow2,cache=writeback -device ide-hd,drive=d0,bus=ahci.0,bootindex=1 \
         -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22" -device e1000e,netdev=n0 \
         -device qemu-xhci -device usb-tablet \
         -vga std -vnc "127.0.0.1:${VNC_DISPLAY}" \
@@ -92,8 +92,10 @@ start)
     ;;
 stop)
     running || { echo "not running"; exit 0; }
-    mon 'system_powerdown'
-    for _ in $(seq 1 90); do running || break; sleep 1; done
+    # Ask Windows to shut down (SSH first, ACPI as fallback) and give it time:
+    # a hard kill mid-shutdown leaves a disk that may not boot again.
+    ssh "${ssh_opts[@]}" labadmin@127.0.0.1 'shutdown /s /t 0 /f' >/dev/null 2>&1 || mon 'system_powerdown'
+    for _ in $(seq 1 300); do running || break; sleep 1; done
     if running; then kill "$(cat "$PIDF")"; sleep 2; fi
     rm -f "$PIDF"; echo stopped
     ;;

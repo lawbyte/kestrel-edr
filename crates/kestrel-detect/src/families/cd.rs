@@ -1108,6 +1108,18 @@ fn benign_opener(ctx: &Ctx, p: &ProcessInfo, mask: u32) -> bool {
                 return true;
             }
         }
+        // OneDrive (Microsoft-signed, per-user or per-machine install) opens
+        // every process including LSASS with query + VM_READ (0x100411), seen
+        // in the lab VM; LSA protection refuses it. Never write/inject/dup.
+        let lp = p.image.to_ascii_lowercase().replace('/', "\\");
+        if name == "onedrive.exe"
+            && (lp.contains(r"\appdata\local\microsoft\onedrive\")
+                || lp.contains(r"\program files\microsoft onedrive\"))
+            && mask & (0x2 | 0x8 | 0x20 | 0x40 | 0x80) == 0
+            && !full_or_max(mask)
+        {
+            return true;
+        }
         // Process Explorer / Handle: only handle duplication (0x40) + query bits.
         if SYSINTERNALS_HANDLE_TOOLS.contains(&name.as_str())
             && mask & !PROCESS_DUP_HANDLE & DANGEROUS_BITS == 0

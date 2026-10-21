@@ -47,6 +47,18 @@ pub struct AgentSvc {
     pub state: AppState,
 }
 
+/// A database "data exception" (SQLSTATE class 22: invalid text, out of
+/// range, bad JSON …) is caused by the message content and will fail again on
+/// every retry; connection or locking errors are transient.
+fn is_permanent_data_error(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<sqlx::Error>().is_some_and(|s| match s {
+            sqlx::Error::Database(d) => d.code().is_some_and(|c| c.starts_with("22")),
+            _ => false,
+        })
+    })
+}
+
 pub fn decode_payload(compressed: bool, payload: &[u8]) -> Result<Vec<u8>, String> {
     if !compressed {
         return Ok(payload.to_vec());
@@ -481,7 +493,14 @@ impl AgentService for AgentSvc {
                     }
                     let payload = match decode_payload(msg.compressed, &msg.payload).and_then(
                         |raw| {
-                            serde_json::from_slice::<AgentPayload>(&raw).map_err(|e| e.to_string())
+                            let mut v: serde_json::Value =
+                                serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
+                            // PostgreSQL cannot store NUL; never let one wedge the stream.
+                            let fixed = kestrel_common::wire::strip_nul(&mut v);
+                            if fixed > 0 {
+                                tracing::warn!(%device_id, seq, fixed, "agent message carried NUL characters; replaced");
+                            }
+                            serde_json::from_value::<AgentPayload>(v).map_err(|e| e.to_string())
                         },
                     ) {
                         Ok(p) => Some(p),
@@ -574,6 +593,21 @@ impl AgentService for AgentSvc {
                                 tracing::error!(%device_id, error = %e, "failed to persist agent seq");
                                 break;
                             }
+                            if sess.conn.tx.send(ServerPayload::Ack { seq }).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) if is_permanent_data_error(&e) => {
+                            // The database rejected this message's *content*
+                            // (SQLSTATE class 22): re-sending can never succeed
+                            // and would block everything queued behind it. Ack it.
+                            tracing::error!(%device_id, seq, error = %e, "agent message rejected by the database; dropping it");
+                            hwm = seq;
+                            let _ = sqlx::query("UPDATE devices SET last_agent_seq = GREATEST(last_agent_seq, $2) WHERE id = $1")
+                                .bind(device_id)
+                                .bind(seq as i64)
+                                .execute(&state.db)
+                                .await;
                             if sess.conn.tx.send(ServerPayload::Ack { seq }).await.is_err() {
                                 break;
                             }
