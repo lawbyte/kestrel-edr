@@ -23,6 +23,8 @@ Lab facts learned on real Windows (2026-10-21):
 * A clean Windows has no `VCRUNTIME140.dll`: binaries are linked with the static CRT (`.cargo/config.toml`).
 * OpenSSH sessions have no console: `timeout.exe` refuses to run (use `ping -n`), and `ProtectedData` `CurrentUser` fails (network logon).
 
+**Between passes:** containment persists by design. Image blocks from a Protect pass (ST-02/ST-07/ST-16) stay until an analyst lifts them, and they will silently stop the network parts of the next pass (ST-04, ST-06, ST-14). Lift them with the `unblock_network` action (device page > Actions > *Lift block*, or `POST /api/devices/{id}/actions` with `{"action":{"type":"unblock_network"}}`), or reinstall the agent. Results of the v1.1.0-rc1 lab run are in `docs/HANDOFF.md`.
+
 ## 0. Lab layout
 
 | Machine | Role |

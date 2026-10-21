@@ -263,6 +263,7 @@ export const ACTION_LABEL: Record<ResponseAction['type'], string> = {
   delete_quarantined: 'Delete quarantined file',
   block_destination: 'Block destination',
   block_image_network: 'Block app network',
+  unblock_network: 'Lift network block',
   isolate_host: 'Isolate host',
   release_host: 'Release host',
   apply_hardening: 'Re-apply hardening',
@@ -295,6 +296,7 @@ export function actionPrivilege(a: ResponseAction): string {
       return 'response.persistence'
     case 'block_destination':
     case 'block_image_network':
+    case 'unblock_network':
     case 'isolate_host':
     case 'release_host':
       return 'response.network'
@@ -349,6 +351,11 @@ export function describeAction(a: ResponseAction): string {
       return `Block ${a.ip}${a.port ? `:${a.port}` : ''}${a.image ? ` for ${safeDisplay(a.image)}` : ''}`
     case 'block_image_network':
       return `Block all network for ${safeDisplay(a.image)}`
+    case 'unblock_network':
+      if (a.image && a.block_id) return `Lift network block ${safeDisplay(a.block_id)} for ${safeDisplay(a.image)}`
+      if (a.image) return `Lift network blocks for ${safeDisplay(a.image)}`
+      if (a.block_id) return `Lift network block ${safeDisplay(a.block_id)}`
+      return 'Lift every Kestrel network block'
     case 'isolate_host':
       return a.allow_ips?.length ? `Isolate host (allow ${a.allow_ips.join(', ')})` : 'Isolate host'
     case 'release_host':
@@ -432,4 +439,16 @@ export const ROLE_PRIVILEGES: Record<string, string[]> = {
 export function attackUrl(t: string): string {
   const [base, sub] = t.split('.')
   return sub ? `https://attack.mitre.org/techniques/${base}/${sub}/` : `https://attack.mitre.org/techniques/${base}/`
+}
+
+/**
+ * The `unblock_network` action that undoes a succeeded block action, or null.
+ * App blocks lift every block for that program; destination blocks lift exactly
+ * that block (its id is the action's `artifact`), falling back to the program.
+ */
+export function unblockFor(a: ResponseAction, artifact?: string | null): Extract<ResponseAction, { type: 'unblock_network' }> | null {
+  if (a.type === 'block_image_network') return a.image ? { type: 'unblock_network', image: a.image, block_id: null } : null
+  if (a.type !== 'block_destination') return null
+  if (artifact && /^[A-Za-z0-9._-]{1,128}$/.test(artifact)) return { type: 'unblock_network', image: null, block_id: artifact }
+  return a.image ? { type: 'unblock_network', image: a.image, block_id: null } : null
 }

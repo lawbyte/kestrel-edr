@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Anchor, Ban, Bot, ChevronLeft, ChevronRight, FileArchive, Lock, LockOpen, MessageSquare, PackageSearch, ShieldBan, Skull, Siren, Activity as ActivityIcon, Wifi } from 'lucide-react'
+import { Anchor, Ban, Bot, ChevronLeft, ChevronRight, FileArchive, Lock, LockOpen, MessageSquare, PackageSearch, ShieldBan, Skull, Siren, Unlink, Activity as ActivityIcon, Wifi } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { toast } from 'sonner'
@@ -11,7 +11,7 @@ import { AssigneeControl, ClassificationControl, StatusControl } from '@/compone
 import { DataAtRiskPanel, PriorityBreakdown, RemediationChecklist, pickTarget } from '@/components/incident-parts'
 import { Markdown } from '@/components/markdown'
 import { ProcessDetail, ProcessTree } from '@/components/process-tree'
-import { ActionButton, BlockDestinationDialog, ConfirmActionDialog, type ActionSpec } from '@/components/response-actions'
+import { ActionButton, BlockDestinationDialog, ConfirmActionDialog, liftBlockSpec, type ActionSpec } from '@/components/response-actions'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/input'
 import { Tabs, TabsContent, TabsList, TabsTrigger, Tooltip } from '@/components/ui/misc'
@@ -169,7 +169,7 @@ function IncidentView({ inc }: { inc: IncidentDetail }) {
               <EvidenceTable events={inc.evidence} nodes={byGuid} />
             </TabsContent>
             <TabsContent value="actions" className="pt-3">
-              <ActionsList inc={inc} />
+              <ActionsList inc={inc} onPick={setAction} />
             </TabsContent>
           </Tabs>
         </div>
@@ -433,9 +433,9 @@ function FragmentRow({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
-function ActionsList({ inc }: { inc: IncidentDetail }) {
+function ActionsList({ inc, onPick }: { inc: IncidentDetail; onPick: (s: ActionSpec) => void }) {
   if (!inc.actions.length) return <EmptyState title="No response actions yet" />
-  const icon = (t: string) => (t === 'kill_process' ? Skull : t === 'quarantine_file' ? FileArchive : t === 'isolate_host' ? Lock : t === 'release_host' ? LockOpen : t === 'collect_triage' ? PackageSearch : t === 'remove_autorun' ? Anchor : Ban)
+  const icon = (t: string) => (t === 'kill_process' ? Skull : t === 'quarantine_file' ? FileArchive : t === 'isolate_host' ? Lock : t === 'release_host' ? LockOpen : t === 'unblock_network' ? Unlink : t === 'collect_triage' ? PackageSearch : t === 'remove_autorun' ? Anchor : Ban)
   return (
     <ul className="divide-y divide-border rounded-lg border border-border bg-surface">
       {[...inc.actions].sort((a, b) => b.created_at - a.created_at).map((a) => {
@@ -459,6 +459,10 @@ function ActionsList({ inc }: { inc: IncidentDetail }) {
             <div className="flex flex-col items-end gap-0.5">
               <ActionStatusBadge status={a.status} />
               <span className="text-xs tabular text-fg-subtle">{formatTime(a.created_at)}</span>
+              {(() => {
+                const lift = liftBlockSpec(a.action, a.status, a.artifact)
+                return lift ? <ActionButton spec={lift} label="Lift block" onPick={onPick} /> : null
+              })()}
             </div>
           </li>
         )

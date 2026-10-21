@@ -674,8 +674,9 @@ impl Wfp {
         specs: Vec<FilterSpec>,
         description: String,
         ttl_secs: Option<u64>,
+        image: Option<String>,
     ) -> Result<(String, String), String> {
-        self.block_tagged(specs, description, ttl_secs, None)
+        self.block_tagged(specs, description, ttl_secs, None, image)
     }
 
     /// [`Wfp::block`] remembering the Block IOC that caused it (M10).
@@ -685,6 +686,7 @@ impl Wfp {
         description: String,
         ttl_secs: Option<u64>,
         ioc_id: Option<String>,
+        image: Option<String>,
     ) -> Result<(String, String), String> {
         let e = Engine::open()?;
         let keys = e.add_filters(&specs)?;
@@ -699,6 +701,7 @@ impl Wfp {
             expires_at,
             created_at: now,
             ioc_id,
+            image,
         });
         self.persist(&s);
         let detail = match ttl_secs {
@@ -734,6 +737,49 @@ impl Wfp {
         }
         self.persist(&s);
         out
+    }
+
+    /// `UnblockNetwork`: delete the filters of every block `sel` matches and
+    /// drop them from the persisted state. Isolation filters and server
+    /// permits are never candidates. A block whose filters could not be
+    /// deleted stays recorded and is reported as an error.
+    pub fn lift_blocks(
+        &self,
+        sel: &kestrel_platform::BlockSelector,
+    ) -> Result<Vec<String>, String> {
+        let mut s = self.state.lock().map_err(|_| "state lock poisoned")?;
+        let lifted = s.take_matching_blocks(sel);
+        if lifted.is_empty() {
+            return Ok(vec![]);
+        }
+        let e = match Engine::open() {
+            Ok(e) => e,
+            Err(er) => {
+                s.blocks.extend(lifted);
+                return Err(er);
+            }
+        };
+        let mut out = Vec::new();
+        let mut failed = Vec::new();
+        for b in lifted {
+            match e.delete_filters(&b.filter_keys) {
+                Ok(_) => out.push(format!("{} (block {})", b.description, b.id)),
+                Err(er) => {
+                    failed.push(format!("block {}: {er}", b.id));
+                    s.blocks.push(b);
+                }
+            }
+        }
+        self.persist(&s);
+        if failed.is_empty() {
+            Ok(out)
+        } else {
+            Err(format!(
+                "lifted {} block(s); could not remove {}",
+                out.len(),
+                failed.join("; ")
+            ))
+        }
     }
 
     /// Remove expired blocks. Returns descriptions removed.

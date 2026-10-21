@@ -5,7 +5,7 @@
 //! * Events come from a JSONL file of [`kestrel_common::Event`]; `ts` is
 //!   rewritten to wall-clock time keeping relative offsets, divided by `speed`.
 //! * Response actions are appended to `<state>/sim-actions.jsonl` and succeed.
-//! * Isolation is in-memory; hardening reports every enabled control applied.
+//! * Isolation and network blocks are in-memory; hardening reports every enabled control applied.
 //! * Canary files are written under `<state>/sim-fs/` (Windows paths mapped).
 //! * The tray protocol is served on `<state>/tray.sock` (Unix) or a localhost
 //!   TCP port written to `<state>/tray.port` (Windows).
@@ -16,7 +16,8 @@ use kestrel_common::{
     ProcessGuid, ProcessInfo, ResponseAction, SignatureState,
 };
 use kestrel_platform::{
-    CanarySpec, Platform, SensorConfig, SensorHandle, SensorStats, TrayClient, TrayHandler,
+    BlockSelector, CanarySpec, Platform, SensorConfig, SensorHandle, SensorStats, TrayClient,
+    TrayHandler,
 };
 use sha2::Digest as _;
 use std::collections::BTreeMap;
@@ -62,6 +63,17 @@ pub struct SimPlatform {
     shared: Arc<Shared>,
     actions: Mutex<Vec<ActionOutcome>>,
     qid: AtomicU64,
+    /// Network blocks in effect (in memory): id, scoped image, description.
+    blocks: Mutex<Vec<SimBlock>>,
+    /// Quarantine id → original path (restore lifts that image's blocks).
+    quarantined: Mutex<BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone)]
+struct SimBlock {
+    id: String,
+    image: Option<String>,
+    description: String,
 }
 
 impl SimPlatform {
@@ -73,6 +85,8 @@ impl SimPlatform {
             shared: Arc::default(),
             actions: Mutex::default(),
             qid: AtomicU64::new(0),
+            blocks: Mutex::default(),
+            quarantined: Mutex::default(),
         }
     }
 
@@ -91,6 +105,28 @@ impl SimPlatform {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// Block ids currently in effect (in creation order).
+    pub fn active_blocks(&self) -> Vec<String> {
+        self.blocks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|b| b.id.clone())
+            .collect()
+    }
+
+    fn lift(&self, sel: &BlockSelector) -> Vec<String> {
+        let mut g = self.blocks.lock().unwrap_or_else(|e| e.into_inner());
+        let (lifted, keep): (Vec<SimBlock>, Vec<SimBlock>) = g
+            .drain(..)
+            .partition(|b| sel.matches(&b.id, b.image.as_deref()));
+        *g = keep;
+        lifted
+            .into_iter()
+            .map(|b| format!("{} (block {})", b.description, b.id))
+            .collect()
     }
 
     fn log_action(&self, o: &ActionOutcome) {
@@ -431,12 +467,52 @@ impl Platform for SimPlatform {
             ResponseAction::QuarantineFile { path, .. } => {
                 let id = self.qid.fetch_add(1, Ordering::Relaxed) + 1;
                 artifact = Some(format!("q-{id:04}"));
+                self.quarantined
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(format!("q-{id:04}"), path.clone());
                 format!("simulated: quarantined {path} as q-{id:04}")
+            }
+            ResponseAction::RestoreFile { quarantine_id } => {
+                let path = self
+                    .quarantined
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(quarantine_id);
+                let mut d = format!("simulated: restored {quarantine_id}");
+                if let Some(p) = path {
+                    let lifted = self.lift(&BlockSelector::new(Some(&p), None));
+                    if !lifted.is_empty() {
+                        d.push_str(&format!(
+                            "; lifted {} network block(s) for {p}",
+                            lifted.len()
+                        ));
+                    }
+                }
+                d
             }
             ResponseAction::BlockDestination { .. } | ResponseAction::BlockImageNetwork { .. } => {
                 let id = self.qid.fetch_add(1, Ordering::Relaxed) + 1;
+                let image = match action {
+                    ResponseAction::BlockDestination { image, .. } => image.clone(),
+                    ResponseAction::BlockImageNetwork { image, .. } => Some(image.clone()),
+                    _ => None,
+                };
+                let description = format!("simulated: {}", action.name());
+                self.blocks
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(SimBlock {
+                        id: format!("blk-{id:04}"),
+                        image,
+                        description: description.clone(),
+                    });
                 artifact = Some(format!("blk-{id:04}"));
-                format!("simulated: {} (block blk-{id:04})", action.name())
+                format!("{description} (block blk-{id:04})")
+            }
+            ResponseAction::UnblockNetwork { .. } => {
+                let sel = BlockSelector::from_action(action).unwrap_or_default();
+                sel.outcome_detail(&self.lift(&sel))
             }
             ResponseAction::CollectTriage => {
                 let p = self.opts.state_dir.join("triage").join("sim-triage.zip");
@@ -490,6 +566,10 @@ impl Platform for SimPlatform {
 
     fn is_isolated(&self) -> bool {
         self.isolated.load(Ordering::Relaxed)
+    }
+
+    async fn lift_network_blocks(&self, sel: &BlockSelector) -> Result<Vec<String>, String> {
+        Ok(self.lift(sel))
     }
 
     fn isolated_since(&self) -> Option<i64> {
@@ -750,5 +830,129 @@ mod tests {
             sim.map_path(r"C:\..\..\etc\passwd"),
             dir.path().join("sim-fs/C/etc/passwd")
         );
+    }
+}
+
+#[cfg(test)]
+mod unblock_tests {
+    use super::*;
+
+    fn sim(dir: &Path) -> SimPlatform {
+        SimPlatform::new(SimOptions {
+            state_dir: dir.into(),
+            replay: None,
+            speed: 1.0,
+            hostname: "H".into(),
+            user: SIM_USER.into(),
+        })
+    }
+
+    #[tokio::test]
+    async fn unblock_network_lifts_matching_blocks_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let sim = sim(dir.path());
+        let crm = r"C:\Apps\CRM.exe";
+        let img = |i: &str| ResponseAction::BlockImageNetwork {
+            image: i.into(),
+            ttl_secs: None,
+        };
+        let b1 = sim.execute(&img(crm)).await.artifact.unwrap();
+        let b2 = sim
+            .execute(&ResponseAction::BlockDestination {
+                ip: "203.0.113.7".into(),
+                port: None,
+                image: Some(r"c:\apps\crm.exe".into()),
+                ttl_secs: None,
+                ioc_id: None,
+            })
+            .await
+            .artifact
+            .unwrap();
+        let b3 = sim
+            .execute(&img(r"C:\Users\a\Downloads\evil.exe"))
+            .await
+            .artifact
+            .unwrap();
+        sim.execute(&ResponseAction::IsolateHost { allow_ips: vec![] })
+            .await;
+        assert_eq!(sim.active_blocks(), [b1, b2, b3.clone()]);
+
+        // By image (case-insensitive): both CRM blocks, not evil.exe.
+        let o = sim
+            .execute(&ResponseAction::UnblockNetwork {
+                image: Some("C:/apps/crm.EXE".into()),
+                block_id: None,
+            })
+            .await;
+        assert!(o.ok);
+        assert!(
+            o.detail.starts_with("lifted 2 network block(s)"),
+            "{}",
+            o.detail
+        );
+        assert_eq!(sim.active_blocks(), [b3]);
+
+        // Nothing left to match: still success.
+        let o = sim
+            .lift_network_blocks(&BlockSelector::new(Some(crm), None))
+            .await
+            .unwrap();
+        assert!(o.is_empty());
+        let o = sim
+            .execute(&ResponseAction::UnblockNetwork {
+                image: None,
+                block_id: Some("blk-nope".into()),
+            })
+            .await;
+        assert!(o.ok);
+        assert!(o.detail.starts_with("no matching block"), "{}", o.detail);
+
+        // Everything: blocks gone, isolation untouched.
+        let o = sim
+            .execute(&ResponseAction::UnblockNetwork {
+                image: None,
+                block_id: None,
+            })
+            .await;
+        assert!(o.detail.starts_with("lifted 1 network block(s)"));
+        assert!(sim.active_blocks().is_empty());
+        assert!(sim.is_isolated());
+    }
+
+    #[tokio::test]
+    async fn restore_lifts_image_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let sim = sim(dir.path());
+        let p = r"C:\Users\a\Downloads\tool.exe";
+        sim.execute(&ResponseAction::BlockImageNetwork {
+            image: p.into(),
+            ttl_secs: None,
+        })
+        .await;
+        let other = sim
+            .execute(&ResponseAction::BlockImageNetwork {
+                image: r"C:\x.exe".into(),
+                ttl_secs: None,
+            })
+            .await
+            .artifact
+            .unwrap();
+        let q = sim
+            .execute(&ResponseAction::QuarantineFile {
+                path: p.into(),
+                sha256: None,
+            })
+            .await
+            .artifact
+            .unwrap();
+        let o = sim
+            .execute(&ResponseAction::RestoreFile { quarantine_id: q })
+            .await;
+        assert!(
+            o.detail.contains("lifted 1 network block(s)"),
+            "{}",
+            o.detail
+        );
+        assert_eq!(sim.active_blocks(), [other]);
     }
 }

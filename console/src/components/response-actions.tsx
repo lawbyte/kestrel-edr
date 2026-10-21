@@ -1,12 +1,12 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Ban, Crosshair, FileArchive, Lock, LockOpen, PackageSearch, ScanSearch, ShieldPlus, Skull, type LucideIcon } from 'lucide-react'
+import { Ban, Crosshair, FileArchive, Lock, LockOpen, PackageSearch, ScanSearch, ShieldPlus, Skull, Unlink, type LucideIcon } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { toast } from 'sonner'
 import { api } from '@/api/endpoints'
 import { ApiError } from '@/api/client'
 import type { Device, ResponseAction } from '@/api/types'
 import { useAuth } from '@/lib/auth'
-import { ACTION_LABEL, actionPrivilege, describeAction } from '@/lib/labels'
+import { ACTION_LABEL, actionPrivilege, describeAction, unblockFor } from '@/lib/labels'
 import { safeDisplay } from '@/lib/format'
 import { Button } from './ui/button'
 import { Dialog, DialogContent } from './ui/dialog'
@@ -27,10 +27,26 @@ const ICONS: Partial<Record<ResponseAction['type'], LucideIcon>> = {
   release_host: LockOpen,
   block_destination: Ban,
   block_image_network: Ban,
+  unblock_network: Unlink,
   collect_triage: PackageSearch,
   scan: ScanSearch,
   apply_hardening: ShieldPlus,
   suspend_process: Crosshair,
+}
+
+/**
+ * Confirm spec for lifting a succeeded block action (false positive on a
+ * business app), or null when the action is not a block or did not succeed.
+ */
+export function liftBlockSpec(a: ResponseAction, status: string, artifact?: string | null): ActionSpec | null {
+  if (status !== 'succeeded') return null
+  const action = unblockFor(a, artifact)
+  if (!action) return null
+  const what = action.image ? `every Kestrel network block for ${safeDisplay(action.image)}` : `network block ${safeDisplay(action.block_id ?? '')}`
+  return {
+    action,
+    impact: `Removes ${what} on the device, so the program can reach the network again. Do this only if the block was a false positive. Isolation is not affected (use Release host).`,
+  }
 }
 
 export function useIssueAction(deviceId: string, incidentId?: string) {

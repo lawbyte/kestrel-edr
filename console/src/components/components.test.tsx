@@ -6,6 +6,7 @@ import { Markdown } from './markdown'
 import { ProcessTree, buildForest } from './process-tree'
 import { DataAtRiskPanel, priorityFactors } from './incident-parts'
 import { TooltipProvider } from './ui/misc'
+import { ActionButton, liftBlockSpec } from './response-actions'
 
 vi.mock('@/lib/auth', () => ({ useAuth: () => ({ me: { user: { id: 'u' }, privileges: ['*'] }, can: () => true }) }))
 
@@ -128,5 +129,29 @@ describe('priorityFactors', () => {
   it('matches the contract formula', () => {
     const f = priorityFactors({ severity: 'critical', data_at_risk: ['browser_passwords'], rule_ids: ['ST-04'], contained: false } as never)
     expect(f.reduce((s, x) => s + x.points, 0)).toBe(115)
+  })
+})
+
+describe('Lift network block', () => {
+  const img = 'C:\\Apps\\CRM\\crm.exe'
+  it('is offered only for succeeded block actions', () => {
+    expect(liftBlockSpec({ type: 'block_image_network', image: img }, 'failed', 'b-1')).toBeNull()
+    expect(liftBlockSpec({ type: 'kill_process', pid: 1 }, 'succeeded', null)).toBeNull()
+    const spec = liftBlockSpec({ type: 'block_image_network', image: img }, 'succeeded', 'b-1')!
+    expect(spec.action).toEqual({ type: 'unblock_network', image: img, block_id: null })
+    expect(spec.impact).toContain('false positive')
+    expect(spec.impact).toContain('Isolation is not affected')
+  })
+  it('renders a button that picks the unblock action', () => {
+    const spec = liftBlockSpec({ type: 'block_destination', ip: '203.0.113.7', image: null }, 'succeeded', 'b-9')!
+    const onPick = vi.fn()
+    render(
+      <TooltipProvider>
+        <ActionButton spec={spec} label="Lift block" onPick={onPick} />
+      </TooltipProvider>,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /lift block/i }))
+    expect(onPick).toHaveBeenCalledWith(spec)
+    expect(spec.action).toEqual({ type: 'unblock_network', image: null, block_id: 'b-9' })
   })
 })

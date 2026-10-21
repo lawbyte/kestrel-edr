@@ -865,6 +865,10 @@ pub async fn action_result(
                 incidents::insert_checklist(&mut tx, inc, &incidents::release_seed(&hostname))
                     .await?;
             }
+            // Likewise lifting an image-scoped block once it is in place.
+            if let Some(img) = incidents::blocked_image(&action) {
+                incidents::insert_checklist(&mut tx, inc, &incidents::unblock_seed(img)).await?;
+            }
         }
         incidents::recompute_incident(&mut tx, inc).await?;
     }

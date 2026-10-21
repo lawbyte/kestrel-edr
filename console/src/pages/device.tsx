@@ -8,7 +8,7 @@ import type { DeviceDetail, EventKind, HardeningControl, ProcessInfo, TreeNode }
 import { ActionStatusBadge, DeviceStatusBadge, ModeBadge, ProvenanceBadges, SeverityBadge } from '@/components/badges'
 import { Card, EmptyState, ErrorState, KeyValue, LoadingRows, Mono } from '@/components/common'
 import { ProcessDetail, ProcessTree } from '@/components/process-tree'
-import { ActionButton, ConfirmActionDialog, type ActionSpec } from '@/components/response-actions'
+import { ActionButton, ConfirmActionDialog, liftBlockSpec, type ActionSpec } from '@/components/response-actions'
 import { SearchInput } from '@/components/filters'
 import { CopyButton } from '@/components/copy-button'
 import { Button } from '@/components/ui/button'
@@ -234,7 +234,7 @@ function DeviceView({ d }: { d: DeviceDetail }) {
             </div>
           </TabsContent>
           <TabsContent value="actions" className="pt-4">
-            <DeviceActions deviceId={dev.id} />
+            <DeviceActions deviceId={dev.id} onPick={setAction} />
           </TabsContent>
         </Tabs>
       </div>
@@ -444,7 +444,7 @@ function EffectiveSettings({ d }: { d: DeviceDetail }) {
   )
 }
 
-function DeviceActions({ deviceId }: { deviceId: string }) {
+function DeviceActions({ deviceId, onPick }: { deviceId: string; onPick: (s: ActionSpec) => void }) {
   const a = useQuery({ queryKey: qk.actions({ device_id: deviceId }), queryFn: () => api.actions({ device_id: deviceId }) })
   if (a.error) return <ErrorState error={a.error} onRetry={() => a.refetch()} />
   if (a.isPending) return <LoadingRows rows={4} />
@@ -460,6 +460,10 @@ function DeviceActions({ deviceId }: { deviceId: string }) {
               {r.result_detail ? ` · ${r.result_detail}` : ''}
             </p>
           </div>
+          {(() => {
+            const lift = liftBlockSpec(r.action, r.status, r.artifact)
+            return lift ? <ActionButton spec={lift} label="Lift block" onPick={onPick} /> : null
+          })()}
           <ActionStatusBadge status={r.status} />
         </li>
       ))}

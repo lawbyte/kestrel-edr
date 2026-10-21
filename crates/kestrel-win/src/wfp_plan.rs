@@ -332,6 +332,34 @@ pub struct BlockRecord {
     /// blocks are ever lifted by [`WfpState::take_lifted_ioc_blocks`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ioc_id: Option<String>,
+    /// Executable the block is scoped to (`BlockImageNetwork`, image-scoped
+    /// `BlockDestination`); used by `UnblockNetwork { image }`. Records
+    /// written before this field existed fall back to the description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+}
+
+/// Description prefix of `BlockImageNetwork` records.
+pub const IMAGE_BLOCK_DESC: &str = "blocked all network traffic for ";
+/// Description prefix of `BlockDestination` records.
+pub const DEST_BLOCK_DESC: &str = "blocked outbound ";
+
+impl BlockRecord {
+    /// Executable this block is scoped to: the recorded `image`, or (old
+    /// state files) the image named in the description the agent wrote.
+    pub fn scoped_image(&self) -> Option<String> {
+        if let Some(i) = self.image.as_ref().filter(|i| !i.trim().is_empty()) {
+            return Some(i.clone());
+        }
+        let d = self.description.as_str();
+        if let Some(rest) = d.strip_prefix(IMAGE_BLOCK_DESC) {
+            return Some(rest.to_string()).filter(|r| !r.is_empty());
+        }
+        // `blocked outbound <addr>[:port] for <image>` (addr has no spaces).
+        let rest = d.strip_prefix(DEST_BLOCK_DESC)?;
+        let (_, img) = rest.split_once(" for ")?;
+        Some(img.to_string()).filter(|r| !r.is_empty())
+    }
 }
 
 /// Persisted WFP state (`<state>\wfp_state.json`). Filters are persistent in
@@ -459,6 +487,21 @@ impl WfpState {
             .blocks
             .drain(..)
             .partition(|b| b.ioc_id.as_ref().is_some_and(|id| !block_iocs.contains(id)));
+        self.blocks = keep;
+        lifted
+    }
+
+    /// `UnblockNetwork`: remove and return the blocks `sel` matches. Only
+    /// `blocks` are ever considered: isolation filters and server permits
+    /// are separate state and never returned.
+    pub fn take_matching_blocks(
+        &mut self,
+        sel: &kestrel_platform::BlockSelector,
+    ) -> Vec<BlockRecord> {
+        let (lifted, keep): (Vec<_>, Vec<_>) = self
+            .blocks
+            .drain(..)
+            .partition(|b| sel.matches(&b.id, b.scoped_image().as_deref()));
         self.blocks = keep;
         lifted
     }
@@ -786,6 +829,7 @@ mod tests {
             expires_at: Some(1_000),
             created_at: 0,
             ioc_id: ioc.map(str::to_string),
+            image: None,
         };
         let mut s = WfpState {
             blocks: vec![
@@ -826,6 +870,83 @@ mod tests {
     }
 
     #[test]
+    fn unblock_selects_blocks_never_isolation() {
+        use kestrel_platform::BlockSelector;
+        let rec = |id: &str, desc: &str, image: Option<&str>| BlockRecord {
+            id: id.into(),
+            description: desc.into(),
+            filter_keys: vec![format!("k-{id}")],
+            expires_at: None,
+            created_at: 0,
+            ioc_id: None,
+            image: image.map(str::to_string),
+        };
+        let fresh = || WfpState {
+            isolated: true,
+            isolation_filters: vec!["iso-1".into(), "iso-2".into()],
+            server_permit_filters: vec!["perm-1".into()],
+            blocks: vec![
+                rec(
+                    "img",
+                    r"blocked all network traffic for C:\Apps\CRM.exe",
+                    Some(r"C:\Apps\CRM.exe"),
+                ),
+                // Old state file: image only in the description.
+                rec(
+                    "old-img",
+                    r"blocked all network traffic for c:\apps\crm.exe",
+                    None,
+                ),
+                rec(
+                    "dest-img",
+                    r"blocked outbound 203.0.113.7:443 for C:\Apps\CRM.exe",
+                    None,
+                ),
+                rec("dest", "blocked outbound 203.0.113.8", None),
+                rec(
+                    "other",
+                    r"blocked all network traffic for C:\x\evil.exe",
+                    None,
+                ),
+            ],
+            ..Default::default()
+        };
+        let ids = |v: &[BlockRecord]| v.iter().map(|b| b.id.clone()).collect::<Vec<_>>();
+
+        let mut s = fresh();
+        let lifted = s.take_matching_blocks(&BlockSelector::new(Some("C:/apps/crm.EXE"), None));
+        assert_eq!(ids(&lifted), ["img", "old-img", "dest-img"]);
+        assert_eq!(ids(&s.blocks), ["dest", "other"]);
+        assert!(s
+            .take_matching_blocks(&BlockSelector::new(Some(r"C:\Apps\CRM.exe"), None))
+            .is_empty());
+
+        let mut s = fresh();
+        let lifted = s.take_matching_blocks(&BlockSelector::new(None, Some("dest")));
+        assert_eq!(ids(&lifted), ["dest"]);
+        assert_eq!(s.blocks.len(), 4);
+
+        // Everything: every block, but isolation and server permits untouched.
+        let mut s = fresh();
+        let lifted = s.take_matching_blocks(&BlockSelector::default());
+        assert_eq!(lifted.len(), 5);
+        assert!(s.blocks.is_empty());
+        assert!(s.isolated);
+        assert_eq!(s.isolation_filters, ["iso-1", "iso-2"]);
+        assert_eq!(s.server_permit_filters, ["perm-1"]);
+
+        assert_eq!(
+            rec("x", "blocked outbound 1.2.3.4", None).scoped_image(),
+            None
+        );
+        // Old state files without `image` still load.
+        let old: BlockRecord =
+            serde_json::from_str(r#"{"id":"x","description":"","filter_keys":[],"created_at":0}"#)
+                .unwrap();
+        assert_eq!(old.image, None);
+    }
+
+    #[test]
     fn state_ttl() {
         let mut s = WfpState::default();
         s.blocks.push(BlockRecord {
@@ -835,6 +956,7 @@ mod tests {
             expires_at: Some(100),
             created_at: 0,
             ioc_id: None,
+            image: None,
         });
         s.blocks.push(BlockRecord {
             id: "b".into(),
@@ -843,6 +965,7 @@ mod tests {
             expires_at: None,
             created_at: 0,
             ioc_id: None,
+            image: None,
         });
         s.isolation_filters = vec!["k3".into()];
         assert_eq!(s.all_keys().len(), 3);

@@ -112,6 +112,14 @@ pub fn describe_action(a: &ResponseAction) -> String {
         ResponseAction::BlockImageNetwork { image, .. } => {
             format!("blocked network access for {}", p(image))
         }
+        ResponseAction::UnblockNetwork { image, block_id } => match (image, block_id) {
+            (None, None) => "lifted all Kestrel network blocks".into(),
+            (Some(i), None) => format!("lifted network blocks for {}", p(i)),
+            (None, Some(b)) => format!("lifted network block {}", plain(b, 128)),
+            (Some(i), Some(b)) => {
+                format!("lifted network block {} for {}", plain(b, 128), p(i))
+            }
+        },
         ResponseAction::IsolateHost { .. } => "isolated the host from the network".into(),
         ResponseAction::ReleaseHost => "released host isolation".into(),
         ResponseAction::ApplyHardening => "re-applied the hardening pack".into(),
@@ -1153,6 +1161,17 @@ pub fn checklist_for(alert: &Alert, hostname: &str, user: Option<&str>) -> Vec<C
     if isolated {
         out.push(release_seed(hostname));
     }
+    // Same for lifting an image-scoped network block (ST-02/07/16 blocks are
+    // permanent; a false positive on a business app must be undoable).
+    let mut unblock_keys = HashSet::new();
+    for o in alert.actions.iter().filter(|o| o.ok) {
+        if let Some(img) = blocked_image(&o.action) {
+            let seed = unblock_seed(img);
+            if unblock_keys.insert(seed.key.clone()) {
+                out.push(seed);
+            }
+        }
+    }
     let who = user.map(|u| format!(" for {u}")).unwrap_or_default();
     for c in &alert.data_at_risk {
         out.push(ChecklistSeed {
@@ -1185,6 +1204,38 @@ pub fn release_seed(hostname: &str) -> ChecklistSeed {
         done: false,
         key: "approve:release".into(),
         action: Some(ResponseAction::ReleaseHost),
+    }
+}
+
+/// Executable a successful block action is scoped to (`BlockImageNetwork`,
+/// image-scoped `BlockDestination`), if any.
+pub fn blocked_image(a: &ResponseAction) -> Option<&str> {
+    match a {
+        ResponseAction::BlockImageNetwork { image, .. } => Some(image.as_str()),
+        ResponseAction::BlockDestination {
+            image: Some(image), ..
+        } => Some(image.as_str()),
+        _ => None,
+    }
+    .filter(|i| !i.trim().is_empty())
+}
+
+/// One-click undo of a network block scoped to `image` (a false positive on
+/// a business app). Offered only once a block for that image succeeded.
+pub fn unblock_seed(image: &str) -> ChecklistSeed {
+    let action = ResponseAction::UnblockNetwork {
+        image: Some(image.to_string()),
+        block_id: None,
+    };
+    ChecklistSeed {
+        kind: "approve",
+        text: format!(
+            "Lift network block for {} (only if it was a false positive)",
+            plain(image, 300)
+        ),
+        done: false,
+        key: format!("approve:{}", action_key(&action)),
+        action: Some(action),
     }
 }
 
@@ -1233,6 +1284,14 @@ fn action_key(a: &ResponseAction) -> String {
         ResponseAction::BlockDestination { ip, .. } => format!("block:{ip}"),
         ResponseAction::IsolateHost { .. } => "isolate".into(),
         ResponseAction::ReleaseHost => "release".into(),
+        ResponseAction::UnblockNetwork { image, block_id } => match (image, block_id) {
+            (None, None) => "unblock:all".into(),
+            (Some(i), None) => format!("unblock:{}", i.trim().to_lowercase().replace('/', "\\")),
+            _ => format!(
+                "unblock:{}",
+                crate::crypto::sha256_hex(serde_json::to_vec(a).unwrap_or_default())
+            ),
+        },
         other => format!(
             "{}:{}",
             other.name(),
@@ -1474,6 +1533,14 @@ pub async fn supersede_approvals(
         ResponseAction::KillProcess { .. } => {
             ("starts_with(dedupe_key, $2)", "approve:kill:".to_string())
         }
+        // Lifting every block closes every "lift block" approval.
+        ResponseAction::UnblockNetwork {
+            image: None,
+            block_id: None,
+        } => (
+            "starts_with(dedupe_key, $2)",
+            "approve:unblock:".to_string(),
+        ),
         other => ("dedupe_key = $2", format!("approve:{}", action_key(other))),
     };
     sqlx::query(&format!(
@@ -1887,6 +1954,92 @@ mod tests {
         let items = checklist_for(&iso, "FIN-LAPTOP-07", Some("alice"));
         assert!(items.iter().any(|i| i.key == "approve:release"));
         assert!(!items.iter().any(|i| i.key == "approve:isolate"));
+    }
+
+    #[test]
+    fn lift_block_offered_only_after_image_block() {
+        let a = sample_alert("ST-02", Severity::High);
+        let items = checklist_for(&a, "FIN-LAPTOP-07", None);
+        assert!(!items.iter().any(|i| i.key.starts_with("approve:unblock:")));
+        let mut blocked = a.clone();
+        let img = r"C:\Apps\CRM\crm.exe";
+        for action in [
+            ResponseAction::BlockImageNetwork {
+                image: img.into(),
+                ttl_secs: None,
+            },
+            // Same image scoped destination block: one item, not two.
+            ResponseAction::BlockDestination {
+                ip: "203.0.113.7".into(),
+                port: None,
+                image: Some(img.to_uppercase()),
+                ttl_secs: None,
+                ioc_id: None,
+            },
+        ] {
+            blocked.actions.push(ActionOutcome {
+                action,
+                ok: true,
+                detail: String::new(),
+                ts: 1,
+                artifact: Some("blk-1".into()),
+            });
+        }
+        // A failed block offers nothing.
+        blocked.actions.push(ActionOutcome {
+            action: ResponseAction::BlockImageNetwork {
+                image: r"C:\other.exe".into(),
+                ttl_secs: None,
+            },
+            ok: false,
+            detail: "failed".into(),
+            ts: 1,
+            artifact: None,
+        });
+        let items = checklist_for(&blocked, "FIN-LAPTOP-07", None);
+        let lift: Vec<_> = items
+            .iter()
+            .filter(|i| i.key.starts_with("approve:unblock:"))
+            .collect();
+        assert_eq!(
+            lift.len(),
+            1,
+            "{:?}",
+            lift.iter().map(|i| &i.key).collect::<Vec<_>>()
+        );
+        assert_eq!(lift[0].kind, "approve");
+        assert!(lift[0]
+            .text
+            .starts_with(r"Lift network block for C:\Apps\CRM\crm.exe"));
+        assert_eq!(
+            lift[0].action,
+            Some(ResponseAction::UnblockNetwork {
+                image: Some(img.into()),
+                block_id: None
+            })
+        );
+        // The succeeded unblock closes exactly that approval (same key).
+        assert_eq!(
+            lift[0].key,
+            format!(
+                "approve:{}",
+                action_key(&ResponseAction::UnblockNetwork {
+                    image: Some(r"c:/apps/crm/CRM.EXE".into()),
+                    block_id: None
+                })
+            )
+        );
+        assert_eq!(
+            describe_action(&ResponseAction::UnblockNetwork {
+                image: None,
+                block_id: None
+            }),
+            "lifted all Kestrel network blocks"
+        );
+        assert_eq!(
+            describe_action(lift[0].action.as_ref().unwrap()),
+            r"lifted network blocks for C:\Apps\CRM\crm.exe"
+        );
     }
 
     #[test]

@@ -36,7 +36,13 @@ pub fn sample_status(state: ProtectionState) -> TrayStatus {
         state,
         agent_version: "0.1.0".into(),
         server_connected: !matches!(state, ProtectionState::Offline),
-        last_policy_sync: Some(now - if matches!(state, ProtectionState::Offline) { 26 * 60 * MIN } else { 4 * MIN }),
+        last_policy_sync: Some(
+            now - if matches!(state, ProtectionState::Offline) {
+                26 * 60 * MIN
+            } else {
+                4 * MIN
+            },
+        ),
         policy_name: "Staff laptops".into(),
         org_name: "Nusantara Logistik".into(),
         it_contact: ItContact {
@@ -128,6 +134,12 @@ fn demo_push() -> ActivityItem {
     }
 }
 
+impl Default for MockAgent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockAgent {
     pub fn new() -> Self {
         let state = match std::env::var("KESTREL_TRAY_MOCK_STATE").as_deref() {
@@ -139,7 +151,11 @@ impl MockAgent {
         };
         let (push, _) = broadcast::channel(32);
         MockAgent {
-            inner: Mutex::new(Inner { status: sample_status(state), items: sample_activity(), demo_pushed: false }),
+            inner: Mutex::new(Inner {
+                status: sample_status(state),
+                items: sample_activity(),
+                demo_pushed: false,
+            }),
             push,
         }
     }
@@ -160,7 +176,14 @@ impl MockAgent {
         while let Some(line) = lines.next_line().await? {
             let resp = match serde_json::from_str::<TrayRequest>(&line) {
                 Ok(TrayRequest::Subscribe) => {
-                    write(&mut w, &TrayResponse::Ack { ok: true, message: "subscribed".into() }).await?;
+                    write(
+                        &mut w,
+                        &TrayResponse::Ack {
+                            ok: true,
+                            message: "subscribed".into(),
+                        },
+                    )
+                    .await?;
                     self.schedule_demo_push();
                     let mut rx = self.push.subscribe();
                     // From here on this connection only carries pushes.
@@ -173,7 +196,9 @@ impl MockAgent {
                     }
                 }
                 Ok(req) => self.handle(req).await,
-                Err(e) => TrayResponse::Error { message: format!("bad request: {e}") },
+                Err(e) => TrayResponse::Error {
+                    message: format!("bad request: {e}"),
+                },
             };
             write(&mut w, &resp).await?;
         }
@@ -208,16 +233,26 @@ impl MockAgent {
             TrayRequest::Status => TrayResponse::Status(self.inner.lock().unwrap().status.clone()),
             TrayRequest::Activity { limit } => {
                 let g = self.inner.lock().unwrap();
-                TrayResponse::Activity { items: g.items.iter().take(limit as usize).cloned().collect() }
+                TrayResponse::Activity {
+                    items: g.items.iter().take(limit as usize).cloned().collect(),
+                }
             }
             TrayRequest::QuickCheck => {
                 tokio::time::sleep(Duration::from_millis(2600)).await;
                 self.inner.lock().unwrap().status.last_check = Some(now_ms());
-                TrayResponse::Ack { ok: true, message: "Checked 147 running apps. Nothing needs your attention.".into() }
+                TrayResponse::Ack {
+                    ok: true,
+                    message: "Checked 147 running apps. Nothing needs your attention.".into(),
+                }
             }
-            TrayRequest::RequestReview { alert_id, justification } => {
+            TrayRequest::RequestReview {
+                alert_id,
+                justification,
+            } => {
                 if justification.trim().is_empty() {
-                    return TrayResponse::Error { message: "justification is required".into() };
+                    return TrayResponse::Error {
+                        message: "justification is required".into(),
+                    };
                 }
                 let updated = {
                     let mut g = self.inner.lock().unwrap();
@@ -232,9 +267,14 @@ impl MockAgent {
                 match updated {
                     Some(item) => {
                         let _ = self.push.send(TrayResponse::Notification(item));
-                        TrayResponse::Ack { ok: true, message: "Your request was sent to IT.".into() }
+                        TrayResponse::Ack {
+                            ok: true,
+                            message: "Your request was sent to IT.".into(),
+                        }
                     }
-                    None => TrayResponse::Error { message: "unknown alert".into() },
+                    None => TrayResponse::Error {
+                        message: "unknown alert".into(),
+                    },
                 }
             }
             TrayRequest::Subscribe => unreachable!("handled in serve"),
@@ -242,7 +282,10 @@ impl MockAgent {
     }
 }
 
-async fn write<W: tokio::io::AsyncWrite + Unpin>(w: &mut W, msg: &TrayResponse) -> std::io::Result<()> {
+async fn write<W: tokio::io::AsyncWrite + Unpin>(
+    w: &mut W,
+    msg: &TrayResponse,
+) -> std::io::Result<()> {
     let mut line = serde_json::to_vec(msg).expect("serialisable");
     line.push(b'\n');
     w.write_all(&line).await?;

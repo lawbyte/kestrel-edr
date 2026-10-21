@@ -8,7 +8,8 @@ use kestrel_common::{
 };
 use kestrel_detect::HostContext;
 use kestrel_platform::{
-    ActionOrigin, Audience, LateEnrichment, Platform, SensorConfig, SensorHandle, TrayPush,
+    ActionOrigin, Audience, BlockSelector, LateEnrichment, Platform, SensorConfig, SensorHandle,
+    TrayPush,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -249,6 +250,41 @@ impl Core {
                     ok: false,
                     detail: "refused: target is the Kestrel agent".into(),
                     ts: now,
+                    artifact: None,
+                };
+            }
+            // Lifting blocks is an analyst decision: the engine never
+            // proposes it, and a policy/engine bug must not undo containment.
+            ResponseAction::UnblockNetwork { .. } if origin == ActionOrigin::Engine => {
+                return ActionOutcome {
+                    action: action.clone(),
+                    ok: false,
+                    detail: "refused: unblock_network is an analyst action".into(),
+                    ts: now,
+                    artifact: None,
+                };
+            }
+            ResponseAction::UnblockNetwork { .. } => {
+                let sel = BlockSelector::from_action(action).unwrap_or_default();
+                self.stats.actions.fetch_add(1, Ordering::Relaxed);
+                let r = tokio::time::timeout(
+                    self.tuning.action_timeout,
+                    self.platform.lift_network_blocks(&sel),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    Err(format!("timed out after {:?}", self.tuning.action_timeout))
+                });
+                let (ok, detail) = match r {
+                    Ok(lifted) => (true, sel.outcome_detail(&lifted)),
+                    Err(e) => (false, e),
+                };
+                tracing::info!(ok, "unblock_network: {detail}");
+                return ActionOutcome {
+                    action: action.clone(),
+                    ok,
+                    detail,
+                    ts: kestrel_common::now_ms(),
                     artifact: None,
                 };
             }

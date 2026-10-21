@@ -302,6 +302,12 @@ export type ResponseAction =
       ioc_id?: string | null
     }
   | { type: 'block_image_network'; image: string; ttl_secs?: number | null }
+  /**
+   * Lift Kestrel network blocks (never isolation; use release_host).
+   * `image` = every block scoped to that executable (case-insensitive full path);
+   * `block_id` = one block (the block action's `artifact`); neither = every block.
+   */
+  | { type: 'unblock_network'; image?: string | null; block_id?: string | null }
   | { type: 'isolate_host'; allow_ips?: string[] }
   | { type: 'release_host' }
   | { type: 'apply_hardening' }

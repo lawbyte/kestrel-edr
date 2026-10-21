@@ -17,7 +17,9 @@ use std::time::{Duration, Instant};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow, WindowEvent};
+use tauri::{
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow, WindowEvent,
+};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
@@ -97,7 +99,11 @@ fn tray_tooltip(s: Option<&TrayStatus>) -> String {
                 ProtectionState::Degraded => "Protection partly working",
                 ProtectionState::Offline => "Protected, not connected to IT",
             };
-            let org = if st.org_name.is_empty() { String::new() } else { format!("\n{}", st.org_name) };
+            let org = if st.org_name.is_empty() {
+                String::new()
+            } else {
+                format!("\n{}", st.org_name)
+            };
             // Windows truncates tray tooltips at 127 chars.
             format!("Kestrel: {label}{org}").chars().take(127).collect()
         }
@@ -161,7 +167,9 @@ async fn get_status(app: AppHandle) -> Result<TrayStatus, ClientError> {
             record_status(&app, &s);
             Ok(s)
         }
-        Ok(other) => Err(ClientError::Protocol(format!("unexpected response: {other:?}"))),
+        Ok(other) => Err(ClientError::Protocol(format!(
+            "unexpected response: {other:?}"
+        ))),
         Err(e) => {
             note_err(&app, &e);
             Err(e)
@@ -170,12 +178,20 @@ async fn get_status(app: AppHandle) -> Result<TrayStatus, ClientError> {
 }
 
 #[tauri::command]
-async fn get_activity(app: AppHandle, limit: Option<u32>) -> Result<Vec<ActivityItem>, ClientError> {
+async fn get_activity(
+    app: AppHandle,
+    limit: Option<u32>,
+) -> Result<Vec<ActivityItem>, ClientError> {
     let client = state(&app).client.clone();
     let limit = limit.unwrap_or(50).clamp(1, 200);
-    match client.request(&TrayRequest::Activity { limit }, REQ_TIMEOUT).await {
+    match client
+        .request(&TrayRequest::Activity { limit }, REQ_TIMEOUT)
+        .await
+    {
         Ok(TrayResponse::Activity { items }) => Ok(items),
-        Ok(other) => Err(ClientError::Protocol(format!("unexpected response: {other:?}"))),
+        Ok(other) => Err(ClientError::Protocol(format!(
+            "unexpected response: {other:?}"
+        ))),
         Err(e) => {
             note_err(&app, &e);
             Err(e)
@@ -186,7 +202,9 @@ async fn get_activity(app: AppHandle, limit: Option<u32>) -> Result<Vec<Activity
 #[tauri::command]
 async fn quick_check(app: AppHandle) -> Result<Ack, ClientError> {
     let client = state(&app).client.clone();
-    let res = client.request(&TrayRequest::QuickCheck, QUICK_CHECK_TIMEOUT).await;
+    let res = client
+        .request(&TrayRequest::QuickCheck, QUICK_CHECK_TIMEOUT)
+        .await;
     // Refresh status (last_check / state may have changed) in the background.
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -194,7 +212,9 @@ async fn quick_check(app: AppHandle) -> Result<Ack, ClientError> {
     });
     match res {
         Ok(TrayResponse::Ack { ok, message }) => Ok(Ack { ok, message }),
-        Ok(other) => Err(ClientError::Protocol(format!("unexpected response: {other:?}"))),
+        Ok(other) => Err(ClientError::Protocol(format!(
+            "unexpected response: {other:?}"
+        ))),
         Err(e) => {
             note_err(&app, &e);
             Err(e)
@@ -203,8 +223,13 @@ async fn quick_check(app: AppHandle) -> Result<Ack, ClientError> {
 }
 
 #[tauri::command]
-async fn request_review(app: AppHandle, alert_id: String, justification: String) -> Result<Ack, ClientError> {
-    let alert_id = uuid::Uuid::parse_str(&alert_id).map_err(|e| ClientError::Protocol(e.to_string()))?;
+async fn request_review(
+    app: AppHandle,
+    alert_id: String,
+    justification: String,
+) -> Result<Ack, ClientError> {
+    let alert_id =
+        uuid::Uuid::parse_str(&alert_id).map_err(|e| ClientError::Protocol(e.to_string()))?;
     let justification = justification.trim().to_string();
     if justification.is_empty() {
         return Err(ClientError::Protocol("justification is required".into()));
@@ -212,9 +237,20 @@ async fn request_review(app: AppHandle, alert_id: String, justification: String)
     // Keep it bounded; the console shows it to an analyst.
     let justification: String = justification.chars().take(2000).collect();
     let client = state(&app).client.clone();
-    match client.request(&TrayRequest::RequestReview { alert_id, justification }, REQ_TIMEOUT).await {
+    match client
+        .request(
+            &TrayRequest::RequestReview {
+                alert_id,
+                justification,
+            },
+            REQ_TIMEOUT,
+        )
+        .await
+    {
         Ok(TrayResponse::Ack { ok, message }) => Ok(Ack { ok, message }),
-        Ok(other) => Err(ClientError::Protocol(format!("unexpected response: {other:?}"))),
+        Ok(other) => Err(ClientError::Protocol(format!(
+            "unexpected response: {other:?}"
+        ))),
         Err(e) => {
             note_err(&app, &e);
             Err(e)
@@ -229,18 +265,26 @@ fn open_link(app: AppHandle, url: String) -> Result<(), String> {
     if !is_safe_link(&url) {
         return Err("link type not allowed".into());
     }
-    app.opener().open_url(url, None::<String>).map_err(|e| e.to_string())
+    app.opener()
+        .open_url(url, None::<String>)
+        .map_err(|e| e.to_string())
 }
 
 fn is_safe_link(url: &str) -> bool {
     let u = url.trim();
-    if u.len() > 2048 || u.chars().any(|c| c.is_control() || c.is_whitespace() && c != ' ') {
+    if u.len() > 2048
+        || u.chars()
+            .any(|c| c.is_control() || c.is_whitespace() && c != ' ')
+    {
         return false;
     }
     let lower = u.to_ascii_lowercase();
     (lower.starts_with("https://") || lower.starts_with("http://")) && u.len() > 8
         || lower.starts_with("mailto:") && u.contains('@')
-        || lower.starts_with("tel:") && u[4..].chars().all(|c| c.is_ascii_digit() || "+-() ".contains(c))
+        || lower.starts_with("tel:")
+            && u[4..]
+                .chars()
+                .all(|c| c.is_ascii_digit() || "+-() ".contains(c))
 }
 
 #[tauri::command]
@@ -290,7 +334,9 @@ fn supports_mica() -> bool {
 /// Mica follows the system light/dark theme automatically (no fixed variant).
 fn apply_backdrop(app: &AppHandle, w: &WebviewWindow) {
     use tauri::window::{Effect, EffectsBuilder};
-    let ok = supports_mica() && w.set_effects(EffectsBuilder::new().effect(Effect::Mica).build()).is_ok();
+    let ok = supports_mica()
+        && w.set_effects(EffectsBuilder::new().effect(Effect::Mica).build())
+            .is_ok();
     *state(app).mica.lock().unwrap() = ok;
 }
 
@@ -321,14 +367,24 @@ fn position_flyout(app: &AppHandle, w: &WebviewWindow) {
         Some((x, y, aw, ah)) => ((x + aw / 2.0) as i32, (y + ah / 2.0) as i32),
         None => (right, bottom), // no anchor: bottom-right, where the tray usually is
     };
-    let x = if cx > (left + right) / 2 { (cx + ww / 2).min(right - margin) - ww } else { (cx - ww / 2).max(left + margin) };
+    let x = if cx > (left + right) / 2 {
+        (cx + ww / 2).min(right - margin) - ww
+    } else {
+        (cx - ww / 2).max(left + margin)
+    };
     let x = x.clamp(left + margin, (right - ww - margin).max(left + margin));
-    let y = if cy > (top + bottom) / 2 { bottom - wh - margin } else { top + margin };
+    let y = if cy > (top + bottom) / 2 {
+        bottom - wh - margin
+    } else {
+        top + margin
+    };
     let _ = w.set_position(PhysicalPosition::new(x, y));
 }
 
 fn show_main(app: &AppHandle) {
-    let Some(w) = app.get_webview_window(MAIN) else { return };
+    let Some(w) = app.get_webview_window(MAIN) else {
+        return;
+    };
     if *state(app).mode.lock().unwrap() == WindowMode::Flyout {
         position_flyout(app, &w);
     }
@@ -338,11 +394,18 @@ fn show_main(app: &AppHandle) {
 }
 
 fn toggle_main(app: &AppHandle) {
-    let Some(w) = app.get_webview_window(MAIN) else { return };
+    let Some(w) = app.get_webview_window(MAIN) else {
+        return;
+    };
     let st = state(app);
     // Clicking the tray icon steals focus first, which hides the flyout via blur;
     // treat a click within 300ms of that as "close" rather than reopening.
-    let recently_hidden = st.blur_hidden_at.lock().unwrap().map(|t| t.elapsed() < Duration::from_millis(300)).unwrap_or(false);
+    let recently_hidden = st
+        .blur_hidden_at
+        .lock()
+        .unwrap()
+        .map(|t| t.elapsed() < Duration::from_millis(300))
+        .unwrap_or(false);
     if w.is_visible().unwrap_or(false) {
         let _ = w.hide();
     } else if !recently_hidden {
@@ -378,7 +441,11 @@ async fn subscribe_once(app: &AppHandle, client: &Client) -> Result<(), ClientEr
     match tokio::time::timeout(REQ_TIMEOUT, read_response(&mut conn)).await {
         Ok(Ok(Some(TrayResponse::Ack { ok: true, .. }))) => {}
         Ok(Ok(Some(TrayResponse::Error { message }))) => return Err(ClientError::Agent(message)),
-        Ok(Ok(Some(other))) => return Err(ClientError::Protocol(format!("expected ack, got {other:?}"))),
+        Ok(Ok(Some(other))) => {
+            return Err(ClientError::Protocol(format!(
+                "expected ack, got {other:?}"
+            )))
+        }
         Ok(Ok(None)) => return Err(ClientError::Unavailable("closed during subscribe".into())),
         Ok(Err(e)) => return Err(e),
         Err(_) => return Err(ClientError::Timeout("subscribe".into())),
@@ -397,14 +464,21 @@ async fn subscribe_once(app: &AppHandle, client: &Client) -> Result<(), ClientEr
 
 fn on_push(app: &AppHandle, item: ActivityItem) {
     let _ = app.emit(EV_NOTIFICATION, item.clone());
-    let org = state(app).last_status.lock().unwrap().as_ref().map(|s| s.org_name.clone()).unwrap_or_default();
+    let org = state(app)
+        .last_status
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| s.org_name.clone())
+        .unwrap_or_default();
     let window_open = app
         .get_webview_window(MAIN)
         .map(|w| w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false))
         .unwrap_or(false);
     // Critical notices are always shown, even when the window is open. Info-level
     // items (e.g. "settings updated") only appear in Activity.
-    let show = item.severity == Severity::Critical || (!window_open && item.severity != Severity::Info);
+    let show =
+        item.severity == Severity::Critical || (!window_open && item.severity != Severity::Info);
     if show {
         let (title, body) = toast_text(&org, &item);
         if let Err(e) = app.notification().builder().title(title).body(body).show() {
@@ -419,11 +493,22 @@ fn on_push(app: &AppHandle, item: ActivityItem) {
 }
 
 fn toast_text(org: &str, item: &ActivityItem) -> (String, String) {
-    let title = if org.is_empty() { "Kestrel".to_string() } else { format!("Kestrel for {org}") };
+    let title = if org.is_empty() {
+        "Kestrel".to_string()
+    } else {
+        format!("Kestrel for {org}")
+    };
     let body = match item.review {
         Some(ReviewState::Approved) => format!("IT approved your review request. {}", item.title),
-        Some(ReviewState::Denied) => format!("IT reviewed your request and kept the block. {}", item.title),
-        _ => format!("{}. {}", item.title.trim_end_matches('.'), item.action_taken),
+        Some(ReviewState::Denied) => format!(
+            "IT reviewed your request and kept the block. {}",
+            item.title
+        ),
+        _ => format!(
+            "{}. {}",
+            item.title.trim_end_matches('.'),
+            item.action_taken
+        ),
     };
     (title, body.chars().take(250).collect())
 }
@@ -465,9 +550,18 @@ fn build_tray(app: &AppHandle) -> tauri::Result<TrayIcon> {
             _ => {}
         })
         .on_tray_icon_event(|tray, ev| {
-            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, rect, .. } = ev {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                rect,
+                ..
+            } = ev
+            {
                 let app = tray.app_handle();
-                let scale = app.get_webview_window(MAIN).and_then(|w| w.scale_factor().ok()).unwrap_or(1.0);
+                let scale = app
+                    .get_webview_window(MAIN)
+                    .and_then(|w| w.scale_factor().ok())
+                    .unwrap_or(1.0);
                 let p = rect.position.to_physical::<f64>(scale);
                 let s = rect.size.to_physical::<f64>(scale);
                 *state(app).tray_anchor.lock().unwrap() = Some((p.x, p.y, s.width, s.height));
@@ -484,7 +578,9 @@ pub fn run() {
 
     tauri::Builder::default()
         // Must be registered first so a second launch exits before doing work.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main(app)
+        }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
@@ -529,11 +625,12 @@ pub fn run() {
                     api.prevent_close();
                     let _ = window.hide();
                 }
-                WindowEvent::Focused(false) => {
-                    if *state(app).mode.lock().unwrap() == WindowMode::Flyout && window.is_visible().unwrap_or(false) {
-                        *state(app).blur_hidden_at.lock().unwrap() = Some(Instant::now());
-                        let _ = window.hide();
-                    }
+                WindowEvent::Focused(false)
+                    if *state(app).mode.lock().unwrap() == WindowMode::Flyout
+                        && window.is_visible().unwrap_or(false) =>
+                {
+                    *state(app).blur_hidden_at.lock().unwrap() = Some(Instant::now());
+                    let _ = window.hide();
                 }
                 _ => {}
             }

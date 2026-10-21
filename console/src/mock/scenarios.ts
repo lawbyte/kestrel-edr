@@ -83,7 +83,7 @@ function lumma(ctx: Ctx): IncidentDetail {
     evidence: [reads[0], dp, c2],
     auto: [
       { action: { type: 'kill_process', pid: st.pid, guid: st.guid, tree: true }, detail: 'Terminated 1 process', after: 380 },
-      { action: { type: 'block_destination', ip: '185.208.158.114', port: 443, image: null, ttl_secs: 86400 }, detail: 'WFP filter added for 24 h', after: 520 },
+      { action: { type: 'block_destination', ip: '185.208.158.114', port: 443, image: null, ttl_secs: 86400 }, detail: 'WFP filter added for 24 h', after: 520, artifact: '6c0f4e2a-91b3-4d7e-8a15-2f9c3b7d1e40' },
       { action: { type: 'quarantine_file', path: dropPath, sha256: sha }, detail: 'Moved to quarantine vault', after: 900 },
     ],
   })
@@ -145,7 +145,7 @@ function vidar(ctx: Ctx): IncidentDetail {
     evidence: ev,
     auto: [
       { action: { type: 'kill_process', pid: v.pid, guid: v.guid, tree: true }, detail: 'Terminated 1 process', after: 240 },
-      { action: { type: 'block_image_network', image: img, ttl_secs: null }, detail: 'WFP block for image', after: 300 },
+      { action: { type: 'block_image_network', image: img, ttl_secs: null }, detail: 'WFP block for image', after: 300, artifact: 'b7d2a0c5-3e8f-4a61-9c24-7f1e5d0b8a93' },
     ],
   })
   s.dns(v, 6_150, 'steamcommunity.com', ['23.199.63.179'])
@@ -158,7 +158,7 @@ function vidar(ctx: Ctx): IncidentDetail {
     assignee: AISYAH,
     contained: true,
     storyline: `\`Invoice_Oct2026.exe\` from an emailed ZIP ran from **Downloads**. It was padded to 491 MB to slip past scanners and carried a forged Adobe signature. Kestrel paused it for 5 seconds and then let it go, because nothing else had fired yet. Within **one second** it read **browser passwords and cookies**, the **Telegram** session, the **Discord** token, **FileZilla** logins and **AWS keys**. Kestrel killed it and blocked its network before it reached its Steam dead-drop. **No upload was seen.** Treat these secrets as exposed anyway.`,
-    approve: [],
+    approve: [{ text: `Lift network block for ${img} (only if it was a false positive)`, action: { type: 'unblock_network', image: img, block_id: null } }],
     manual: [{ text: 'Report the phishing email to the mail gateway and purge copies', done: true }],
     comments: [
       { author: AISYAH, dt: 35 * MIN, body: 'Matches Vidar 2.0 (Steam dead-drop, multithreaded grab). Email came from a compromised vendor mailbox; 3 other recipients did not open it.' },

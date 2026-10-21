@@ -115,6 +115,94 @@ pub enum ActionOrigin {
     Local,
 }
 
+/// Which Kestrel network blocks an `UnblockNetwork` action lifts (pure
+/// selection logic shared by every platform).
+///
+/// * `image` set: every block scoped to that executable (`BlockImageNetwork`
+///   and image-scoped `BlockDestination`), compared case-insensitively on the
+///   full path (`/` and `\` equivalent, `\\?\` prefix ignored);
+/// * `block_id` set: the one block with that id;
+/// * both set: blocks matching both; neither: every block.
+///
+/// An empty `image` / `block_id` matches nothing (never widens to "all").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BlockSelector {
+    pub image: Option<String>,
+    pub block_id: Option<String>,
+}
+
+impl BlockSelector {
+    pub fn new(image: Option<&str>, block_id: Option<&str>) -> Self {
+        BlockSelector {
+            image: image.map(str::to_string),
+            block_id: block_id.map(str::to_string),
+        }
+    }
+
+    /// Selector of an `UnblockNetwork` action (`None` for other actions).
+    pub fn from_action(a: &ResponseAction) -> Option<Self> {
+        match a {
+            ResponseAction::UnblockNetwork { image, block_id } => {
+                Some(Self::new(image.as_deref(), block_id.as_deref()))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn is_all(&self) -> bool {
+        self.image.is_none() && self.block_id.is_none()
+    }
+
+    /// Does the block with `id`, scoped to `image` (if any), match?
+    pub fn matches(&self, id: &str, image: Option<&str>) -> bool {
+        if let Some(want) = &self.block_id {
+            let want = want.trim();
+            if want.is_empty() || !want.eq_ignore_ascii_case(id.trim()) {
+                return false;
+            }
+        }
+        if let Some(want) = &self.image {
+            let want = norm_image(want);
+            match image.map(norm_image) {
+                Some(have) if !want.is_empty() && have == want => {}
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    /// Human description (`all Kestrel network blocks`, `network blocks for X`, …).
+    pub fn describe(&self) -> String {
+        match (&self.image, &self.block_id) {
+            (None, None) => "all Kestrel network blocks".into(),
+            (Some(i), None) => format!("network blocks for {i}"),
+            (None, Some(b)) => format!("network block {b}"),
+            (Some(i), Some(b)) => format!("network block {b} for {i}"),
+        }
+    }
+
+    /// `ActionOutcome.detail` of an `UnblockNetwork` that lifted `lifted`
+    /// (descriptions). Nothing matching is still a success.
+    pub fn outcome_detail(&self, lifted: &[String]) -> String {
+        if lifted.is_empty() {
+            format!("no matching block ({})", self.describe())
+        } else {
+            format!(
+                "lifted {} network block(s): {}",
+                lifted.len(),
+                lifted.join("; ")
+            )
+        }
+    }
+}
+
+/// Canonical form of an executable path for block matching.
+pub fn norm_image(p: &str) -> String {
+    let p = p.trim().replace('/', "\\");
+    let p = p.strip_prefix(r"\\?\").unwrap_or(&p);
+    p.to_lowercase()
+}
+
 /// Counters reported in heartbeats.
 #[derive(Debug, Clone, Default)]
 pub struct SensorStats {
@@ -211,6 +299,17 @@ pub trait Platform: Send + Sync {
         Vec::new()
     }
 
+    /// Lift the Kestrel network blocks (`BlockImageNetwork` /
+    /// `BlockDestination` filters) that `sel` matches, deleting their filters
+    /// and updating the persisted block state. Never touches the isolation
+    /// filters or the server permits. Returns a description of each block
+    /// lifted (empty = nothing matched); `Err` only when the block state or
+    /// the filter engine could not be used at all. Default: unsupported.
+    async fn lift_network_blocks(&self, sel: &BlockSelector) -> Result<Vec<String>, String> {
+        let _ = sel;
+        Err("lifting network blocks is not supported on this platform".into())
+    }
+
     /// User profile directories to plant canaries into.
     fn user_profiles(&self) -> Vec<String>;
     /// Plant (or refresh) canary files; returns paths successfully written.
@@ -220,4 +319,65 @@ pub trait Platform: Send + Sync {
     /// restricted DACL; simulator: a Unix socket in the state dir). Runs until
     /// the process exits.
     async fn serve_tray(&self, handler: Arc<dyn TrayHandler>) -> anyhow::Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_selector_matching() {
+        let all = BlockSelector::default();
+        assert!(all.is_all());
+        assert!(all.matches("b1", None));
+        assert!(all.matches("b2", Some(r"C:\x.exe")));
+
+        let img = BlockSelector::new(Some(r"c:/Apps/CRM.exe"), None);
+        assert!(img.matches("b1", Some(r"C:\Apps\crm.exe")));
+        assert!(img.matches("b1", Some(r"\\?\C:\APPS\CRM.EXE")));
+        assert!(!img.matches("b1", Some(r"C:\Apps\crm2.exe")));
+        // Unscoped destination blocks are not "for" an image.
+        assert!(!img.matches("b1", None));
+
+        let id = BlockSelector::new(None, Some(" b-1 "));
+        assert!(id.matches("b-1", Some(r"C:\a.exe")));
+        assert!(id.matches("B-1", None));
+        assert!(!id.matches("b-2", None));
+
+        let both = BlockSelector::new(Some(r"C:\a.exe"), Some("b-1"));
+        assert!(both.matches("b-1", Some(r"c:\A.exe")));
+        assert!(!both.matches("b-1", Some(r"C:\b.exe")));
+        assert!(!both.matches("b-2", Some(r"C:\a.exe")));
+
+        // Empty fields never widen to "everything".
+        let empty = BlockSelector::new(Some("  "), None);
+        assert!(!empty.is_all());
+        assert!(!empty.matches("b1", Some("")));
+        assert!(!BlockSelector::new(None, Some("")).matches("", None));
+    }
+
+    #[test]
+    fn selector_from_action() {
+        let a = ResponseAction::UnblockNetwork {
+            image: Some(r"C:\a.exe".into()),
+            block_id: None,
+        };
+        assert_eq!(
+            BlockSelector::from_action(&a),
+            Some(BlockSelector::new(Some(r"C:\a.exe"), None))
+        );
+        assert_eq!(
+            BlockSelector::from_action(&ResponseAction::ReleaseHost),
+            None
+        );
+        assert!(BlockSelector::default().describe().starts_with("all"));
+        let sel = BlockSelector::new(None, Some("b-9"));
+        assert_eq!(
+            sel.outcome_detail(&[]),
+            "no matching block (network block b-9)"
+        );
+        assert!(sel
+            .outcome_detail(&["x".into(), "y".into()])
+            .starts_with("lifted 2 network block(s)"));
+    }
 }

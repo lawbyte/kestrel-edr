@@ -386,6 +386,9 @@ pub fn validate_manual_action(a: &ResponseAction) -> ApiResult<()> {
                 "block_destination needs a single IP address",
             ));
         }
+        ResponseAction::UnblockNetwork { image, block_id } => {
+            validate_unblock(image.as_deref(), block_id.as_deref())?
+        }
         ResponseAction::RemoveAutorun {
             kind,
             location,
@@ -400,6 +403,54 @@ pub fn validate_manual_action(a: &ResponseAction) -> ApiResult<()> {
         _ => {}
     }
     Ok(())
+}
+
+/// `unblock_network`: `image` must be an absolute Windows path (drive or
+/// UNC, at most 1024 chars, no control characters); `block_id` a short id
+/// (at most 128 chars of `[A-Za-z0-9._-]`). Both absent = lift every block.
+pub fn validate_unblock(image: Option<&str>, block_id: Option<&str>) -> ApiResult<()> {
+    if let Some(i) = image {
+        if !is_abs_windows_path(i) {
+            return Err(ApiError::bad_request(
+                r"unblock_network image must be an absolute Windows path (e.g. C:\Program Files\App\app.exe) of at most 1024 characters",
+            ));
+        }
+    }
+    if let Some(b) = block_id {
+        if b.is_empty()
+            || b.len() > 128
+            || !b
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            return Err(ApiError::bad_request(
+                "unblock_network block_id must be 1-128 characters of letters, digits, '.', '_' or '-'",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `X:\…` / `X:/…` or a UNC path `\\server\share\…`, at most 1024
+/// characters, without leading/trailing spaces or control / bidi characters.
+pub fn is_abs_windows_path(p: &str) -> bool {
+    if p.is_empty() || p.chars().count() > 1024 || p != p.trim() {
+        return false;
+    }
+    if p.chars().any(|c| {
+        c.is_control()
+            || matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    }) {
+        return false;
+    }
+    let b = p.as_bytes();
+    let drive = b.len() > 3
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b[2] == b'\\' || b[2] == b'/');
+    let unc =
+        p.starts_with(r"\\") && p[2..].split(['\\', '/']).filter(|s| !s.is_empty()).count() >= 3;
+    drive || unc
 }
 
 /// V-H2: `remove_autorun` is limited to known autorun locations and, for
@@ -619,4 +670,40 @@ pub async fn dismiss_duplicate(
     st.publish("device", id, "updated");
     st.publish("device", b.device_id, "updated");
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn abs_windows_paths() {
+        for ok in [
+            r"C:\Program Files\CRM\crm.exe",
+            "c:/apps/crm.exe",
+            r"\\fileserver\share\tools\x.exe",
+        ] {
+            assert!(is_abs_windows_path(ok), "{ok}");
+        }
+        let long = format!(r"C:\{}", "a".repeat(1100));
+        for bad in [
+            "",
+            "crm.exe",
+            r"..\crm.exe",
+            r"C:crm.exe",
+            r"\crm.exe",
+            r"\\server",
+            r" C:\a.exe",
+            "C:\\a\u{202e}exe.txt",
+            "C:\\a\nb.exe",
+            long.as_str(),
+        ] {
+            assert!(!is_abs_windows_path(bad), "{bad:?}");
+        }
+        assert!(validate_unblock(None, None).is_ok());
+        assert!(validate_unblock(Some(r"C:\a.exe"), Some("blk-0001")).is_ok());
+        assert!(validate_unblock(None, Some(&"x".repeat(129))).is_err());
+        assert!(validate_unblock(None, Some("a;b")).is_err());
+        assert!(validate_unblock(Some("a.exe"), None).is_err());
+    }
 }

@@ -544,6 +544,13 @@ pub fn command_activity(action: &ResponseAction, o: &ActionOutcome) -> Option<Ac
             })
         }
         ResponseAction::RestoreFile { .. } => ("IT restored a quarantined file", "", Severity::Info),
+        // Only when something was actually lifted (detail of a 0-match lift
+        // starts with "no matching block").
+        ResponseAction::UnblockNetwork { .. } if !o.detail.starts_with("no matching") => (
+            "IT restored network access for an app",
+            "A network block Kestrel had placed was lifted by your IT team.",
+            Severity::Info,
+        ),
         _ => return None,
     };
     Some(ActivityItem {
@@ -647,5 +654,26 @@ mod tests {
         assert_eq!(activity_owner(&a).as_deref(), Some("s-1-5-21-1-2-3-1001"));
         a.process.user = None;
         assert_eq!(activity_owner(&a), None);
+    }
+
+    #[test]
+    fn unblock_activity_only_when_lifted() {
+        let a = ResponseAction::UnblockNetwork {
+            image: Some(r"C:\Apps\crm.exe".into()),
+            block_id: None,
+        };
+        let out = |detail: &str| ActionOutcome {
+            action: a.clone(),
+            ok: true,
+            detail: detail.into(),
+            ts: 1,
+            artifact: None,
+        };
+        let item = command_activity(&a, &out("lifted 1 network block(s): x")).unwrap();
+        assert_eq!(item.title, "IT restored network access for an app");
+        assert_eq!(item.action_taken, "unblock network");
+        assert!(
+            command_activity(&a, &out("no matching block (all Kestrel network blocks)")).is_none()
+        );
     }
 }

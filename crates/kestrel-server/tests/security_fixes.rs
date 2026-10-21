@@ -602,6 +602,38 @@ async fn api_guardrails() {
         .await;
     assert_eq!(s, 200);
 
+    // unblock_network: image must be an absolute Windows path, block_id short.
+    for bad in [
+        json!({"type": "unblock_network", "image": "crm.exe"}),
+        json!({"type": "unblock_network", "image": "..\\crm.exe"}),
+        json!({"type": "unblock_network", "image": format!("C:\\{}", "a".repeat(1100))}),
+        json!({"type": "unblock_network", "block_id": "x".repeat(129)}),
+        json!({"type": "unblock_network", "block_id": "a b"}),
+        json!({"type": "unblock_network", "block_id": ""}),
+    ] {
+        let (s, e) = ts
+            .post(
+                &format!("/api/devices/{}/actions", agent.device_id),
+                json!({ "action": bad }),
+            )
+            .await;
+        assert_eq!(s, 400, "{bad} → {e}");
+    }
+    for good in [
+        json!({"type": "unblock_network", "image": "C:\\Program Files\\CRM\\crm.exe"}),
+        json!({"type": "unblock_network", "block_id": "3f2b8c1e-0d4a-4c2b-9e57-1a2b3c4d5e6f"}),
+        json!({"type": "unblock_network"}),
+    ] {
+        let (s, e) = ts
+            .post(
+                &format!("/api/devices/{}/actions", agent.device_id),
+                json!({ "action": good, "comment": "false positive" }),
+            )
+            .await;
+        assert_eq!(s, 200, "{good} → {e}");
+        assert_eq!(e["action"]["type"], "unblock_network");
+    }
+
     // L10: exclusion guardrails.
     for body in [
         json!({"kind": "path", "value": "*", "policy_id": "default"}),

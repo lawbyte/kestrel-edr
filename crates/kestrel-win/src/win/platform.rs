@@ -17,7 +17,7 @@ use crate::wfp_plan;
 use kestrel_common::wire::OsInfo;
 use kestrel_common::*;
 use kestrel_platform::{
-    ActionOrigin, CanarySpec, Platform, SensorConfig, SensorHandle, TrayHandler,
+    ActionOrigin, BlockSelector, CanarySpec, Platform, SensorConfig, SensorHandle, TrayHandler,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::net::{IpAddr, ToSocketAddrs};
@@ -365,10 +365,30 @@ impl Inner {
                 Err(e) => (false, e.clone(), None),
             },
             ResponseAction::RestoreFile { quarantine_id } => match &self.vault {
-                Ok(v) => v.restore(quarantine_id, self.system_drive).map_or_else(
-                    |e| (false, e, None),
-                    |d| (true, d, Some(quarantine_id.clone())),
-                ),
+                Ok(v) => {
+                    let original = v.file_original_path(quarantine_id);
+                    match v.restore(quarantine_id, self.system_drive) {
+                        Err(e) => (false, e, None),
+                        Ok(mut d) => {
+                            // A restore means the file was a false positive:
+                            // lift the network blocks scoped to it too.
+                            if let Some(p) = original {
+                                let sel = BlockSelector::new(Some(&p), None);
+                                match self.wfp.lift_blocks(&sel) {
+                                    Ok(l) if l.is_empty() => {}
+                                    Ok(l) => d.push_str(&format!(
+                                        "; lifted {} network block(s) for {p}",
+                                        l.len()
+                                    )),
+                                    Err(e) => d.push_str(&format!(
+                                        "; could not lift network blocks for {p}: {e}"
+                                    )),
+                                }
+                            }
+                            (true, d, Some(quarantine_id.clone()))
+                        }
+                    }
+                }
                 Err(e) => (false, e.clone(), None),
             },
             ResponseAction::DeleteQuarantined { quarantine_id } => match &self.vault {
@@ -410,7 +430,7 @@ impl Inner {
                     .clone()
                     .filter(|t| !t.is_empty() && origin == ActionOrigin::Engine);
                 self.wfp
-                    .block_tagged(specs, what, *ttl_secs, tag)
+                    .block_tagged(specs, what, *ttl_secs, tag, image.clone())
                     .map_or_else(|e| (false, e, None), |(id, d)| (true, d, Some(id)))
             }
             ResponseAction::BlockImageNetwork { image, ttl_secs } => {
@@ -427,8 +447,9 @@ impl Inner {
                 self.wfp
                     .block(
                         specs,
-                        format!("blocked all network traffic for {image}"),
+                        format!("{}{image}", wfp_plan::IMAGE_BLOCK_DESC),
                         *ttl_secs,
+                        Some(image.clone()),
                     )
                     .map_or_else(|e| (false, e, None), |(id, d)| (true, d, Some(id)))
             }
@@ -467,6 +488,13 @@ impl Inner {
                         }
                         (true, d, None)
                     }
+                    Err(e) => (false, e, None),
+                }
+            }
+            ResponseAction::UnblockNetwork { image, block_id } => {
+                let sel = BlockSelector::new(image.as_deref(), block_id.as_deref());
+                match self.wfp.lift_blocks(&sel) {
+                    Ok(l) => (true, sel.outcome_detail(&l), None),
                     Err(e) => (false, e, None),
                 }
             }
@@ -727,6 +755,17 @@ impl Platform for WindowsPlatform {
         })
         .await
         .unwrap_or_default()
+    }
+
+    async fn lift_network_blocks(&self, sel: &BlockSelector) -> Result<Vec<String>, String> {
+        let inner = self.inner.clone();
+        let sel = sel.clone();
+        tokio::task::spawn_blocking(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.wfp.lift_blocks(&sel)))
+                .unwrap_or_else(|_| Err("panic while lifting network blocks".into()))
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("lift task failed: {e}")))
     }
 
     fn user_profiles(&self) -> Vec<String> {

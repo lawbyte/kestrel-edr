@@ -60,6 +60,19 @@ pub enum ResponseAction {
         #[serde(default)]
         ttl_secs: Option<u64>,
     },
+    /// Lift Kestrel network blocks (WFP) set by `BlockImageNetwork` /
+    /// `BlockDestination`. `image` = lift every block scoped to that
+    /// executable (case-insensitive full path); `block_id` = lift one block
+    /// (id from the block's `ActionOutcome.artifact` / agent block state);
+    /// both set = only blocks matching both; both `None` = lift every block.
+    /// Never touches the isolation filters (use `ReleaseHost`). Analyst /
+    /// console only: the detection engine never proposes it.
+    UnblockNetwork {
+        #[serde(default)]
+        image: Option<String>,
+        #[serde(default)]
+        block_id: Option<String>,
+    },
     /// Network-isolate the host: only the Kestrel server (and listed IPs) reachable.
     IsolateHost {
         #[serde(default)]
@@ -122,6 +135,7 @@ impl ResponseAction {
             ResponseAction::DeleteQuarantined { .. } => "delete_quarantined",
             ResponseAction::BlockDestination { .. } => "block_destination",
             ResponseAction::BlockImageNetwork { .. } => "block_image_network",
+            ResponseAction::UnblockNetwork { .. } => "unblock_network",
             ResponseAction::IsolateHost { .. } => "isolate_host",
             ResponseAction::ReleaseHost => "release_host",
             ResponseAction::ApplyHardening => "apply_hardening",
@@ -145,6 +159,7 @@ impl ResponseAction {
             ResponseAction::RemoveAutorun { .. } => "response.persistence",
             ResponseAction::BlockDestination { .. }
             | ResponseAction::BlockImageNetwork { .. }
+            | ResponseAction::UnblockNetwork { .. }
             | ResponseAction::IsolateHost { .. }
             | ResponseAction::ReleaseHost => "response.network",
             ResponseAction::ApplyHardening
@@ -167,4 +182,36 @@ pub struct ActionOutcome {
     /// back to parsing `detail` when absent.
     #[serde(default)]
     pub artifact: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unblock_network_wire_format() {
+        // Both fields default: `{"type":"unblock_network"}` = lift every block.
+        let a: ResponseAction = serde_json::from_str(r#"{"type":"unblock_network"}"#).unwrap();
+        assert_eq!(
+            a,
+            ResponseAction::UnblockNetwork {
+                image: None,
+                block_id: None
+            }
+        );
+        assert_eq!(a.name(), "unblock_network");
+        assert_eq!(a.privilege(), "response.network");
+        let a = ResponseAction::UnblockNetwork {
+            image: Some(r"C:\Apps\crm.exe".into()),
+            block_id: None,
+        };
+        let j = serde_json::to_string(&a).unwrap();
+        assert!(j.contains(r#""type":"unblock_network""#), "{j}");
+        assert_eq!(serde_json::from_str::<ResponseAction>(&j).unwrap(), a);
+        let b: ResponseAction =
+            serde_json::from_str(r#"{"type":"unblock_network","block_id":"b-1"}"#).unwrap();
+        assert!(
+            matches!(b, ResponseAction::UnblockNetwork { block_id: Some(ref id), image: None } if id == "b-1")
+        );
+    }
 }

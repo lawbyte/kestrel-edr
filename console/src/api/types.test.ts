@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { Alert, Group, KEvent, Policy, ResponseAction, UpdateRelease } from './types'
 import { DATA_CATEGORIES, EVENT_KINDS, GROUP_UPDATE_RINGS, SEVERITIES } from './types'
-import { DATA_CATEGORY_LABEL, DATA_CATEGORY_REMEDIATION, EVENT_KIND_LABEL, actionPrivilege, describeAction } from '@/lib/labels'
+import { DATA_CATEGORY_LABEL, DATA_CATEGORY_REMEDIATION, EVENT_KIND_LABEL, actionPrivilege, describeAction, unblockFor } from '@/lib/labels'
 import { pathClassOf } from '@/lib/pathclass'
 import { describeEvent } from '@/lib/events'
 import { diffJson } from '@/lib/diff'
@@ -49,6 +49,7 @@ describe('serde shape compatibility', () => {
       [{ type: 'quarantine_file', path: 'x' }, 'response.file'],
       [{ type: 'isolate_host' }, 'response.network'],
       [{ type: 'release_host' }, 'response.network'],
+      [{ type: 'unblock_network' }, 'response.network'],
       [{ type: 'collect_triage' }, 'response.collect'],
       [{ type: 'apply_hardening' }, 'response.collect'],
       [{ type: 'remove_autorun', kind: 'scheduled_task', location: '\\Updater' }, 'response.persistence'],
@@ -145,5 +146,19 @@ describe('agent update contract', () => {
   it('accepts the agent-set ioc_id on block_destination', () => {
     const a = JSON.parse('{"type":"block_destination","ip":"1.2.3.4","port":443,"ioc_id":"ioc-1"}') as ResponseAction
     expect(a.type === 'block_destination' && a.ioc_id).toBe('ioc-1')
+  })
+  it('mirrors UnblockNetwork (serde defaults, labels, undo of a block)', () => {
+    // `{"type":"unblock_network"}` is valid JSON from the Rust side (both fields default).
+    const all = JSON.parse('{"type":"unblock_network"}') as ResponseAction
+    expect(describeAction(all)).toBe('Lift every Kestrel network block')
+    expect(describeAction({ type: 'unblock_network', image: 'C:\\Apps\\crm.exe' })).toBe('Lift network blocks for C:\\Apps\\crm.exe')
+    expect(describeAction({ type: 'unblock_network', block_id: 'blk-1' })).toBe('Lift network block blk-1')
+    const img = 'C:\\Apps\\crm.exe'
+    expect(unblockFor({ type: 'block_image_network', image: img }, 'b-1')).toEqual({ type: 'unblock_network', image: img, block_id: null })
+    expect(unblockFor({ type: 'block_destination', ip: '1.2.3.4', image: img }, 'b-2')).toEqual({ type: 'unblock_network', image: null, block_id: 'b-2' })
+    expect(unblockFor({ type: 'block_destination', ip: '1.2.3.4', image: img }, null)).toEqual({ type: 'unblock_network', image: img, block_id: null })
+    // An unscoped destination block without a block id cannot be targeted.
+    expect(unblockFor({ type: 'block_destination', ip: '1.2.3.4' }, 'not a valid id!')).toBeNull()
+    expect(unblockFor({ type: 'isolate_host' }, 'x')).toBeNull()
   })
 })

@@ -352,6 +352,15 @@ impl Vault {
         Ok(id)
     }
 
+    /// Recorded original path of a quarantined **file** (not an autorun
+    /// backup, whose `original_path` is only a label).
+    pub fn file_original_path(&self, id: &str) -> Option<String> {
+        let idx = self.index.lock().ok()?;
+        idx.get(id)
+            .filter(|e| e.kind == EntryKind::File)
+            .map(|e| e.original_path.clone())
+    }
+
     /// Restore a held item to its **recorded** original path only (H8):
     /// never into %SystemRoot% / Program Files; the parent directory must
     /// still exist, contain no junction / link on its path, resolve to itself

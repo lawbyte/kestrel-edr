@@ -18,7 +18,10 @@ pub enum TrayRequest {
         limit: u32,
     },
     QuickCheck,
-    RequestReview { alert_id: Uuid, justification: String },
+    RequestReview {
+        alert_id: Uuid,
+        justification: String,
+    },
     Subscribe,
 }
 
@@ -110,5 +113,8 @@ pub enum ReviewState {
 
 pub fn now_ms() -> TimestampMs {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }

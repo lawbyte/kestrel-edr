@@ -358,6 +358,9 @@ function requirePriv(u: User, priv: string) {
   if (!privs.includes('*') && !privs.includes(priv)) throw new HttpError(403, 'forbidden', `You need the ${priv} privilege`)
 }
 
+/** Block ids (action artifacts) lifted by `unblock_network` in this mock session. */
+const liftedBlocks = new Set<string>()
+
 function issueAction(d: Device, action: ResponseAction, u: User, comment: string, incidentId: string | null): ResponseActionRow {
   const row: ResponseActionRow = {
     id: uuid(),
@@ -418,8 +421,30 @@ function issueAction(d: Device, action: ResponseAction, u: User, comment: string
           }
           break
         case 'block_destination':
-          row.result_detail = 'WFP filter added'
+        case 'block_image_network':
+          row.artifact = uuid()
+          row.result_detail = `${action.type === 'block_image_network' ? `blocked all network traffic for ${action.image}` : `blocked outbound ${action.ip}`} (block ${row.artifact}, ${action.ttl_secs ? `expires in ${action.ttl_secs}s` : 'no expiry'})`
           break
+        case 'unblock_network': {
+          // Lift the matching succeeded blocks on this device (mirrors BlockSelector).
+          const norm = (p: string) =>
+            p
+              .trim()
+              .replace(/\//g, '\\')
+              .replace(/^\\\\\?\\/, '')
+              .toLowerCase()
+          const lifted = db.actions.filter((r) => {
+            if (r.device_id !== d.id || r.status !== 'succeeded' || !r.artifact || liftedBlocks.has(r.artifact)) return false
+            if (r.action.type !== 'block_image_network' && r.action.type !== 'block_destination') return false
+            const img = r.action.image ?? null
+            if (action.block_id && action.block_id !== r.artifact) return false
+            if (action.image && (!img || norm(img) !== norm(action.image))) return false
+            return true
+          })
+          for (const r of lifted) liftedBlocks.add(r.artifact!)
+          row.result_detail = lifted.length ? `lifted ${lifted.length} network block(s)` : `no matching block`
+          break
+        }
         case 'remove_autorun':
           row.artifact = `ar-${hexId(12)}`
           row.result_detail =

@@ -73,7 +73,10 @@ impl Client {
     }
 
     pub fn from_env() -> Self {
-        if std::env::var("KESTREL_TRAY_MOCK").map(|v| v == "1").unwrap_or(false) {
+        if std::env::var("KESTREL_TRAY_MOCK")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             return Client::new(Backend::Mock(Arc::new(crate::mock::MockAgent::new())));
         }
         #[cfg(windows)]
@@ -113,30 +116,43 @@ impl Client {
             }
             #[cfg(unix)]
             Backend::Unix(path) => {
-                let s = tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::UnixStream::connect(path))
-                    .await
-                    .map_err(|_| ClientError::Unavailable("connect timed out".into()))?
-                    .map_err(|e| ClientError::Unavailable(e.to_string()))?;
+                let s =
+                    tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::UnixStream::connect(path))
+                        .await
+                        .map_err(|_| ClientError::Unavailable("connect timed out".into()))?
+                        .map_err(|e| ClientError::Unavailable(e.to_string()))?;
                 Box::new(s)
             }
             Backend::Mock(m) => Box::new(m.connect()),
-            Backend::None => return Err(ClientError::Unavailable("no agent transport configured".into())),
+            Backend::None => {
+                return Err(ClientError::Unavailable(
+                    "no agent transport configured".into(),
+                ))
+            }
         };
         Ok(BufReader::new(stream))
     }
 
     /// Send one request on a fresh connection and wait for its single response.
-    pub async fn request(&self, req: &TrayRequest, timeout: Duration) -> Result<TrayResponse, ClientError> {
+    pub async fn request(
+        &self,
+        req: &TrayRequest,
+        timeout: Duration,
+    ) -> Result<TrayResponse, ClientError> {
         let mut conn = self.connect().await?;
         let fut = async {
             send(&mut conn, req).await?;
             match read_response(&mut conn).await? {
                 Some(TrayResponse::Error { message }) => Err(ClientError::Agent(message)),
                 Some(r) => Ok(r),
-                None => Err(ClientError::Unavailable("agent closed the connection".into())),
+                None => Err(ClientError::Unavailable(
+                    "agent closed the connection".into(),
+                )),
             }
         };
-        tokio::time::timeout(timeout, fut).await.map_err(|_| ClientError::Timeout(format!("{req:?}")))?
+        tokio::time::timeout(timeout, fut)
+            .await
+            .map_err(|_| ClientError::Timeout(format!("{req:?}")))?
     }
 }
 
@@ -144,8 +160,12 @@ pub async fn send(conn: &mut Conn, req: &TrayRequest) -> Result<(), ClientError>
     let mut line = serde_json::to_vec(req).map_err(|e| ClientError::Protocol(e.to_string()))?;
     line.push(b'\n');
     let w = conn.get_mut();
-    w.write_all(&line).await.map_err(|e| ClientError::Unavailable(e.to_string()))?;
-    w.flush().await.map_err(|e| ClientError::Unavailable(e.to_string()))
+    w.write_all(&line)
+        .await
+        .map_err(|e| ClientError::Unavailable(e.to_string()))?;
+    w.flush()
+        .await
+        .map_err(|e| ClientError::Unavailable(e.to_string()))
 }
 
 /// Read one response line. `Ok(None)` on clean EOF. Blank lines are skipped.
@@ -167,14 +187,17 @@ pub async fn read_response(conn: &mut Conn) -> Result<Option<TrayResponse>, Clie
         if trimmed.is_empty() {
             continue;
         }
-        return serde_json::from_str(trimmed).map(Some).map_err(|e| ClientError::Protocol(e.to_string()));
+        return serde_json::from_str(trimmed)
+            .map(Some)
+            .map_err(|e| ClientError::Protocol(e.to_string()));
     }
 }
 
 /// Exponential backoff with jitter: 1s, 2s, 4s … capped at 30s.
 pub fn backoff(attempt: u32) -> Duration {
     let base = 1000u64.saturating_mul(1u64 << attempt.min(5)).min(30_000);
-    let jitter = (crate::protocol::now_ms() as u64 ^ (attempt as u64).wrapping_mul(0x9E37)) % (base / 4 + 1);
+    let jitter =
+        (crate::protocol::now_ms() as u64 ^ (attempt as u64).wrapping_mul(0x9E37)) % (base / 4 + 1);
     Duration::from_millis(base - base / 8 + jitter)
 }
 
@@ -192,11 +215,16 @@ mod win {
         let client = loop {
             match ClientOptions::new().open(TRAY_PIPE_NAME) {
                 Ok(c) => break c,
-                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && tokio::time::Instant::now() < deadline => {
+                Err(e)
+                    if e.raw_os_error() == Some(ERROR_PIPE_BUSY)
+                        && tokio::time::Instant::now() < deadline =>
+                {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 Err(e) if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND) => {
-                    return Err(ClientError::Unavailable("Kestrel service is not running".into()));
+                    return Err(ClientError::Unavailable(
+                        "Kestrel service is not running".into(),
+                    ));
                 }
                 Err(e) => return Err(ClientError::Unavailable(e.to_string())),
             }
@@ -212,11 +240,18 @@ mod win {
         let mut session: u32 = u32::MAX;
         let ok = unsafe { GetNamedPipeServerSessionId(client.as_raw_handle() as _, &mut session) };
         if ok == 0 {
-            return Err(ClientError::Unavailable("could not verify the Kestrel service".into()));
+            return Err(ClientError::Unavailable(
+                "could not verify the Kestrel service".into(),
+            ));
         }
-        if session != 0 && !(cfg!(debug_assertions) && std::env::var_os("KESTREL_TRAY_ALLOW_USER_SERVER").is_some()) {
+        if session != 0
+            && !(cfg!(debug_assertions)
+                && std::env::var_os("KESTREL_TRAY_ALLOW_USER_SERVER").is_some())
+        {
             log::warn!("refusing tray pipe served from session {session} (expected 0)");
-            return Err(ClientError::Unavailable("the tray pipe is not served by the Kestrel service".into()));
+            return Err(ClientError::Unavailable(
+                "the tray pipe is not served by the Kestrel service".into(),
+            ));
         }
         Ok(())
     }
@@ -230,25 +265,44 @@ mod tests {
     #[tokio::test]
     async fn mock_roundtrip_and_pushes() {
         let c = Client::new(Backend::Mock(Arc::new(crate::mock::MockAgent::new())));
-        let r = c.request(&TrayRequest::Status, Duration::from_secs(2)).await.unwrap();
+        let r = c
+            .request(&TrayRequest::Status, Duration::from_secs(2))
+            .await
+            .unwrap();
         assert!(matches!(r, TrayResponse::Status(ref s) if !s.org_name.is_empty()));
-        let r = c.request(&TrayRequest::Activity { limit: 2 }, Duration::from_secs(2)).await.unwrap();
-        let TrayResponse::Activity { items } = r else { panic!("expected activity") };
+        let r = c
+            .request(&TrayRequest::Activity { limit: 2 }, Duration::from_secs(2))
+            .await
+            .unwrap();
+        let TrayResponse::Activity { items } = r else {
+            panic!("expected activity")
+        };
         assert_eq!(items.len(), 2);
         let alert = items.iter().find_map(|i| i.alert_id).unwrap();
 
         let mut sub = c.connect().await.unwrap();
         send(&mut sub, &TrayRequest::Subscribe).await.unwrap();
-        assert!(matches!(read_response(&mut sub).await.unwrap(), Some(TrayResponse::Ack { ok: true, .. })));
+        assert!(matches!(
+            read_response(&mut sub).await.unwrap(),
+            Some(TrayResponse::Ack { ok: true, .. })
+        ));
 
         let r = c
-            .request(&TrayRequest::RequestReview { alert_id: alert, justification: "I need this".into() }, Duration::from_secs(2))
+            .request(
+                &TrayRequest::RequestReview {
+                    alert_id: alert,
+                    justification: "I need this".into(),
+                },
+                Duration::from_secs(2),
+            )
             .await
             .unwrap();
         assert!(matches!(r, TrayResponse::Ack { ok: true, .. }));
         // The review request is pushed back as an updated notification.
         let push = read_response(&mut sub).await.unwrap().unwrap();
-        let TrayResponse::Notification(item) = push else { panic!("expected push, got {push:?}") };
+        let TrayResponse::Notification(item) = push else {
+            panic!("expected push, got {push:?}")
+        };
         assert_eq!(item.review, Some(ReviewState::Requested));
     }
 
@@ -256,7 +310,13 @@ mod tests {
     async fn agent_error_maps_to_error() {
         let c = Client::new(Backend::Mock(Arc::new(crate::mock::MockAgent::new())));
         let r = c
-            .request(&TrayRequest::RequestReview { alert_id: uuid::Uuid::nil(), justification: "x".into() }, Duration::from_secs(2))
+            .request(
+                &TrayRequest::RequestReview {
+                    alert_id: uuid::Uuid::nil(),
+                    justification: "x".into(),
+                },
+                Duration::from_secs(2),
+            )
             .await;
         assert!(matches!(r, Err(ClientError::Agent(_))));
     }
