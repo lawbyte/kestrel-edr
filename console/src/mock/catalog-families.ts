@@ -169,7 +169,7 @@ export const FAMILY_RULES: RuleMeta[] = [
   {
     "id": "RW-07",
     "name": "Ransomware canary tampered",
-    "description": "A process other than the Kestrel agent overwrote, renamed or deleted one of the decoy documents Kestrel planted in user folders for ransomware detection.",
+    "description": "A process other than the Kestrel agent overwrote, renamed or deleted one of the hidden decoy documents Kestrel planted in the Documents and Pictures folders for ransomware detection.",
     "kind": "builtin",
     "category": "ransomware",
     "severity": "critical",
@@ -187,7 +187,7 @@ export const FAMILY_RULES: RuleMeta[] = [
       "https://arxiv.org/pdf/2508.00293"
     ],
     "false_positives": [
-      "The user deleting or moving the decoy file",
+      "The user deleting or moving the decoy file in Explorer (alert only; the decoys are hidden so this is rare unless hidden files are shown)",
       "OneDrive conflict renames",
       "Backup restore jobs and disk-cleanup tools"
     ]

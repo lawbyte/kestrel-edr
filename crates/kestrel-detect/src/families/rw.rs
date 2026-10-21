@@ -1134,6 +1134,12 @@ impl Ransomware {
                             " and it is also rewriting many other files"
                         }
                     )
+                } else if explorer {
+                    // Fresh-install lab 2026-10-21: the signed-in user moving
+                    // or deleting a decoy in File Explorer.
+                    format!(
+                        "Explorer (the signed-in user's file manager) moved, renamed or deleted a hidden Kestrel ransomware decoy file ({path}); this is usually a person tidying up folders, so no action was taken. Check that the file was not encrypted."
+                    )
                 } else if soft {
                     format!(
                         "{shown} changed a Kestrel ransomware decoy file ({path}); this is usually a person or sync tool, but check that the file was not encrypted."
@@ -1585,11 +1591,11 @@ pub(crate) fn catalog() -> Vec<RuleMeta> {
             &[SIGMA_EXT, DEFEAT, SPLUNK_SPEED, S1_INTERMITTENT],
             &["First sync or restore of OneDrive / Dropbox / Google Drive", "Bulk photo or media conversion to an uncommon format", "File encryption tools (AxCrypt, AESCrypt)", "Large git checkouts or build outputs inside user folders"]),
         meta(RW07, "Ransomware canary tampered",
-            "A process other than the Kestrel agent overwrote, renamed or deleted one of the decoy documents Kestrel planted in user folders for ransomware detection.",
+            "A process other than the Kestrel agent overwrote, renamed or deleted one of the hidden decoy documents Kestrel planted in the Documents and Pictures folders for ransomware detection.",
             R, Critical, &["T1486", "T1485"], true,
             "Kill the process lineage (tree), quarantine user-writable images and isolate the host when network paths were touched; Explorer (the user) and signed sync/backup clients alert only",
             &[ELASTIC_HONEYPOT, "https://arxiv.org/pdf/2508.00293"],
-            &["The user deleting or moving the decoy file", "OneDrive conflict renames", "Backup restore jobs and disk-cleanup tools"]),
+            &["The user deleting or moving the decoy file in Explorer (alert only; the decoys are hidden so this is rare unless hidden files are shown)", "OneDrive conflict renames", "Backup restore jobs and disk-cleanup tools"]),
         meta(RW08, "Ransom-note fan-out",
             "One process created the same file name in at least 5 folders, with a note extension (txt, hta, html, htm, rtf, url) and a ransom-note-like name (read me, restore, recover, decrypt, how to, help, instruction, !!!, _info); or the same name in at least 20 folders regardless of name.",
             R, Critical, &["T1486", "T1491.001"], true,

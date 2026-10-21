@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/lawbyte/kestrel-edr/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/lawbyte/kestrel-edr/ci.yml?branch=main&style=flat&label=CI"></a>
   <a href="https://lawbyte.github.io/kestrel-edr/"><img alt="Docs" src="https://img.shields.io/badge/docs-online-4357c9?style=flat"></a>
-  <a href="https://github.com/lawbyte/kestrel-edr/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.1.2-4357c9?style=flat"></a>
+  <a href="https://github.com/lawbyte/kestrel-edr/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.1.3-4357c9?style=flat"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-555c6b?style=flat"></a>
   <img alt="Windows 10 and 11" src="https://img.shields.io/badge/endpoint-Windows%2010%20%7C%2011-555c6b?style=flat&logo=windows&logoColor=white">
   <img alt="Rust" src="https://img.shields.io/badge/agent-Rust-555c6b?style=flat&logo=rust&logoColor=white">
@@ -31,7 +31,7 @@ It has four parts:
 * **Admin console**: a React app served by the server.
 * **Tray app**: a small Tauri app for employees. It shows status, explains blocks in plain language and lets the employee request a review.
 
-> **Status: v1.1.2 (release candidate), user-mode only.** Validated on Windows 11 (26100) in a disposable lab VM. Read the limits section before you rely on it.
+> **Status: v1.1.3 (release candidate), user-mode only.** Validated on Windows 11 (26100) in a disposable lab VM. Read the limits section before you rely on it.
 
 ## Screenshots
 

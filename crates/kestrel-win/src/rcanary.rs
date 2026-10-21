@@ -1,12 +1,28 @@
 //! Ransomware canary documents (decoys) for the file-activity sensor.
 //!
-//! Two or three small, believable documents are planted in the **roots** of
-//! each profile's Documents, Desktop and Pictures folders. Names start with
-//! `!` or `0` so they come first in NTFS directory order (upper-cased UTF-16
+//! Small, believable documents are planted in the **roots** of each
+//! profile's Documents (3) and Pictures (2) folders. Names start with `!` or
+//! `0` so they come first in NTFS directory order (upper-cased UTF-16
 //! collation: `!` 0x21 < `0` 0x30 < letters) — encryptors walking a folder
-//! with `FindFirstFile` hit them early. They are **not** hidden or system:
-//! most ransomware skips such files. Content is a valid minimal file of the
-//! claimed type (OOXML zip, PDF, JPEG/JFIF) so magic-byte checks pass.
+//! with `FindFirstFile` hit them early. Content is a valid minimal file of
+//! the claimed type (OOXML zip, PDF, JPEG/JFIF) so magic-byte checks pass.
+//!
+//! Fresh-install lab 2026-10-21: the decoys used to be visible (and two of
+//! them sat on the Desktop), so an employee tidying up moved or deleted
+//! them and tripped RW-07. Now every decoy carries **FILE_ATTRIBUTE_HIDDEN**
+//! (not SYSTEM) and none is planted on the Desktop:
+//! * Research (`docs/research/notes/ransomware-decoy-attributes.md`): no
+//!   family found skips hidden *files* by default (Conti and Babuk source:
+//!   no attribute check at all, Babuk resets attributes to NORMAL); LockBit
+//!   3.0 has an optional `skip_hidden_folders` (folders, and our decoys sit
+//!   in normal folders); LockBit 2.0 applies its name / extension checks
+//!   only to non-SYSTEM files, so SYSTEM adds risk without detection gain.
+//! * Desktop is the folder employees look at all day (and the one where
+//!   "show hidden files" users would still see the decoys); its traversal
+//!   advantage (reached just before Documents on a depth-first walk) is
+//!   small because modern encryptors spread files over many threads.
+//!   Earlier Desktop decoys are removed on upgrade when still exactly ours
+//!   ([`RETIRED_DECOYS`]).
 //!
 //! Safety (same rules as the credential canaries in [`crate::canary`]):
 //! never overwrite an existing file, never follow a reparse point anywhere
@@ -37,10 +53,20 @@ pub const DECOYS: &[(&str, &str, DocKind)] = &[
     ("Documents", "!Payroll Q3.xlsx", DocKind::Xlsx),
     ("Documents", "!Accounts summary.docx", DocKind::Docx),
     ("Documents", "0 Contract - signed.pdf", DocKind::Pdf),
-    ("Desktop", "!Passwords.docx", DocKind::Docx),
-    ("Desktop", "0 Invoice 0917.pdf", DocKind::Pdf),
     ("Pictures", "!IMG_0001.jpg", DocKind::Jpg),
     ("Pictures", "0 Scan 0917.jpg", DocKind::Jpg),
+];
+
+/// Attributes of every ransomware decoy (see the module docs: HIDDEN only).
+pub const DECOY_ATTRS: u32 = canary::ATTR_HIDDEN;
+
+/// Decoys planted by earlier versions and no longer wanted: (profile
+/// sub-folder, file name). Removed on upgrade only while they still hold
+/// exactly what Kestrel wrote; a decoy the user changed is forgotten and
+/// left in place.
+pub const RETIRED_DECOYS: &[(&str, &str)] = &[
+    ("Desktop", "!Passwords.docx"),
+    ("Desktop", "0 Invoice 0917.pdf"),
 ];
 
 /// Fixed timestamp inside the OOXML zips (content must be deterministic so
@@ -204,7 +230,7 @@ pub fn specs_for_profile(profile: &str, folder_exists: impl Fn(&str) -> bool) ->
 pub fn plant(profiles: &[String], reg: &mut CanaryRegistry) -> Vec<String> {
     plant_with(
         &canary::StdFs {
-            set_hidden: &|_| {},
+            set_attrs: &|_, _| {},
         },
         profiles,
         reg,
@@ -212,14 +238,63 @@ pub fn plant(profiles: &[String], reg: &mut CanaryRegistry) -> Vec<String> {
 }
 
 pub fn plant_with(fs: &dyn DecoyFs, profiles: &[String], reg: &mut CanaryRegistry) -> Vec<String> {
+    retire_old(fs, reg);
     let mut specs = Vec::new();
     for p in profiles {
         specs.extend(specs_for_profile(p, |d| {
             fs.probe(Path::new(d)) == Probe::Dir
         }));
     }
-    // Never hidden: ransomware skips hidden/system files.
-    canary::plant_with(fs, &specs, reg, false)
+    // Hidden (also re-applied to decoys an earlier version planted visible).
+    canary::plant_with(fs, &specs, reg, DECOY_ATTRS)
+}
+
+/// Is a registry path one of the [`RETIRED_DECOYS`] (`…\<folder>\<name>`)?
+fn is_retired(path: &str) -> bool {
+    let p = path.replace('/', "\\");
+    let mut it = p.rsplit('\\');
+    let (Some(name), Some(folder)) = (it.next(), it.next()) else {
+        return false;
+    };
+    RETIRED_DECOYS
+        .iter()
+        .any(|(f, n)| f.eq_ignore_ascii_case(folder) && n.eq_ignore_ascii_case(name))
+}
+
+/// Remove [`RETIRED_DECOYS`] that are still exactly ours; forget the ones
+/// the user changed (or that are gone); keep the record on an I/O failure
+/// for the next attempt. Returns the removed paths.
+pub fn retire_old(fs: &dyn DecoyFs, reg: &mut CanaryRegistry) -> Vec<String> {
+    let mut removed = Vec::new();
+    let keys: Vec<String> = reg
+        .planted
+        .iter()
+        .filter(|(_, r)| is_retired(&r.path))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for k in keys {
+        let Some(rec) = reg.planted.get(&k).cloned() else {
+            continue;
+        };
+        let r = match rec.sha256.as_deref() {
+            Some(sha) => fs.remove_if_ours(Path::new(&rec.path), sha),
+            None => RemoveResult::NotOurs,
+        };
+        match r {
+            RemoveResult::Removed => {
+                removed.push(rec.path.clone());
+                reg.planted.remove(&k);
+            }
+            RemoveResult::Gone | RemoveResult::NotOurs => {
+                reg.planted.remove(&k);
+            }
+            RemoveResult::Failed => {}
+        }
+    }
+    if !removed.is_empty() {
+        tracing::info!(removed = removed.len(), "retired Desktop ransomware decoys");
+    }
+    removed
 }
 
 /// Remove every planted decoy whose content is still ours (uninstall /
@@ -229,7 +304,7 @@ pub fn plant_with(fs: &dyn DecoyFs, profiles: &[String], reg: &mut CanaryRegistr
 pub fn remove_planted(reg: &mut CanaryRegistry) -> Vec<String> {
     remove_planted_with(
         &canary::StdFs {
-            set_hidden: &|_| {},
+            set_attrs: &|_, _| {},
         },
         reg,
     )
@@ -253,6 +328,58 @@ pub fn remove_planted_with(fs: &dyn DecoyFs, reg: &mut CanaryRegistry) -> Vec<St
     }
     reg.planted = keep;
     removed
+}
+
+// ------------------------------------------------------------ poller logic
+
+/// How a decoy's (size, mtime) stamp changed between two polls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StampChange {
+    Same,
+    /// Still there, different size / mtime: an in-place write.
+    Modified,
+    /// Was there, is gone (renamed, moved, deleted).
+    Gone,
+    /// Was absent, is back.
+    Appeared,
+}
+
+pub fn stamp_change<T: PartialEq>(old: &Option<T>, new: &Option<T>) -> StampChange {
+    match (old, new) {
+        (Some(a), Some(b)) if a == b => StampChange::Same,
+        (Some(_), Some(_)) => StampChange::Modified,
+        (Some(_), None) => StampChange::Gone,
+        (None, Some(_)) => StampChange::Appeared,
+        (None, None) => StampChange::Same,
+    }
+}
+
+/// How long a disappearance noticed by the poller waits for the Kernel-File
+/// rename / delete event (File session flush 1 s + translation).
+pub const GONE_GRACE_MS: i64 = 4_000;
+/// A Kernel-File hit this long before the poller noticed the disappearance
+/// still explains it (poll interval 2 s plus ETW delivery).
+pub const GONE_LOOKBACK_MS: i64 = 10_000;
+
+/// Decision for a decoy the poller found gone at `noticed`: `Some(false)`
+/// = Kernel-File already reported it (rename / delete with the real actor,
+/// e.g. Explorer moving it to the Recycle Bin): nothing more to report;
+/// `Some(true)` = no kernel event within the grace period: report it (with
+/// the opener heuristic, V-H9); `None` = keep waiting.
+///
+/// Fresh-install lab 2026-10-21: the poller reported every disappearance
+/// as an *in-place rewrite* blamed on the last process that had opened the
+/// decoy, so an employee deleting a desktop decoy in Explorer could be
+/// reported as a Critical RW-07 against an unrelated opener (or as a remote
+/// SMB writer when the System process had opened it).
+pub fn gone_verdict(noticed: i64, now: i64, kernel_hit: bool) -> Option<bool> {
+    if kernel_hit {
+        Some(false)
+    } else if now - noticed >= GONE_GRACE_MS {
+        Some(true)
+    } else {
+        None
+    }
 }
 
 /// Load / save the decoy registry.
@@ -310,10 +437,101 @@ mod tests {
             };
             assert_eq!(ext, want);
         }
-        for folder in ["Documents", "Desktop", "Pictures"] {
+        for folder in ["Documents", "Pictures"] {
             let n = DECOYS.iter().filter(|d| d.0 == folder).count();
             assert!((2..=3).contains(&n), "{folder}: {n}");
         }
+        // Fresh-install lab 2026-10-21: nothing on the Desktop any more,
+        // and every decoy is hidden (not system: see the module docs).
+        assert!(DECOYS.iter().all(|d| d.0 != "Desktop"));
+        assert_eq!(DECOY_ATTRS, canary::ATTR_HIDDEN);
+        assert_eq!(DECOY_ATTRS & canary::ATTR_SYSTEM, 0);
+        for (folder, name) in RETIRED_DECOYS {
+            assert!(!DECOYS.iter().any(|d| d.0 == *folder && d.1 == *name));
+        }
+    }
+
+    #[test]
+    fn poller_stamp_changes() {
+        use StampChange::*;
+        assert_eq!(stamp_change(&Some(1), &Some(1)), Same);
+        assert_eq!(stamp_change(&Some(1), &Some(2)), Modified);
+        assert_eq!(stamp_change(&Some(1), &None::<i32>), Gone);
+        assert_eq!(stamp_change(&None, &Some(1)), Appeared);
+        assert_eq!(stamp_change(&None::<i32>, &None), Same);
+    }
+
+    /// Fresh-install lab 2026-10-21: a decoy that disappears (moved,
+    /// deleted, recycled) is reported by Kernel-File with the real actor;
+    /// the poller only reports it when no kernel event arrives in time.
+    #[test]
+    fn gone_decoy_waits_for_the_kernel_event() {
+        let noticed = 10_000;
+        // Kernel already reported it: drop.
+        assert_eq!(gone_verdict(noticed, noticed, true), Some(false));
+        assert_eq!(
+            gone_verdict(noticed, noticed + GONE_GRACE_MS * 3, true),
+            Some(false)
+        );
+        // Not yet: wait.
+        assert_eq!(gone_verdict(noticed, noticed, false), None);
+        assert_eq!(
+            gone_verdict(noticed, noticed + GONE_GRACE_MS - 1, false),
+            None
+        );
+        // Grace period over without a kernel event: report.
+        assert_eq!(
+            gone_verdict(noticed, noticed + GONE_GRACE_MS, false),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn retired_names() {
+        assert!(is_retired(r"C:\Users\bob\Desktop\!Passwords.docx"));
+        assert!(is_retired(r"C:\Users\bob\desktop\0 invoice 0917.pdf"));
+        assert!(is_retired("/tmp/x/Desktop/!Passwords.docx"));
+        assert!(!is_retired(r"C:\Users\bob\Documents\!Passwords.docx"));
+        assert!(!is_retired(r"C:\Users\bob\Desktop\!Payroll Q3.xlsx"));
+        assert!(!is_retired("!Passwords.docx"));
+    }
+
+    /// Upgrade from 1.1.2: the Desktop decoys are removed while still
+    /// exactly Kestrel's; a user-changed one stays (and is forgotten).
+    #[test]
+    fn retire_old_desktop_decoys() {
+        let d = std::env::temp_dir().join(format!("kestrel-rcanary-retire-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let desk = d.join("Desktop");
+        std::fs::create_dir_all(&desk).unwrap();
+        let spec = |name: &str, kind| CanarySpec {
+            path: desk.join(name).to_string_lossy().into_owned(),
+            category: DataCategory::PasswordManager,
+            content: content(kind, name),
+            is_dir: false,
+        };
+        let legacy = vec![
+            spec("!Passwords.docx", DocKind::Docx),
+            spec("0 Invoice 0917.pdf", DocKind::Pdf),
+        ];
+        let fs = canary::StdFs {
+            set_attrs: &|_, _| {},
+        };
+        let mut reg = CanaryRegistry::default();
+        assert_eq!(canary::plant_with(&fs, &legacy, &mut reg, 0).len(), 2);
+        // The employee edited one of them.
+        std::fs::write(desk.join("0 Invoice 0917.pdf"), b"my notes").unwrap();
+        let removed = retire_old(&fs, &mut reg);
+        assert_eq!(removed.len(), 1, "{removed:?}");
+        assert!(!desk.join("!Passwords.docx").exists());
+        assert_eq!(
+            std::fs::read(desk.join("0 Invoice 0917.pdf")).unwrap(),
+            b"my notes"
+        );
+        assert!(reg.planted.is_empty());
+        // Idempotent.
+        assert!(retire_old(&fs, &mut reg).is_empty());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -349,12 +567,12 @@ mod tests {
     #[test]
     fn specs_use_existing_plain_folders_only() {
         let s = specs_for_profile(r"C:\Users\labuser\", |d| !d.ends_with("Pictures"));
-        assert_eq!(s.len(), 5);
+        assert_eq!(s.len(), 3);
         assert!(s
             .iter()
             .all(|c| c.path.starts_with(r"C:\Users\labuser\Documents\!")
-                || c.path.starts_with(r"C:\Users\labuser\Documents\0")
-                || c.path.starts_with(r"C:\Users\labuser\Desktop\")));
+                || c.path.starts_with(r"C:\Users\labuser\Documents\0")));
+        assert_eq!(specs_for_profile(r"C:\Users\labuser", |_| true).len(), 5);
         assert!(specs_for_profile(r"C:\Users\x\OneDrive", |_| true).is_empty());
     }
 
@@ -362,11 +580,11 @@ mod tests {
     fn plant_and_remove_roundtrip() {
         let d = std::env::temp_dir().join(format!("kestrel-rcanary-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        for f in ["Documents", "Desktop", "Pictures"] {
+        for f in ["Documents", "Pictures"] {
             std::fs::create_dir_all(d.join(f)).unwrap();
         }
         // A real user file with a decoy name is never touched.
-        std::fs::write(d.join("Desktop").join("!Passwords.docx"), b"mine").unwrap();
+        std::fs::write(d.join("Documents").join("!Payroll Q3.xlsx"), b"mine").unwrap();
         let prof = d.to_string_lossy().replace('/', "\\");
         let mut reg = CanaryRegistry::default();
         // Use the platform separator for the actual filesystem test.
@@ -377,12 +595,27 @@ mod tests {
                 s
             })
             .collect::<Vec<_>>();
-        let ok = canary::plant(&specs, &mut reg, &|_: &Path| {});
+        let hidden = std::cell::RefCell::new(Vec::new());
+        let set_attrs = |p: &Path, a: u32| hidden.borrow_mut().push((p.to_path_buf(), a));
+        let fs = canary::StdFs {
+            set_attrs: &set_attrs,
+        };
+        let ok = canary::plant_with(&fs, &specs, &mut reg, DECOY_ATTRS);
         assert_eq!(ok.len(), DECOYS.len() - 1);
         assert_eq!(
-            std::fs::read(d.join("Desktop").join("!Passwords.docx")).unwrap(),
+            std::fs::read(d.join("Documents").join("!Payroll Q3.xlsx")).unwrap(),
             b"mine"
         );
+        // Every decoy written was marked hidden; the user's file was not.
+        assert_eq!(hidden.borrow().len(), DECOYS.len() - 1);
+        assert!(hidden
+            .borrow()
+            .iter()
+            .all(|(_, a)| *a == canary::ATTR_HIDDEN));
+        assert!(!hidden
+            .borrow()
+            .iter()
+            .any(|(p, _)| p.ends_with("!Payroll Q3.xlsx")));
         // User edits one decoy: removal leaves it.
         let edited = d.join("Documents").join("0 Contract - signed.pdf");
         std::fs::write(&edited, b"changed").unwrap();

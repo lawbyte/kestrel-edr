@@ -120,6 +120,7 @@ impl TestServer {
             https_addr: "127.0.0.1:0".parse().unwrap(),
             grpc_addr: "127.0.0.1:0".parse().unwrap(),
             grpc_public_port: 8443,
+            https_public_port: 0,
             tls_cert: None,
             tls_key: None,
             console_dir: "/nonexistent-console".into(),

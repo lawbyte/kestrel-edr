@@ -67,7 +67,7 @@ pub struct SensorSettings {
     /// paths (RW-06/07/08) plus ransomware canary documents.
     #[serde(default = "yes")]
     pub file_activity: bool,
-    /// Plant ransomware canary documents in Documents/Desktop/Pictures roots.
+    /// Plant hidden ransomware canary documents in the Documents and Pictures roots.
     #[serde(default = "yes")]
     pub ransomware_canaries: bool,
     /// Task Scheduler, Service Control Manager and WMI-Activity providers plus

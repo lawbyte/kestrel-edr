@@ -320,8 +320,9 @@ pub fn browser_store_owner(
     Some(app)
 }
 
-/// Soak 2026-10-21 (ST-01/ST-04 on VS Code reading the WAM cache): a
-/// Microsoft-signed application in Program Files / WindowsApps reading the
+/// Soak 2026-10-21 (ST-01/ST-04 on VS Code reading the WAM cache; Windows
+/// Widgets in the fresh-install lab run): a Microsoft-signed application
+/// ([`WAM_CLIENT_SIGNERS`]) in Program Files / WindowsApps reading the
 /// **Windows token broker (WAM) SSO cache** is a WAM client, not a thief.
 /// Only that store; never a LOLBin / script host; never an instance that
 /// runs a script (`.js` / `.mjs` / `.cjs` argument, `cli.js`, `--inspect` / `--inspect-brk`
@@ -330,10 +331,11 @@ pub fn browser_store_owner(
 pub fn wam_client_reader(p: &ProcessInfo, store_app: &str, system_drive: char) -> bool {
     if store_app != "Windows token broker"
         || p.signed != SignatureState::Valid
-        || !p
-            .signer
-            .as_deref()
-            .is_some_and(|s| s.trim().eq_ignore_ascii_case("microsoft corporation"))
+        || !p.signer.as_deref().is_some_and(|s| {
+            WAM_CLIENT_SIGNERS
+                .iter()
+                .any(|w| s.trim().eq_ignore_ascii_case(w))
+        })
     {
         return false;
     }
@@ -356,6 +358,18 @@ pub fn wam_client_reader(p: &ProcessInfo, store_app: &str, system_drive: char) -
     // positional argument) counts.
     !(ELECTRON_HOSTS.contains(&name.as_str()) && !positional_args(&p.cmdline).is_empty())
 }
+
+/// Signer subject CNs (as the enrichment reports them:
+/// `CertGetNameStringW(CERT_NAME_SIMPLE_DISPLAY_TYPE)`) of WAM clients.
+/// "Microsoft Corporation" signs Microsoft's own applications (Office, VS
+/// Code, Teams); "Microsoft Windows" signs Windows inbox components,
+/// including the ones Windows ships as packages under `WindowsApps` (lab
+/// 2026-10-21: `MicrosoftWindows.Client.WebExperience_*\Dashboard\Widgets.exe`,
+/// embedded Authenticode, `CN=Microsoft Windows`). Exact match only:
+/// "Microsoft Windows Publisher" and look-alikes do not qualify. Inbox
+/// images in System32 / Windows never reach this check (they are
+/// [`crate::engine`] `system_trusted` unless LOLBins).
+pub const WAM_CLIENT_SIGNERS: &[&str] = &["microsoft corporation", "microsoft windows"];
 
 /// Re-review N2: .NET and script REPL hosts run arbitrary code without a
 /// script-file argument: never WAM-client readers. (Office apps are WAM

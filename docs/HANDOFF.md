@@ -2,6 +2,54 @@
 
 Read `CLAUDE.md` first. This run took Kestrel from "compiled and simulated" to "validated on real Windows, broader malware coverage, release candidate". Decisions with reasons are in `docs/DECISIONS.md`; the security reviews are `docs/security-review-2026-10-21.md` (v1.0) and `docs/security-review-v1.1-2026-10-21.md` (v1.1, independent).
 
+## Fresh-install fixes (2026-10-21, after 1.1.2) — hidden decoys, "degraded" at install, ST-01 on Widgets
+
+Three findings from a fresh 1.1.2 install in the lab VM. Details and evidence are in `docs/DECISIONS.md` (entry "fresh install of 1.1.2"). Not committed.
+
+1. **Ransomware decoys were visible; RW-07 fired when an employee tidied up.**
+   * Decoys are now `FILE_ATTRIBUTE_HIDDEN` (not SYSTEM). The research is in `docs/research/notes/ransomware-decoy-attributes.md`: no family found skips hidden files by default, and LockBit 2.0 handles SYSTEM files differently.
+   * Decoys are no longer planted on the Desktop: 3 in Documents, 2 in Pictures.
+   * On upgrade:
+     * existing decoys that are still exactly Kestrel's get the attribute through the verified handle, without being rewritten;
+     * the 1.1.2 Desktop decoys are removed;
+     * user-changed decoys are never touched.
+   * The decoy poller no longer reports a decoy that *disappeared* as an in-place rewrite blamed on the last opener. It waits for the Kernel-File rename/delete, which names the real actor.
+   * Explorer was already protected and alert-only for RW-07. Its alert wording now says it was the signed-in user's file manager.
+2. **"Degraded" right after install (`etw_events_lost: 3390`).**
+   * Root cause: an internal artefact, not kernel loss.
+     * The first server policy always restarted the sensors.
+     * On stop, the translator exited before the ETW sessions did. Every event in that gap counted as "dropped".
+   * Fixes:
+     * producers stop first, then the translator drains (`kestrel-win/src/pump.rs`);
+     * shutdown stragglers are counted separately, outside `events_lost`;
+     * kernel loss carries over sensor restarts;
+     * sensors restart only when what they collect changes.
+   * There is no grace period. Real drops are still reported.
+3. **ST-01 on Windows Widgets reading the WAM cache.** "Microsoft Windows" (the signer of Windows inbox / WindowsApps components) is now a WAM-client signer under the same constraints. The result is Low / Audit.
+
+**Verification (final code).**
+
+| Check | Where | Result |
+|---|---|---|
+| `cargo fmt --all -- --check` | Windows | PASS |
+| `cargo clippy --workspace --all-targets -- -D warnings` | Windows | PASS |
+| `cargo test --workspace` incl. Postgres integration tests | Windows | PASS — 710 passed, 0 failed |
+| `cargo test --workspace --no-fail-fast` (server DB tests skip without `DATABASE_URL`) | WSL2 Kali | PASS — 702 passed, 0 failed |
+| Console `npm run lint` / `npm test` (two strings changed) | Windows | PASS — 159 tests |
+| Agent on a real install (decoy attributes, poller, sensor restart, heartbeat) | — | **NOT RUN** (lab VM only) |
+
+**Lab checks for the owner (fresh install of the next build):**
+* **Decoys:**
+  * `Documents\!Payroll Q3.xlsx` etc. are hidden (`attrib`), and nothing is planted on the Desktop.
+  * A VM upgraded from 1.1.2 loses its two Desktop decoys, and its Documents / Pictures decoys become hidden with unchanged mtime.
+  * With "show hidden files" on, deleting a decoy in Explorer gives one RW-07 **High** with no action.
+* **Events lost:**
+  * The device stays **online** after install, with no `TP-SRV-EVENTS-LOST`.
+  * The agent log shows `sensors stopped … discarded_at_stop=` only on a sensor restart.
+  * `logman query Kestrel-Core -ets` (and `Kestrel-IO`, `Kestrel-File`) shows Events Lost 0. If the kernel count is non-zero, that is a genuine burst and needs buffer sizing.
+* **Widgets:** opening the Widgets board gives at most an ST-01 **Low / Audit**.
+* **Follow-up (not done):** decoys are 2–13 KB. Clop reportedly skips files up to ~17 KB, so consider ≥ 64 KB decoys (this changes their hash, so every installed decoy is rewritten once).
+
 ## Remote access run (2026-10-21, after v1.1.0-rc1) — remote desktop, file manager, install profiles
 
 **What was added.** Admin-only remote desktop and a remote file manager, chosen per install through remote-access profiles. Not committed yet; owner reviews first.

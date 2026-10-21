@@ -402,6 +402,10 @@ pub struct FileAgg {
     pub scope: FileScope,
     /// Lower-cased NT paths of planted ransomware canaries.
     canaries: HashSet<String>,
+    /// Last Kernel-File rename / delete / overwrite of each canary (ts):
+    /// the decoy poller leaves a disappearance the kernel already reported
+    /// (with the real actor) alone.
+    kernel_hits: HashMap<String, i64>,
     pids: HashMap<u32, PidState>,
     file_objects: HashMap<(u32, u64), String>,
     total_ops: usize,
@@ -580,6 +584,8 @@ impl FileAgg {
                 .filter(|o| self.canaries.contains(*o))
                 .unwrap_or(path)
                 .to_string();
+            // Bounded by the canary set.
+            self.kernel_hits.insert(hit.clone(), ts);
             if !st.canary_hits.contains(&hit) && st.canary_hits.len() < 32 {
                 st.canary_hits.push(hit);
                 st.canary_pending = true;
@@ -612,6 +618,12 @@ impl FileAgg {
             pid,
             activity: act,
         })
+    }
+
+    /// Did Kernel-File report a rename / delete / overwrite of canary `path`
+    /// at or after `since` (ms)?
+    pub fn kernel_hit_since(&self, path: &str, since: i64) -> bool {
+        self.kernel_hits.get(path).is_some_and(|t| *t >= since)
     }
 
     /// A canary was modified in place (no rename / overwrite disposition):
@@ -1069,6 +1081,27 @@ mod tests {
         let e2 = a.on_create(3, 43, 8, &c, 5, false).unwrap();
         assert_eq!(e2.activity.canary_hits.len(), 1);
         assert_eq!(a.canary_modified(4, 44, &c).activity.canary_hits, vec![c]);
+    }
+
+    /// Fresh-install lab 2026-10-21: a decoy moved to the Recycle Bin by
+    /// Explorer is a Kernel-File rename with the real actor; the poller must
+    /// be able to see that and not report the disappearance a second time.
+    #[test]
+    fn kernel_canary_hits_are_remembered() {
+        let mut a = agg();
+        let c = format!(r"{DEV}\users\employee\desktop\!passwords.docx");
+        a.set_canaries([c.clone()]);
+        assert!(!a.kernel_hit_since(&c, 0));
+        a.on_create(1_000, 77, 5, &c, 1, false);
+        // Opening is not a hit.
+        assert!(!a.kernel_hit_since(&c, 0));
+        let recycled = format!(r"{DEV}\$recycle.bin\s-1-5-21-1\$r4x2a.docx");
+        assert!(a.on_rename(2_000, 77, 5, &recycled).is_some());
+        assert!(a.kernel_hit_since(&c, 0));
+        assert!(a.kernel_hit_since(&c, 2_000));
+        assert!(!a.kernel_hit_since(&c, 2_001));
+        // Other paths never count.
+        assert!(!a.kernel_hit_since(&recycled, 0));
     }
 
     #[test]

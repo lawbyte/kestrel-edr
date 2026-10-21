@@ -17,10 +17,15 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 pub struct Sensors {
+    /// Producers (ETW sessions, subscriptions, watchers) stop.
     stop: Arc<AtomicBool>,
+    /// The translator drains its queue and exits (set after the producers
+    /// were joined; see [`crate::pump`]).
+    drain: Arc<AtomicBool>,
     counters: Arc<Counters>,
     dpapi_channel: Arc<AtomicBool>,
     threads: Mutex<Vec<JoinHandle<()>>>,
+    translator: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl SensorHandle for Sensors {
@@ -31,6 +36,8 @@ impl SensorHandle for Sensors {
             // ETW EventsLost + events Kestrel had to drop (internal queue / agent channel full).
             // + file-activity operations dropped by the aggregator's caps
             // + persistence records dropped by the enrichment queue (V-M9).
+            // Not counted: `raw_discarded_shutdown` (stragglers of sessions
+            // being torn down during an orderly sensor restart, crate::pump).
             events_lost: c.etw_events_lost.load(Ordering::Relaxed)
                 + c.raw_dropped.load(Ordering::Relaxed)
                 + c.out_dropped.load(Ordering::Relaxed)
@@ -49,11 +56,28 @@ impl SensorHandle for Sensors {
         if self.stop.swap(true, Ordering::SeqCst) {
             return;
         }
+        // Producers first (the watchdog stops the ETW sessions and drops the
+        // event-log subscriptions), then the translator drains what they
+        // delivered. Stopping the translator first turned every event of
+        // the still-running sessions into a "lost" event (fresh-install
+        // lab, 2026-10-21).
         if let Ok(mut t) = self.threads.lock() {
             for h in t.drain(..) {
                 let _ = h.join();
             }
         }
+        self.drain.store(true, Ordering::SeqCst);
+        if let Some(h) = self.translator.lock().ok().and_then(|mut t| t.take()) {
+            let _ = h.join();
+        }
+        let c = &self.counters;
+        tracing::info!(
+            etw_events_lost = c.etw_events_lost.load(Ordering::Relaxed),
+            raw_dropped = c.raw_dropped.load(Ordering::Relaxed),
+            out_dropped = c.out_dropped.load(Ordering::Relaxed),
+            discarded_at_stop = c.raw_discarded_shutdown.load(Ordering::Relaxed),
+            "sensors stopped"
+        );
     }
 }
 
@@ -71,11 +95,13 @@ pub fn start(
 ) -> anyhow::Result<Sensors> {
     let counters = shared.counters.clone();
     let stop = Arc::new(AtomicBool::new(false));
+    let drain = Arc::new(AtomicBool::new(false));
     let (tx, rx) = sync_channel::<Raw>(65_536);
     let sink = Sink {
         tx,
         counters: counters.clone(),
         self_pid: cfg.self_pid,
+        closing: stop.clone(),
     };
     // lsass pid for the Audit-API failed-open filter (updated on ProcessStart).
     counters
@@ -98,16 +124,14 @@ pub fn start(
         file_state: file_state.clone(),
     };
 
-    let mut threads = Vec::new();
-    {
+    let mut threads: Vec<JoinHandle<()>> = Vec::new();
+    let translator = {
         let tr = Translator::new(shared.clone(), out);
-        let st = stop.clone();
-        threads.push(
-            std::thread::Builder::new()
-                .name("kestrel-translate".into())
-                .spawn(move || tr.run(rx, st))?,
-        );
-    }
+        let dr = drain.clone();
+        std::thread::Builder::new()
+            .name("kestrel-translate".into())
+            .spawn(move || tr.run(rx, dr))?
+    };
 
     // Ransomware decoys: planted only by the installed service (LocalSystem),
     // never by an interactive `sensors-test`; already-planted ones are
@@ -144,6 +168,8 @@ pub fn start(
         for t in threads {
             let _ = t.join();
         }
+        drain.store(true, Ordering::SeqCst);
+        let _ = translator.join();
         anyhow::bail!(
             "no ETW session could be started (agent must run as SYSTEM/admin): {}",
             errors.join("; ")
@@ -213,9 +239,11 @@ pub fn start(
 
     Ok(Sensors {
         stop,
+        drain,
         counters,
         dpapi_channel,
         threads: Mutex::new(threads),
+        translator: Mutex::new(Some(translator)),
     })
 }
 
@@ -315,17 +343,18 @@ fn watchdog(
             }
         }
 
-        // 2. Loss counters.
-        let mut lost = lost_base;
-        for s in sessions.iter_mut() {
-            if let Some(q) = etw::query_session(s.kind.name()) {
-                s.last_lost = (q.events_lost, q.buffers_lost);
-            }
-            lost.0 += s.last_lost.0;
-            lost.1 += s.last_lost.1;
-        }
-        counters.etw_events_lost.store(lost.0, Ordering::Relaxed);
-        counters.etw_buffers_lost.store(lost.1, Ordering::Relaxed);
+        // 2. Loss counters (cumulative over sensor restarts: `carry`).
+        let carry = (
+            counters.etw_events_lost_carry.load(Ordering::Relaxed),
+            counters.etw_buffers_lost_carry.load(Ordering::Relaxed),
+        );
+        let lost = session_loss(&mut sessions, lost_base);
+        counters
+            .etw_events_lost
+            .store(carry.0 + lost.0, Ordering::Relaxed);
+        counters
+            .etw_buffers_lost
+            .store(carry.1 + lost.1, Ordering::Relaxed);
         let total = lost.0 + lost.1;
         if total > last_lost_total && last_lost_tamper.elapsed() > Duration::from_secs(300) {
             sink.send(Raw::Tamper {
@@ -414,6 +443,15 @@ fn watchdog(
     drop(sysmon);
     drop(wfp_sub);
     drop(persist_subs);
+    // Keep the kernel loss of these sessions for the next sensor instance
+    // (a restart must not reset the reported counter).
+    let lost = session_loss(&mut sessions, lost_base);
+    counters
+        .etw_events_lost_carry
+        .fetch_add(lost.0, Ordering::Relaxed);
+    counters
+        .etw_buffers_lost_carry
+        .fetch_add(lost.1, Ordering::Relaxed);
     for mut s in sessions {
         s.stop();
     }
@@ -421,6 +459,20 @@ fn watchdog(
         c.stop();
     }
     counters.sessions_ok.store(false, Ordering::Relaxed);
+}
+
+/// Kernel-side loss (`EventsLost`, buffers lost) of the running sessions
+/// plus `base` (sessions of this instance that died and were restarted).
+fn session_loss(sessions: &mut [Session], base: (u64, u64)) -> (u64, u64) {
+    let mut lost = base;
+    for s in sessions.iter_mut() {
+        if let Some(q) = etw::query_session(s.kind.name()) {
+            s.last_lost = (q.events_lost, q.buffers_lost);
+        }
+        lost.0 += s.last_lost.0;
+        lost.1 += s.last_lost.1;
+    }
+    lost
 }
 
 /// lsass.exe in System32 whose parent is wininit.exe (falls back to the

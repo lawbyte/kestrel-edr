@@ -241,6 +241,15 @@ pub struct Counters {
     /// Persistence records dropped because the enrichment queue was full
     /// (re-review V-M9).
     pub persist_dropped: AtomicU64,
+    /// Raw events delivered by a session that was being torn down after an
+    /// orderly sensor stop / restart began ([`crate::pump`]): diagnostics
+    /// only, not part of `events_lost`.
+    pub raw_discarded_shutdown: AtomicU64,
+    /// Kernel `EventsLost` / buffers lost of ETW sessions of earlier sensor
+    /// instances (sensor restarts): the reported loss counters stay
+    /// cumulative for the agent's lifetime instead of restarting at 0.
+    pub etw_events_lost_carry: AtomicU64,
+    pub etw_buffers_lost_carry: AtomicU64,
 }
 
 /// Kernel-File callback state shared with the canary poller.
@@ -274,16 +283,29 @@ pub struct Sink {
     pub tx: SyncSender<Raw>,
     pub counters: Arc<Counters>,
     pub self_pid: u32,
+    /// Set when this sensor instance's orderly stop began (its `stop` flag).
+    pub closing: Arc<AtomicBool>,
 }
 
 impl Sink {
     pub fn send(&self, r: Raw) {
-        match self.tx.try_send(r) {
+        let full = match self.tx.try_send(r) {
             Ok(()) => {
                 self.counters.raw_delivered.fetch_add(1, Ordering::Relaxed);
+                return;
             }
-            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+            Err(TrySendError::Full(_)) => true,
+            Err(TrySendError::Disconnected(_)) => false,
+        };
+        let closing = self.closing.load(Ordering::Relaxed);
+        match crate::pump::classify_send_failure(full, closing) {
+            crate::pump::SendFailure::Dropped => {
                 self.counters.raw_dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            crate::pump::SendFailure::ShutdownDiscard => {
+                self.counters
+                    .raw_discarded_shutdown
+                    .fetch_add(1, Ordering::Relaxed);
             }
         }
     }

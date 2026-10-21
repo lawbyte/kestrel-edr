@@ -379,7 +379,7 @@ const SENSOR_INFO: { key: keyof SensorSettings; label: string; hint: string }[] 
   {
     key: 'ransomware_canaries',
     label: 'Ransomware canary documents',
-    hint: 'Plants a few hidden decoy documents in Documents, Desktop and Pictures. Any program that changes one triggers RW-07. Users may notice them if they show hidden files.',
+    hint: 'Plants a few hidden decoy documents in the Documents and Pictures folders (not the Desktop). Any program that changes one triggers RW-07. Users may notice them if they show hidden files.',
   },
   {
     key: 'persistence',

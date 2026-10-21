@@ -36,6 +36,7 @@ Check health: `docker compose ps` (all `healthy`) and `curl -k https://localhost
 | `POSTGRES_*`, `CLICKHOUSE_*` | Database credentials. `DATABASE_URL` overrides the `POSTGRES_*` composition. |
 | `TLS_CERT`, `TLS_KEY` | Optional PEM paths for your own web certificate (mount into `deploy/tls/`). |
 | `KESTREL_GRPC_PUBLIC_PORT` | Port agents dial if NAT changes it (used in install commands). |
+| `KESTREL_HTTPS_PUBLIC_PORT` | Port browsers and installers use for the console and `/downloads` if NAT or a proxy changes it. Defaults to `KESTREL_HTTPS_PORT`. |
 | `KESTREL_HEARTBEAT_INTERVAL_SECS` | Expected agent heartbeat; > 3 missed intervals on a live stream raise `TP-SRV-HEARTBEAT`. |
 | `KESTREL_TRUSTED_PROXIES` | Comma-separated IPs/CIDRs of your reverse proxies. `X-Forwarded-For` is honoured only on connections from these addresses (right-most untrusted hop) for login throttling and audit. Empty = the TCP peer is used. (Replaces `KESTREL_TRUST_PROXY_HEADERS`.) |
 | `KESTREL_SETUP_CODE` | Optional one-time code for the first-run setup screen. Unset: a random code is printed in the server log at startup (`docker compose logs kestrel-server \| grep "SETUP CODE"`) until the first administrator exists. |

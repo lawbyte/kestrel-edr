@@ -25,7 +25,7 @@ use kestrel_common::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -197,29 +197,35 @@ impl Translator {
         }
     }
 
-    pub fn run(mut self, rx: Receiver<Raw>, stop: Arc<std::sync::atomic::AtomicBool>) {
-        loop {
-            if stop.load(Ordering::Relaxed) {
-                break;
-            }
-            match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(r) => {
-                    if let Err(e) =
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.handle(r)))
-                    {
-                        tracing::error!("translator panic: {:?}", e.downcast_ref::<String>());
-                    }
+    /// Translate until `drain` is set (the sensors' producers have been
+    /// stopped), then process what is still queued and flush ([`crate::pump`]).
+    pub fn run(mut self, rx: Receiver<Raw>, drain: Arc<std::sync::atomic::AtomicBool>) {
+        let me = std::cell::RefCell::new(&mut self);
+        let drained = crate::pump::pump(
+            &rx,
+            &drain,
+            Duration::from_millis(100),
+            |r| {
+                let mut t = me.borrow_mut();
+                if let Err(e) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| t.handle(r)))
+                {
+                    tracing::error!("translator panic: {:?}", e.downcast_ref::<String>());
                 }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break,
-            }
-            let now = now_ms();
-            self.release(now);
-            self.flush_reg(now, false);
-            self.flush_persist(now, false);
-            if self.last_gc.elapsed() > Duration::from_secs(10) {
-                self.gc();
-            }
+            },
+            || {
+                let mut t = me.borrow_mut();
+                let now = now_ms();
+                t.release(now);
+                t.flush_reg(now, false);
+                t.flush_persist(now, false);
+                if t.last_gc.elapsed() > Duration::from_secs(10) {
+                    t.gc();
+                }
+            },
+        );
+        if drained > 0 {
+            tracing::debug!(drained, "translator drained queued events at stop");
         }
         // Flush whatever is held.
         self.release(i64::MAX);

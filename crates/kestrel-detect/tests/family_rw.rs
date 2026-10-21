@@ -670,6 +670,49 @@ fn rw07_explorer_alerts_only() {
     assert!(all_actions(&out).is_empty());
 }
 
+/// Fresh-install lab 2026-10-21: an employee tidying up in Explorer
+/// (recycling one hidden decoy, then two at once with "show hidden files"
+/// on, and an in-place change inferred to Explorer) in **Protect**: RW-07
+/// alerts, never Critical, never an action, Explorer (protected) is never
+/// killed, and the wording says it was the signed-in user's file manager.
+#[test]
+fn rw07_explorer_tidying_up_in_protect_is_alert_only() {
+    let out = run(
+        policy_all(RuleMode::Protect),
+        "rw07_explorer_tidy_protect.jsonl",
+    );
+    let ds = rw(&out);
+    assert!(!ds.is_empty(), "no RW alert");
+    assert!(
+        ds.iter().all(|d| d.alert.rule_id == "RW-07"),
+        "{:?}",
+        rw_ids(&out)
+    );
+    for d in &ds {
+        assert_eq!(d.alert.severity, Severity::High, "{}", d.alert.summary);
+        assert!(d.actions.is_empty(), "{:?}", d.actions);
+    }
+    assert!(all_actions(&out).is_empty(), "{:?}", all_actions(&out));
+    assert!(
+        ds[0].alert.summary.contains("Explorer"),
+        "{}",
+        ds[0].alert.summary
+    );
+    assert!(
+        ds[0].alert.summary.contains("signed-in user"),
+        "{}",
+        ds[0].alert.summary
+    );
+    // Explorer is on the protected list as well: even a direct decision
+    // to contain it could never kill it.
+    assert!(kestrel_detect::protect::is_protected_process(
+        r"C:\WINDOWS\explorer.exe",
+        SignatureState::Valid,
+        Some("Microsoft Windows"),
+        'c'
+    ));
+}
+
 #[test]
 fn rw07_benign_agent_planting_and_plain_explorer() {
     let out = run(Policy::default(), "rw07_benign.jsonl");

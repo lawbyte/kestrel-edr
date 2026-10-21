@@ -800,7 +800,12 @@ impl Platform for WindowsPlatform {
             );
         }
         // V-H8: handle-based, never follows a link planted in the profile.
-        let ok = canary::plant_with(&super::rcanary::SafeDecoyFs, specs, &mut reg, true);
+        let ok = canary::plant_with(
+            &super::rcanary::SafeDecoyFs,
+            specs,
+            &mut reg,
+            canary::ATTR_HIDDEN,
+        );
         if let Ok(mut c) = i.canaries.write() {
             *c = reg.planted.keys().cloned().collect();
             for p in &ok {

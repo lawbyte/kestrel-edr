@@ -294,6 +294,100 @@ fn wam_read_still_counts_for_correlation() {
     assert!(!kills(&st04.actions).is_empty());
 }
 
+/// Fresh-install lab 2026-10-21: Windows Widgets (`WindowsApps\
+/// MicrosoftWindows.Client.WebExperience_*\Dashboard\Widgets.exe`, signed
+/// `CN=Microsoft Windows` like every Windows inbox component) read the WAM
+/// cache and got a Medium ST-01 with a suspend. "Microsoft Windows" is a
+/// WAM-client signer under the same constraints as "Microsoft Corporation".
+#[test]
+fn windows_widgets_reading_the_wam_cache_is_low_audit() {
+    for mode in [RuleMode::Audit, RuleMode::Protect] {
+        let out = run_all("fresh_widgets_wam_benign.jsonl", mode);
+        let st01 = first(&out, "ST-01");
+        assert_eq!(st01.alert.severity, Severity::Low, "{}", dump(&out));
+        assert_eq!(st01.alert.mode, RuleMode::Audit);
+        assert!(
+            alerts(&out).iter().all(|d| d.actions.is_empty()),
+            "{}",
+            dump(&out)
+        );
+        assert!(standalone(&out).is_empty(), "{}", dump(&out));
+    }
+    let widgets = r"C:\Program Files\WindowsApps\MicrosoftWindows.Client.WebExperience_526.21100.40.0_x64__cw5n1h2txyewy\Dashboard\Widgets.exe";
+    let tbres = r"C:\Users\alice\AppData\Local\Microsoft\TokenBroker\Cache\x.tbres";
+    // Still narrow: a copy outside Program Files, a look-alike signer, an
+    // invalid signature, a script argument and a "Microsoft Windows"-signed
+    // LOLBin / script host in Program Files all keep the full ST-01.
+    for (img, cmd, signer, sig) in [
+        (
+            r"C:\Users\alice\AppData\Local\Temp\Widgets.exe",
+            "Widgets.exe -ServerName:Microsoft.Windows.DashboardServer",
+            "Microsoft Windows",
+            SignatureState::Valid,
+        ),
+        (
+            widgets,
+            "Widgets.exe",
+            "Microsoft Windows Inc",
+            SignatureState::Valid,
+        ),
+        (
+            widgets,
+            "Widgets.exe",
+            "Microsoft Windows",
+            SignatureState::Invalid,
+        ),
+        (
+            widgets,
+            r"Widgets.exe C:\Users\alice\AppData\Local\Temp\x.js",
+            "Microsoft Windows",
+            SignatureState::Valid,
+        ),
+        (
+            r"C:\Program Files\WindowsApps\Evil_1.0.0.0_x64__abc\rundll32.exe",
+            "rundll32.exe x.dll,Run",
+            "Microsoft Windows",
+            SignatureState::Valid,
+        ),
+        (
+            r"C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.0.0_x64__qbz5n2kfra8p0\python.exe",
+            "python.exe",
+            "Microsoft Windows",
+            SignatureState::Valid,
+        ),
+    ] {
+        let mut e = engine(policy_all(RuleMode::Protect));
+        e.process(&start(0, "w", 71, img, cmd, None, sig, Some(signer)));
+        let out = e.process(&read(10, "w", 71, tbres));
+        let st01 = first(&out, "ST-01");
+        assert_ne!(
+            st01.alert.severity,
+            Severity::Low,
+            "{img} {cmd} {signer}: {}",
+            dump(&out)
+        );
+        assert!(
+            action_names(&st01.actions).contains(&"suspend_process"),
+            "{img} {cmd}: {}",
+            dump(&out)
+        );
+    }
+    // A Widgets read of a browser store stays a normal ST-01 (WAM only).
+    let mut e = engine(policy_all(RuleMode::Protect));
+    e.process(&start(
+        0,
+        "w",
+        71,
+        widgets,
+        "Widgets.exe",
+        None,
+        SignatureState::Valid,
+        Some("Microsoft Windows"),
+    ));
+    let out = e.process(&read(10, "w", 71, CHROME_LOGIN));
+    assert_ne!(first(&out, "ST-01").alert.severity, Severity::Low);
+}
+
 // ------------------------------------------- 3. Restart Manager (msiexec) ST-07
 
 fn msiexec_open(cmd: &str, user: &str, parent_services: bool, mask: u32) -> Vec<Output> {

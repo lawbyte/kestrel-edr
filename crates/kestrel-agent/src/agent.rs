@@ -420,7 +420,6 @@ impl Core {
     }
 
     fn install_policy(self: &Arc<Self>, p: Policy) {
-        let old = read(&self.policy).clone();
         *write(&self.filter) = Arc::new(PrivacyFilter::new(&p.privacy, &p.telemetry, &self.salt));
         *write(&self.policy) = Some(p.clone());
         // Remote access switched off: end running sessions now.
@@ -436,16 +435,12 @@ impl Core {
                 "hardening evaluated"
             );
         });
-        // Sensors: restart only if their config changed.
-        let sensors_changed = match &old {
-            Some(o) => {
-                o.privacy.capture_dns != p.privacy.capture_dns
-                    || o.privacy.capture_script_content != p.privacy.capture_script_content
-                    // Optional sensor groups (file activity, persistence, …).
-                    || o.sensors != p.sensors
-            }
-            None => true,
-        };
+        // Sensors: restart only if the configuration they run with changes
+        // (fresh-install lab 2026-10-21: comparing against "no previous
+        // policy" restarted them on every first policy, seconds after
+        // start, even when the server policy asked for the defaults).
+        let running = lock(&self.sensor_cfg).clone();
+        let sensors_changed = sensors_need_restart(running.as_ref(), &self.sensor_config());
         if sensors_changed && lock(&self.sensors).is_some() {
             self.restart_sensors();
         }
@@ -931,6 +926,21 @@ async fn housekeeping(core: Arc<Core>) {
     }
 }
 
+/// Do sensors running with `running` need a restart to apply `new`? Only
+/// the fields that change what the sensors collect count (DNS, script
+/// content, Sysmon, the optional sensor groups); `None` = not started yet.
+pub fn sensors_need_restart(running: Option<&SensorConfig>, new: &SensorConfig) -> bool {
+    match running {
+        None => true,
+        Some(r) => {
+            r.dns != new.dns
+                || r.script_content != new.script_content
+                || r.sysmon != new.sysmon
+                || r.groups != new.groups
+        }
+    }
+}
+
 /// Is an automatic isolation release due? `hours == 0` disables it. The
 /// clock starts at the later of the isolation start and the last time the
 /// server was reached; an unknown isolation start never auto-releases.
@@ -984,6 +994,42 @@ mod tests {
         // disabled / unknown isolation start
         assert!(!auto_release_due(Some(0), None, 1000 * H, 0));
         assert!(!auto_release_due(None, None, 1000 * H, 72));
+    }
+
+    /// Fresh-install lab 2026-10-21: the first server policy restarted the
+    /// sensors seconds after start although nothing they collect changed;
+    /// the teardown was reported as thousands of lost ETW events.
+    #[test]
+    fn sensors_restart_only_when_collection_changes() {
+        use super::sensors_need_restart;
+        use kestrel_common::SensorSettings;
+        use kestrel_platform::SensorConfig;
+        let base = SensorConfig {
+            boot_id: "b".into(),
+            dns: false,
+            script_content: true,
+            sysmon: true,
+            self_pid: 1,
+            groups: SensorSettings::default(),
+            enrich_tx: None,
+        };
+        assert!(sensors_need_restart(None, &base));
+        // Same collection (other boot id / pid / late-enrichment sink): no restart.
+        let mut same = base.clone();
+        same.boot_id = "other".into();
+        same.self_pid = 2;
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        same.enrich_tx = Some(tx);
+        assert!(!sensors_need_restart(Some(&base), &same));
+        let mut dns = base.clone();
+        dns.dns = true;
+        assert!(sensors_need_restart(Some(&base), &dns));
+        let mut groups = base.clone();
+        groups.groups.file_activity = false;
+        assert!(sensors_need_restart(Some(&base), &groups));
+        let mut script = base.clone();
+        script.script_content = false;
+        assert!(sensors_need_restart(Some(&base), &script));
     }
 
     #[test]

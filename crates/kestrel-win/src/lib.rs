@@ -39,6 +39,7 @@ pub mod jsonc;
 pub mod ntpath;
 pub mod persist;
 pub mod proctrack;
+pub mod pump;
 pub mod qpolicy;
 pub mod rcanary;
 pub mod regdiff;

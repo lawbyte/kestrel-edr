@@ -131,3 +131,97 @@ Append-only. Format: date — decision — why — alternatives considered.
 * **Lab (build 1.1.1, Protect): VS Code killed by ST-04.** Reader was the NodeService utility (`--inspect-port=0 --experimental-network-inspection --user-data-dir=…\Roaming\Code`). Fixes: `inspect-port` is no longer a remote-control switch (only `inspect`, `inspect-brk`, `remote-debugging-*` etc. are); the WAM-client check ignores `user-data-dir` (it only matters for the browser importer); the exact command line is a benign fixture (Low Audit ST-01, Audit ST-04, no actions) and the `--inspect=9229` variant is a positive (killed).
 * **ST-03 "Chromium" (Electron safeStorage):** DPAPI unprotect with description "Chromium" by a validly signed, non-browser, non-LOLBin, non-script-host image under Program Files / WindowsApps that has not read another credential store is Low / Audit and recorded (ST-04 stays Audit); otherwise normal ST-03 / ST-02 / ST-04.
 * **Kill outcome on an exiting process:** `TerminateProcess` returns ACCESS_DENIED for a process that is already terminating; when the handle is then signalled, the outcome says "process already exited" (treated as done) instead of "root kill failed".
+### 2026-10-21 - fresh install of 1.1.2 in the lab VM: visible decoys, "degraded" at install, ST-01 on Widgets
+
+Three findings from a fresh install of 1.1.2 in the Windows 11 lab VM. Each fix is narrow. There is no global exemption; the safety net withdrawn above stays withdrawn.
+
+**1. Ransomware decoys visible on the Desktop (RW-07 when an employee tidies up).**
+* *Root cause:*
+  * `kestrel-win/src/rcanary.rs` planted the decoys **without** any attribute. The code justified this with "most ransomware skips hidden/system files", a claim with no source.
+  * Two of the decoys were on the Desktop, the folder employees look at all day.
+* *Second, independent cause of a Critical RW-07 when a person moves a decoy:*
+  * The 2 s decoy poller (`win/rcanary.rs`) treated a decoy that **disappeared** (moved, deleted, recycled) as an *in-place rewrite*.
+  * It blamed the last process that had opened the file (the V-H9 heuristic), or reported a "remote SMB writer" when the System process had opened it.
+  * Kernel-File had already reported the rename/delete with the real actor: Explorer, which RW-07 already treats as alert-only.
+* *Research* (`docs/research/notes/ransomware-decoy-attributes.md`, sources cited there):
+  * No family we found skips hidden *files* by default.
+  * Conti and Babuk source have no attribute check; Babuk resets attributes to NORMAL. Most families filter by name, extension or folder.
+  * LockBit 3.0 has an optional `skip_hidden_folders`. It applies to folders, and our decoys sit in normal folders.
+  * LockBit 2.0 applies its name/extension checks only to files *without* SYSTEM. So SYSTEM adds risk and no detection benefit.
+* **Decision: FILE_ATTRIBUTE_HIDDEN only, on every decoy.**
+  * The research suggested keeping one visible decoy per folder. Not done: visible decoys are exactly the reported problem.
+  * Residual risk: a LockBit 3.0 build that also skips hidden files. This is unverified; testing it needs a real encryptor, which this project never runs.
+* *Locations:*
+  * Desktop decoys dropped:
+    * it is the folder users browse most;
+    * users with "show hidden files" on would still see them;
+    * its traversal advantage is small (a depth-first walk reaches it just before Documents, and modern encryptors spread files over many threads).
+  * Kept: 3 decoys in the Documents root and 2 in the Pictures root. These user-data roots come early in a profile walk and are browsed far less than the Desktop.
+  * The profile root itself was considered: earliest in traversal and rarely browsed. Rejected because it is outside the file aggregator's scope and full of profile noise (`ntuser.dat`).
+* *Upgrade:*
+  * The planter re-applies HIDDEN to a decoy that still holds exactly Kestrel's content (`DecoyFs::ensure_attributes`).
+  * The hash check and `SetFileInformationByHandle` use the same verified handle, opened with read-only sharing. The decoy is never recreated and its mtime is unchanged.
+  * A decoy the user changed is never touched.
+  * The 1.1.2 Desktop decoys (`RETIRED_DECOYS`) are removed when still exactly ours. A user-changed one is forgotten and left in place.
+  * Credential canaries (ST-16) were already hidden; they now also get the attribute re-applied (same code path).
+* *Poller:*
+  * A disappearance is no longer an "in-place" hit.
+  * It waits up to `GONE_GRACE_MS` (4 s) for the Kernel-File rename/delete of that decoy (`FileAgg::kernel_hit_since`, look-back 10 s), and is dropped when the kernel reported it.
+  * Only when no kernel event arrives is it reported as before, so deletes Kernel-File might miss stay covered.
+  * Real in-place modifications (file still there, size or mtime changed) are reported immediately, as before.
+* *Explorer:*
+  * Explorer is already on the protected-process list (`kestrel_detect::protect`, `%SystemRoot%\explorer.exe`, Microsoft-signed).
+  * The engine already treats it as alert-only (High, no actions) for RW-07 / RW-06, so no rule change was needed.
+  * Only the wording changed: "Explorer (the signed-in user's file manager) moved, renamed or deleted a hidden Kestrel ransomware decoy file (...); this is usually a person tidying up folders, so no action was taken."
+  * Regression fixture `rw07_explorer_tidy_protect.jsonl` runs in Protect with one decoy, two decoys and an inferred in-place change. Result: High, no action, Explorer never killed.
+* *Not changed (follow-up): decoy size.*
+  * The research notes that Clop skips files up to about 17 KB; our decoys are 2-13 KB.
+  * Growing them changes their content hash, so every installed decoy would be rewritten once. Left for a separate change.
+
+**2. "Degraded" right after install (`etw_events_lost: 3390`, buffers lost 0).**
+* *Conclusion: (b)/(c), an internal counter artefact of a sensor restart, not kernel loss.*
+* *Evidence* (from reading the code path; the agent cannot run on the dev host):
+  1. On a fresh install there is no cached policy, so the agent starts its sensors with the default policy. When the server's first policy arrived, `install_policy` compared it with "no previous policy" and **always restarted the sensors**, seconds after start.
+  2. `Sensors::stop` set one shared stop flag:
+     * The translator, the sole receiver of the 65 536-slot raw channel, exited within 100 ms.
+     * The watchdog only stops the ETW sessions and event-log subscriptions on its next 500 ms tick.
+     * Every event delivered in that gap failed `try_send` with *Disconnected* and was counted in `raw_dropped`. `SensorStats.events_lost` adds that to the kernel `EventsLost`.
+     * Kernel-File (opens system-wide) plus Audit-API easily produce thousands of events in half a second during post-install activity.
+  3. Buffers lost 0 fits: nothing was lost in the kernel.
+  4. The server raises `TP-SRV-EVENTS-LOST` on a rise of 500 or more between two heartbeats, and marks the device degraded for 1 h on any rise. The first heartbeat (t = 0, before the restart) carried 0; the next one carried 3390.
+* *Also found:* a sensor restart reset the kernel `EventsLost` part of the counter to 0, so losses of the old sessions vanished.
+* *Fix (root cause, no grace period):*
+  * (a) `Sensors::stop` stops the producers first (joins the watchdog, pollers and watchers). Then it tells the translator to **drain** its queue and exit (`kestrel-win/src/pump.rs::pump`).
+  * (b) A failed hand-off is classified (`pump::classify_send_failure`):
+    * a full queue is always a loss;
+    * *Disconnected* is a loss unless this sensor instance's orderly stop has begun. In that case it is counted separately (`raw_discarded_shutdown`), logged in "sensors stopped" and kept out of `events_lost`.
+  * (c) The kernel loss of stopped sessions is carried over (`etw_events_lost_carry`), so the reported counter stays monotonic for the agent's lifetime.
+  * (d) The agent restarts sensors only when what they collect changes (`sensors_need_restart`). It compares DNS, script content, Sysmon and sensor groups with the config the sensors run with. This also fixes the old check missing a DNS change caused by `exfil_domains`.
+  * No server change and no startup grace period. Any real drop at any time (queue full, kernel `EventsLost`) is still reported, and the server's derivation is unchanged.
+* *Lab check for the owner:*
+  * After a fresh install: no `TP-SRV-EVENTS-LOST`, and the device shows "online".
+  * The agent log shows "sensors stopped ... discarded_at_stop=N" only if a restart happened.
+  * `logman query Kestrel-Core -ets` / `Kestrel-IO` / `Kestrel-File` show Events Lost 0 after start.
+  * If kernel Events Lost is non-zero there, that is a genuine burst and needs buffer sizing. That sizing was not done blind.
+
+**3. ST-01 on Windows Widgets reading the WAM cache.**
+* The image is `C:\Program Files\WindowsApps\MicrosoftWindows.Client.WebExperience_526.21100.40.0_x64__cw5n1h2txyewy\Dashboard\Widgets.exe`.
+* It is signed `CN=Microsoft Windows`. Verified on the dev host with `Get-AuthenticodeSignature`: Valid, embedded Authenticode, same package version as the lab.
+* The enrichment reports the certificate's simple display name (`CertGetNameStringW(CERT_NAME_SIMPLE_DISPLAY_TYPE)`), which is "Microsoft Windows". `wam_client_reader` only accepted "Microsoft Corporation".
+* *Fix:* `legit_apps::WAM_CLIENT_SIGNERS = ["microsoft corporation", "microsoft windows"]`.
+  * Exact match only: not "Microsoft Windows Publisher" or look-alikes.
+  * The constraints are the same as before:
+    * valid signature;
+    * image under Program Files / WindowsApps on the system volume;
+    * not a LOLBin, script host or macro host;
+    * no script, eval, inspector or remote-control arguments;
+    * Electron hosts only for a plain launch.
+  * Result: Low / Audit, still recorded for ST-02 / ST-04.
+* System32 was not added: Microsoft-signed non-LOLBin System32 / Windows images are already `system_trusted` for ST-01.
+* Tests: fixture `fresh_widgets_wam_benign.jsonl`, plus negative cases:
+  * a copy in Temp;
+  * a look-alike signer;
+  * an invalid signature;
+  * a `.js` argument;
+  * "Microsoft Windows"-signed rundll32 / python in WindowsApps;
+  * a browser store read by Widgets.

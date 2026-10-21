@@ -173,6 +173,11 @@ fn write_no_follow(path: &Path, data: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// `FILE_ATTRIBUTE_HIDDEN`.
+pub const ATTR_HIDDEN: u32 = 0x2;
+/// `FILE_ATTRIBUTE_SYSTEM`.
+pub const ATTR_SYSTEM: u32 = 0x4;
+
 /// What is at a canary path ([`DecoyFs::probe`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Probe {
@@ -203,18 +208,24 @@ pub enum RemoveResult {
 /// path-based version (tests, non-Windows).
 pub trait DecoyFs {
     fn probe(&self, path: &Path) -> Probe;
-    /// Create `path` (and missing parents) as directories, never through a link.
-    fn create_dirs(&self, path: &Path, hidden: bool) -> std::io::Result<()>;
+    /// Create `path` (and missing parents) as directories, never through a
+    /// link; `attrs` (`ATTR_*` bits) are added to `path` itself.
+    fn create_dirs(&self, path: &Path, attrs: u32) -> std::io::Result<()>;
     /// Write `data` to `path`. `replace_sha`: the file currently there must
     /// have exactly this SHA-256 (it is ours) and is replaced; `None`: the
-    /// path must not exist.
+    /// path must not exist. `attrs` (`ATTR_*` bits) are set on the new file.
     fn write_file(
         &self,
         path: &Path,
         data: &[u8],
         replace_sha: Option<&str>,
-        hidden: bool,
+        attrs: u32,
     ) -> std::io::Result<()>;
+    /// Add `attrs` (`ATTR_*` bits) to the plain file at `path` if it still
+    /// holds exactly `sha` (ours); never through a link, never recreating
+    /// it, never touching a file the user changed. `Ok(true)` when the
+    /// attributes were changed, `Ok(false)` when they were already set.
+    fn ensure_attributes(&self, path: &Path, sha: &str, attrs: u32) -> std::io::Result<bool>;
     /// Delete `path` only if it is a plain file whose SHA-256 is `sha`.
     fn remove_if_ours(&self, path: &Path, sha: &str) -> RemoveResult;
     /// Delete the directory `path` only if it is a real (non-link) and
@@ -226,7 +237,8 @@ pub trait DecoyFs {
 /// Portable, path-based [`DecoyFs`] (link checks before and after; not
 /// race-free against a local attacker: Windows uses `SafeDecoyFs`).
 pub struct StdFs<'a> {
-    pub set_hidden: &'a dyn Fn(&Path),
+    /// Applies `ATTR_*` bits (no-op off Windows / in tests).
+    pub set_attrs: &'a dyn Fn(&Path, u32),
 }
 
 impl DecoyFs for StdFs<'_> {
@@ -245,10 +257,10 @@ impl DecoyFs for StdFs<'_> {
         }
     }
 
-    fn create_dirs(&self, path: &Path, hidden: bool) -> std::io::Result<()> {
+    fn create_dirs(&self, path: &Path, attrs: u32) -> std::io::Result<()> {
         create_dirs_no_follow(path)?;
-        if hidden {
-            (self.set_hidden)(path);
+        if attrs != 0 {
+            (self.set_attrs)(path, attrs);
         }
         Ok(())
     }
@@ -258,7 +270,7 @@ impl DecoyFs for StdFs<'_> {
         path: &Path,
         data: &[u8],
         replace_sha: Option<&str>,
-        hidden: bool,
+        attrs: u32,
     ) -> std::io::Result<()> {
         match (self.probe(path), replace_sha) {
             (Probe::Absent, None) => {}
@@ -266,10 +278,20 @@ impl DecoyFs for StdFs<'_> {
             _ => return Err(std::io::Error::other("target changed; not ours")),
         }
         write_no_follow(path, data)?;
-        if hidden {
-            (self.set_hidden)(path);
+        if attrs != 0 {
+            (self.set_attrs)(path, attrs);
         }
         Ok(())
+    }
+
+    fn ensure_attributes(&self, path: &Path, sha: &str, attrs: u32) -> std::io::Result<bool> {
+        match self.probe(path) {
+            Probe::File(cur) if cur.eq_ignore_ascii_case(sha) => {
+                (self.set_attrs)(path, attrs);
+                Ok(true)
+            }
+            _ => Err(std::io::Error::other("not ours; attributes left alone")),
+        }
     }
 
     fn remove_if_ours(&self, path: &Path, sha: &str) -> RemoveResult {
@@ -369,23 +391,26 @@ pub fn retire_stale(
     removed
 }
 
-/// Plant `specs`; returns paths that now hold Kestrel canaries. `set_hidden`
-/// marks files/dirs hidden (Windows: FILE_ATTRIBUTE_HIDDEN). Path-based:
-/// Windows callers use [`plant_with`] and the handle-based `SafeDecoyFs`.
+/// Plant `specs`; returns paths that now hold Kestrel canaries. `set_attrs`
+/// applies the attributes ([`ATTR_HIDDEN`] here). Path-based: Windows
+/// callers use [`plant_with`] and the handle-based `SafeDecoyFs`.
 pub fn plant(
     specs: &[CanarySpec],
     reg: &mut CanaryRegistry,
-    set_hidden: &dyn Fn(&Path),
+    set_attrs: &dyn Fn(&Path, u32),
 ) -> Vec<String> {
-    plant_with(&StdFs { set_hidden }, specs, reg, true)
+    plant_with(&StdFs { set_attrs }, specs, reg, ATTR_HIDDEN)
 }
 
-/// Plant `specs` through `fs`; `hidden` marks what is created hidden.
+/// Plant `specs` through `fs`; `attrs` (`ATTR_*` bits, 0 = none) are set
+/// on what is created and re-applied to decoys already planted that still
+/// hold exactly Kestrel's content (upgrade from a version that planted them
+/// without; a user-modified decoy is never touched).
 pub fn plant_with(
     fs: &dyn DecoyFs,
     specs: &[CanarySpec],
     reg: &mut CanaryRegistry,
-    hidden: bool,
+    attrs: u32,
 ) -> Vec<String> {
     let mut ok = Vec::new();
     // Directory specs that exist and are not Kestrel's (the user really has
@@ -424,7 +449,7 @@ pub fn plant_with(
             }
             match decide(true, exists, None, rec, "") {
                 Decision::WriteNew => {
-                    if fs.create_dirs(path, hidden).is_ok() {
+                    if fs.create_dirs(path, attrs).is_ok() {
                         reg.planted.insert(
                             k,
                             CanaryRecord {
@@ -451,7 +476,7 @@ pub fn plant_with(
             Decision::WriteNew | Decision::Refresh => {
                 // Temp name first so a crash never leaves a partial canary.
                 let written = fs
-                    .write_file(path, &spec.content, current.as_deref(), hidden)
+                    .write_file(path, &spec.content, current.as_deref(), attrs)
                     .is_ok();
                 if written {
                     reg.planted.insert(
@@ -464,7 +489,14 @@ pub fn plant_with(
                     ok.push(spec.path.clone());
                 }
             }
-            Decision::KeepOurs => ok.push(spec.path.clone()),
+            Decision::KeepOurs => {
+                if attrs != 0 {
+                    if let Err(e) = fs.ensure_attributes(path, &new_sha, attrs) {
+                        tracing::debug!(path = %spec.path, "decoy attributes not re-applied: {e}");
+                    }
+                }
+                ok.push(spec.path.clone());
+            }
             Decision::SkipForeign => {}
         }
     }
@@ -537,26 +569,43 @@ mod tests {
         ];
         let mut reg = CanaryRegistry::default();
         let hidden = std::cell::RefCell::new(0);
-        let h = |_: &Path| *hidden.borrow_mut() += 1;
+        let h = |_: &Path, a: u32| {
+            assert_eq!(a, ATTR_HIDDEN);
+            *hidden.borrow_mut() += 1
+        };
         let ok = plant(&specs, &mut reg, &h);
         assert_eq!(ok.len(), 2);
         assert_eq!(std::fs::read(&real).unwrap(), b"user's real data");
         assert_eq!(*hidden.borrow(), 2);
-        // Second run: keep, no rewrites.
+        // Second run: keep, no rewrites; the file decoy (still ours) gets
+        // its attributes re-applied (upgrade path), the folder does not.
+        let mtime = std::fs::metadata(&specs[0].path)
+            .unwrap()
+            .modified()
+            .unwrap();
         let ok2 = plant(&specs, &mut reg, &h);
         assert_eq!(ok2.len(), 2);
-        assert_eq!(*hidden.borrow(), 2);
-        // User replaced our decoy with real content → we leave it alone.
+        assert_eq!(*hidden.borrow(), 3);
+        assert_eq!(
+            std::fs::metadata(&specs[0].path)
+                .unwrap()
+                .modified()
+                .unwrap(),
+            mtime
+        );
+        // User replaced our decoy with real content → we leave it alone
+        // (no rewrite, no attribute change).
         std::fs::write(&specs[0].path, b"now real").unwrap();
         let ok3 = plant(&specs, &mut reg, &h);
         assert_eq!(ok3.len(), 1);
+        assert_eq!(*hidden.borrow(), 3);
         assert_eq!(std::fs::read(&specs[0].path).unwrap(), b"now real");
         let _ = std::fs::remove_dir_all(&d);
     }
 
     fn std_fs() -> StdFs<'static> {
         StdFs {
-            set_hidden: &|_: &Path| {},
+            set_attrs: &|_: &Path, _| {},
         }
     }
 
@@ -597,7 +646,7 @@ mod tests {
             },
         ];
         let mut reg = CanaryRegistry::default();
-        let ok = plant_with(&std_fs(), &specs, &mut reg, false);
+        let ok = plant_with(&std_fs(), &specs, &mut reg, 0);
         assert_eq!(ok, vec![specs[3].path.clone()]);
         assert!(!real.join("User Data").join("Local State").exists());
         let _ = std::fs::remove_dir_all(&d);
@@ -656,7 +705,7 @@ mod tests {
             },
         ];
         let mut reg = CanaryRegistry::default();
-        assert_eq!(plant_with(&std_fs(), &legacy, &mut reg, false).len(), 5);
+        assert_eq!(plant_with(&std_fs(), &legacy, &mut reg, 0).len(), 5);
         // Edge's importer dropped nothing; the new layout is planted elsewhere.
         let new_specs = vec![CanarySpec {
             path: local.join("Kometa").to_string_lossy().into(),
@@ -672,14 +721,14 @@ mod tests {
             "empty legacy parents removed"
         );
         assert!(local.exists());
-        assert_eq!(plant_with(&std_fs(), &new_specs, &mut reg, false).len(), 1);
+        assert_eq!(plant_with(&std_fs(), &new_specs, &mut reg, 0).len(), 1);
         // Idempotent.
         assert!(retire_stale(&std_fs(), &new_specs, &mut reg).is_empty());
 
         // A real Chrome next to a legacy decoy: decoy removed, Chrome kept;
         // a decoy the user changed is kept (and forgotten).
         let mut reg = CanaryRegistry::default();
-        assert_eq!(plant_with(&std_fs(), &legacy, &mut reg, false).len(), 5);
+        assert_eq!(plant_with(&std_fs(), &legacy, &mut reg, 0).len(), 5);
         let real_default = local
             .join("Google")
             .join("Chrome")
@@ -747,7 +796,7 @@ mod tests {
         std::fs::write(victim.join("secret"), b"system file").unwrap();
         std::os::unix::fs::symlink(victim.join("secret"), profile.join("aws-credentials")).unwrap();
         let mut reg = CanaryRegistry::default();
-        let ok = plant(&specs, &mut reg, &|_: &Path| {});
+        let ok = plant(&specs, &mut reg, &|_: &Path, _| {});
         assert!(ok.is_empty(), "{ok:?}");
         assert_eq!(
             std::fs::read_dir(&victim).unwrap().count(),

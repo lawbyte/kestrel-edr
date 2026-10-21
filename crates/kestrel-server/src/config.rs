@@ -14,6 +14,10 @@ pub struct Config {
     pub grpc_addr: SocketAddr,
     /// Port agents connect to (may differ from the bind port behind NAT).
     pub grpc_public_port: u16,
+    /// Port browsers and installers use for the console and `/downloads`
+    /// (the host port Docker publishes, which differs from the bind port in
+    /// the container when `KESTREL_HTTPS_PORT` is not 443).
+    pub https_public_port: u16,
     /// Optional operator-supplied web TLS certificate/key (PEM paths).
     pub tls_cert: Option<PathBuf>,
     pub tls_key: Option<PathBuf>,
@@ -92,13 +96,15 @@ impl Config {
                 .or_else(|| env("CLICKHOUSE_DATABASE"))
                 .unwrap_or_else(|| "kestrel".into()),
         });
+        let https_addr: SocketAddr = env("KESTREL_HTTPS_ADDR")
+            .unwrap_or_else(|| "0.0.0.0:443".into())
+            .parse()?;
+        let https_addr_port = https_addr.port();
         Ok(Config {
             database_url,
             master_key,
             public_hostnames,
-            https_addr: env("KESTREL_HTTPS_ADDR")
-                .unwrap_or_else(|| "0.0.0.0:443".into())
-                .parse()?,
+            https_addr,
             grpc_addr: env("KESTREL_GRPC_ADDR")
                 .unwrap_or_else(|| "0.0.0.0:8443".into())
                 .parse()?,
@@ -106,6 +112,11 @@ impl Config {
                 .map(|p| p.parse())
                 .transpose()?
                 .unwrap_or(8443),
+            https_public_port: public_https_port(
+                env("KESTREL_HTTPS_PUBLIC_PORT"),
+                env("KESTREL_HTTPS_PORT"),
+                https_addr_port,
+            )?,
             tls_cert: env("TLS_CERT").map(PathBuf::from),
             tls_key: env("TLS_KEY").map(PathBuf::from),
             console_dir: env("CONSOLE_DIR")
@@ -150,12 +161,26 @@ impl Config {
 
     /// Base URL of the console as seen by browsers.
     pub fn public_base_url(&self) -> String {
-        let port = self.https_addr.port();
+        let port = self.https_public_port;
         if port == 443 {
             format!("https://{}", self.primary_hostname())
         } else {
             format!("https://{}:{}", self.primary_hostname(), port)
         }
+    }
+}
+
+/// The externally visible HTTPS port: `KESTREL_HTTPS_PUBLIC_PORT`, else the
+/// host port Docker Compose publishes (`KESTREL_HTTPS_PORT`, also passed to
+/// the container through `.env`), else the port the server binds.
+fn public_https_port(
+    public: Option<String>,
+    published: Option<String>,
+    bind: u16,
+) -> anyhow::Result<u16> {
+    match public.or(published) {
+        Some(p) if !p.trim().is_empty() => Ok(p.trim().parse()?),
+        _ => Ok(bind),
     }
 }
 
@@ -188,4 +213,24 @@ fn urlencode(s: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod public_port_tests {
+    use super::public_https_port;
+
+    #[test]
+    fn public_https_port_prefers_explicit_then_published_then_bind() {
+        assert_eq!(
+            public_https_port(Some("10443".into()), Some("9443".into()), 443).unwrap(),
+            10443
+        );
+        assert_eq!(
+            public_https_port(None, Some("9443".into()), 443).unwrap(),
+            9443
+        );
+        assert_eq!(public_https_port(None, Some(" ".into()), 443).unwrap(), 443);
+        assert_eq!(public_https_port(None, None, 8444).unwrap(), 8444);
+        assert!(public_https_port(Some("x".into()), None, 443).is_err());
+    }
 }

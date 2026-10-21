@@ -43,6 +43,7 @@ All variables below exist in `deploy/.env.example` or are read by the server.
 | `KESTREL_HTTPS_PORT` | `443` | Host port published for the console, REST API and downloads. |
 | `KESTREL_GRPC_PORT` | `8443` | Host port published for agent gRPC. |
 | `KESTREL_GRPC_PUBLIC_PORT` | `8443` | Port agents dial, if NAT or a load balancer changes it. Used in install commands. |
+| `KESTREL_HTTPS_PUBLIC_PORT` | `KESTREL_HTTPS_PORT` | Port browsers and generated installers use for the console and `/downloads`, if NAT or a proxy changes it. |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | `kestrel`, (required), `kestrel` | PostgreSQL credentials. `DATABASE_URL` overrides the composed connection string. |
 | `CLICKHOUSE_URL` | `http://clickhouse:8123` | ClickHouse endpoint. Empty = PostgreSQL fallback for telemetry. |
 | `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_DB` | `kestrel`, (required), `kestrel` | ClickHouse credentials. |
