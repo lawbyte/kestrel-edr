@@ -9,7 +9,7 @@ use crate::{
     updates,
 };
 use axum::{extract::State, http::StatusCode, Json};
-use kestrel_common::now_ms;
+use kestrel_common::{now_ms, remote::RemoteAccessProfile};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -272,18 +272,25 @@ struct TokenRow {
     max_uses: i32,
     uses: i32,
     revoked: bool,
+    remote_profile: Value,
 }
 
 impl TokenRow {
+    fn profile(&self) -> RemoteAccessProfile {
+        crate::remote::profile_from_json(self.remote_profile.clone())
+    }
+
     fn to_api(&self) -> Value {
+        let profile = self.profile();
         json!({"id": self.id, "group_id": self.group_id, "group_name": self.group_name, "token_prefix": self.token_prefix,
                "created_at": self.created_at, "expires_at": self.expires_at, "max_uses": self.max_uses, "uses": self.uses,
-               "revoked": self.revoked})
+               "revoked": self.revoked, "remote_summary": profile.summary(), "remote_preset": profile.preset(),
+               "remote_profile": profile})
     }
 }
 
-const TOKEN_SELECT: &str = "SELECT t.id, t.group_id, g.name AS group_name, t.token_prefix, t.created_at, t.expires_at, t.max_uses, t.uses, t.revoked \
-    FROM enrollment_tokens t JOIN groups g ON g.id = t.group_id";
+const TOKEN_SELECT: &str = "SELECT t.id, t.group_id, g.name AS group_name, t.token_prefix, t.created_at, t.expires_at, t.max_uses, t.uses, t.revoked, \
+    t.remote_profile FROM enrollment_tokens t JOIN groups g ON g.id = t.group_id";
 
 pub async fn list_tokens(State(st): State<AppState>, p: Principal) -> ApiResult<Json<Value>> {
     p.require("devices.write")?;
@@ -300,6 +307,9 @@ pub struct CreateToken {
     group_id: Option<Uuid>,
     expires_in_days: Option<i64>,
     max_uses: Option<i32>,
+    /// Remote-access ceiling for devices enrolled with this token.
+    #[serde(default)]
+    remote_profile: Option<RemoteAccessProfile>,
 }
 
 pub fn msi_url(st: &AppState) -> String {
@@ -329,6 +339,29 @@ pub async fn create_token(
     ApiJson(b): ApiJson<CreateToken>,
 ) -> ApiResult<Json<Value>> {
     p.require("devices.write")?;
+    let profile = b.remote_profile.unwrap_or_else(RemoteAccessProfile::none);
+    // Granting remote access to future devices needs the remote-access
+    // privileges themselves (admin), not just devices.write.
+    // L2: from an interactive console session only, and with a fresh MFA
+    // step-up when the admin has MFA.
+    if !profile.is_none() {
+        p.require("remote.desktop")?;
+        p.require("remote.files")?;
+        if !matches!(p.via, crate::auth::Via::Session { .. }) {
+            return Err(ApiError::forbidden(
+                "tokens that grant remote access can only be created from an interactive console session",
+            ));
+        }
+        if p.user.mfa_enabled && !crate::remote::reauth_recent(&st, &p).await? {
+            return Err(ApiError::forbidden(
+                "confirm your MFA code again (POST /api/me/reauth) to create a token that grants remote access",
+            )
+            .with_extra(json!({"reason": "reauth_required"})));
+        }
+    }
+    profile
+        .validate()
+        .map_err(|e| ApiError::bad_request(format!("invalid remote_profile: {e}")))?;
     let group_id = match b.group_id {
         Some(g) => g,
         None => {
@@ -358,7 +391,7 @@ pub async fn create_token(
     let id = Uuid::new_v4();
     let now = now_ms();
     sqlx::query(
-        "INSERT INTO enrollment_tokens (id, group_id, token_hash, token_prefix, created_by, created_at, expires_at, max_uses) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+        "INSERT INTO enrollment_tokens (id, group_id, token_hash, token_prefix, created_by, created_at, expires_at, max_uses, remote_profile) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
     )
     .bind(id)
     .bind(group_id)
@@ -368,9 +401,18 @@ pub async fn create_token(
     .bind(now)
     .bind(now + days * 86_400_000)
     .bind(max_uses)
+    .bind(serde_json::to_value(&profile)?)
     .execute(&st.db)
     .await?;
-    audit::log(&st.db, &p.actor(), "enrollment_token.create", id.to_string(), json!({"group_id": group_id, "expires_in_days": days, "max_uses": max_uses, "prefix": prefix})).await;
+    audit::log(
+        &st.db,
+        &p.actor(),
+        "enrollment_token.created",
+        id.to_string(),
+        json!({"group_id": group_id, "expires_in_days": days, "max_uses": max_uses, "prefix": prefix,
+               "remote_profile": profile, "remote_summary": profile.summary()}),
+    )
+    .await;
     let row: TokenRow = sqlx::query_as(&format!("{TOKEN_SELECT} WHERE t.id = $1"))
         .bind(id)
         .fetch_one(&st.db)
@@ -379,7 +421,59 @@ pub async fn create_token(
     v["token"] = token.clone().into();
     v["install_command"] = install_command(&st, &token).into();
     v["server_addr"] = st.cfg.agent_server_addr().into();
+    // Per-profile installer script, only in this response (it carries the token).
+    match installer_cmd(&st, &row, &token).await {
+        Ok((name, cmd)) => {
+            v["installer_filename"] = name.into();
+            v["installer_cmd"] = cmd.into();
+        }
+        Err(why) => {
+            v["installer_filename"] = Value::Null;
+            v["installer_cmd"] = Value::Null;
+            v["installer_unavailable"] = why.into();
+        }
+    }
     Ok(Json(v))
+}
+
+/// SHA-256 of the MSI the server serves (`<AGENT_DIR>/KestrelAgent.msi`).
+async fn msi_sha256(st: &AppState) -> Option<String> {
+    let path = st.cfg.agent_dir.join("KestrelAgent.msi");
+    tokio::fs::read(&path).await.ok().map(|b| sha256_hex(&b))
+}
+
+/// `Install-Kestrel-<preset>.cmd` for a new token. Without an MSI on the
+/// server (no hash to pin) no script is generated and the reason is returned.
+async fn installer_cmd(
+    st: &AppState,
+    row: &TokenRow,
+    token: &str,
+) -> Result<(String, String), String> {
+    let Some(sha) = msi_sha256(st).await else {
+        return Err(
+            "No agent MSI is installed on the server (KestrelAgent.msi in AGENT_DIR), so no installer script with a pinned SHA-256 can be generated. Use install_command with the MSI instead."
+                .into(),
+        );
+    };
+    let profile = row.profile();
+    let preset = serde_json::to_value(profile.preset())
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "custom".into());
+    let server = st.cfg.agent_server_addr();
+    let url = msi_url(st);
+    let summary = profile.summary();
+    let cmd = crate::installer_script::render(&crate::installer_script::ScriptParams {
+        server_addr: &server,
+        token,
+        token_prefix: &row.token_prefix,
+        expires_at: row.expires_at,
+        ca_pem: &st.ca.cert_pem,
+        msi_url: &url,
+        msi_sha256: &sha,
+        profile_summary: &summary,
+    })?;
+    Ok((format!("Install-Kestrel-{preset}.cmd"), cmd))
 }
 
 pub async fn revoke_token(

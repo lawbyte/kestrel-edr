@@ -2,7 +2,92 @@
 
 Read `CLAUDE.md` first. This run took Kestrel from "compiled and simulated" to "validated on real Windows, broader malware coverage, release candidate". Decisions with reasons are in `docs/DECISIONS.md`; the security reviews are `docs/security-review-2026-10-21.md` (v1.0) and `docs/security-review-v1.1-2026-10-21.md` (v1.1, independent).
 
-## What changed in this run
+## Remote access run (2026-10-21, after v1.1.0-rc1) — remote desktop, file manager, install profiles
+
+**What was added.** Admin-only remote desktop and a remote file manager, chosen per install through remote-access profiles. Not committed yet; owner reviews first.
+* **Profiles and ceiling:**
+  * Enrollment tokens carry a `RemoteAccessProfile`: *none*, *unrestricted* or *guarded*, all customisable.
+  * The agent pins the profile at enrollment as a ceiling that the server can never raise.
+  * The effective profile is `ceiling ∩ policy`, and the agent enforces it.
+  * Existing devices and policies default to **none**.
+  * The console has an **Install agent** wizard (Devices page / Settings → Enrollment). It produces a token plus a one-time `Install-Kestrel-<profile>.cmd`: self-elevating, downloads the MSI into an admin-only folder, pins its SHA-256, runs msiexec.
+* **Guardrails:** employee consent via the tray (Allow/Deny, deny on timeout or no user), reason, MFA re-auth (`POST /me/reauth`, 10 min), upload / delete (overwrite counts as delete), session and idle limits, allowed hours (device local time), blocked paths.
+* **Always on, in every profile:** the on-screen banner and the tray notification.
+* **Remote desktop:**
+  * A SYSTEM helper runs in the console session (`kestrel-agent desktop-helper`), started from the agent's own token with `TokenSessionId` set and placed in a kill-on-close job object. It talks to the agent over a SYSTEM-only pipe with PID checks both ways.
+  * Capture is GDI with JPEG, sending only changed frames, with at most 3 frames in flight.
+  * Input uses `SendInput` with scan codes. Input-desktop switches (UAC, lock screen) are followed.
+  * The banner is topmost, click-through and cannot be closed.
+  * Switching view-only → control asks for consent again.
+* **File manager:**
+  * Runs as SYSTEM; paths must be `X:\…` only.
+  * Every operation is handle-based and never follows links on Windows (`kestrel-win/src/win/hardfs.rs`). The guard sees the final path of the handle that is acted on.
+  * Kestrel's own folders and their ancestors are protected, and so are blocked paths and their ancestors. Network / device final paths are refused.
+  * Uploads go through a temp file plus a SHA-256 check and an atomic rename. Downloads stream from the agent.
+  * RedirectionGuard is enabled for the agent process (Windows 11 22H2+). Side effect: hashing and signature facts for files behind junctions created by non-admin users show as unknown.
+* **Server:** REST `/devices/:id/files…`, WebSocket `/devices/:id/remote-desktop` (Origin + CSRF + session checks, revalidated every 60 s), live hub with size caps, every operation and consent result in the hash-chained audit log (audit is written even when the client aborts).
+* **Privileges:** `remote.desktop` / `remote.files` (admin only) and interactive session only (API tokens 403).
+* **Console and tray:**
+  * Console: device tabs Remote desktop and Files, a remote-access summary (ceiling / policy / effective), a policy editor section, and mock support.
+  * Tray: an "IT is connected" banner and the consent prompt. Allow is armed only after 1 s; Escape = Deny.
+* **Contracts:** `kestrel_common::remote`, the Live payloads, `Hello.capabilities` / `remote_ceiling`, `AgentHealth.remote_ceiling` / `remote_effective`, `EnrollResponse.remote_profile`, tray `SubscribeWith` / `ConsentRequest` / `ConsentResponse` / `RemoteSession`. Documented in `docs/contracts.md` "Remote access" and `docs/ARCHITECTURE.md`.
+* **New dependency:** `jpeg-encoder` 0.7.1 (MIT/Apache + IJG; `IJG` added to `deny.toml`, notice in the README).
+
+**Security review.**
+* An independent hostile review of this feature found 3 High, 7 Medium, 9 Low and 5 Info:
+  * H1: TOCTOU junction swap during delete / rename / upload;
+  * H2: view-only silently switched to control;
+  * H3: audit skipped by aborting the request;
+  * M1–M6: consent reuse across admins, self-approval via injected input, symlink to UNC, blocked-path ancestor rename, live-message memory exhaustion, installer MSI swap in a user-writable folder.
+* All High and Medium findings are fixed with regression tests. M7 ("full file manager with upload ≈ SYSTEM code execution", so soft guardrails are no hard boundary) is documented in contracts and in the console.
+* Lows fixed: L1–L3, L5, L6, L8, L9.
+
+**Verification (final code).**
+
+| Check | Where | Result |
+|---|---|---|
+| `cargo fmt --all -- --check` | Windows | PASS |
+| `cargo clippy --workspace --all-targets -- -D warnings` | Windows | PASS |
+| `cargo test --workspace` incl. Postgres integration tests (new `tests/remote_access.rs`) | Windows | PASS — 42 suites, 657 tests, 0 failed |
+| `kestrel-win` pure tests + junction tests (temp dirs only) | Windows | PASS — 170 |
+| Console `npm test` / `lint` / `build` | Windows | PASS — 149 tests |
+| Tray `npm test` / `build`, Rust fmt / clippy / tests (incl. contract round-trip) | Windows | PASS — 62 + 18 |
+| `scripts/e2e.sh` (real server + 4 simulated agents; new remote section: profile token, ceiling `none` refusal, reason required, upload/download SHA-256, rename/delete/mkdir, protected + blocked paths, desktop WebSocket with consent, frames, input and stop, foreign Origin refused, audit rows, no file data in logs) | WSL2 Kali | PASS — 64/64 |
+| Console screenshots (mock), light + dark: `docs/screenshots/remote-desktop-*`, `remote-files-*`, `remote-summary-*`, `installer-step{1,2,3}-*` | Windows (Edge, Playwright) | PASS, inspected |
+| Real screen capture / input / banner / helper spawn | — | **NOT RUN** (never on the owner's PC; lab VM) |
+
+**Lab VM checklist for the owner.** Everything Win32 in the desktop path, and the handle-based file manager under SYSTEM, is unit-tested only. Run with an agent installed from an *unrestricted* and a *guarded* token.
+1. **Session start:** start from the console → `kestrel-agent.exe desktop-helper` runs as SYSTEM in session 1, the banner shows the admin and reason, frames arrive. Guarded: the tray prompt appears, and Deny / timeout refuse.
+2. **View-only switch:** view-only → control asks again (guarded); the banner text changes; held keys are released when switching back.
+3. **Input:** mouse incl. X1/X2, wheel and horizontal wheel; arrows, Delete, NumpadEnter, Win, AltGr; paste text with emoji / line breaks.
+4. **UAC prompt:** frames show the secure desktop (`secure_desktop: true`); clicking Yes works; the banner is absent while it is up.
+5. **Lock and log-off:** Win+L, then type the password; log-off or switch user ends the session.
+6. **Display setups:** two monitors (one left of / above the primary); 150 % and 200 % scaling.
+7. **Ctrl+Alt+Del:** test with and without `SoftwareSASGeneration` = 1.
+8. **Process lifetime:** killing the agent makes the helper and banner vanish; killing the helper makes the console see `ended`; Disconnect leaves no stuck keys.
+9. **Load:** 4K at quality 90 / 15 fps keeps frames < 1 MiB with sane CPU.
+10. **Drive list:** empty DVD drive / card reader, a mapped network drive (hidden) and a SUBST drive.
+11. **Protected and blocked folders:** `Program Files\Kestrel` and `ProgramData\Kestrel` are refused, and so are their parents for rename / delete. A blocked path refuses its parents too.
+12. **Junction swap:** as a standard user, create a junction inside a folder the admin deletes, then swap a subfolder for a junction mid-delete (oplock tool). Only the link is removed and nothing outside the folder is touched. Plant a symlink to `\??\UNC\host\share` and confirm the open is refused with no outbound SMB.
+13. **RedirectionGuard:** on 22H2+ it is active (`Get-ProcessMitigation -Name kestrel-agent.exe`); check that enrichment of images behind user junctions only degrades to unknown.
+14. **Installer script:** `Install-Kestrel-guarded.cmd` from the wizard on a clean VM elevates, the folder ACL is SYSTEM + Administrators only, the hash is checked, the install succeeds, and the device shows that ceiling.
+15. **Reinstall:** reinstall with a different profile only after uninstall (with the token). The same server + CA keeps the old identity and ceiling.
+
+**Residual risks (remote access).**
+* **Full file manager is SYSTEM code execution.** A malicious admin with *full* files + upload can rewrite the agent's config and widen the ceiling, so hours, blocked paths and consent are soft against them. The hard boundaries are the install ceiling (`none` / view-only / read-only) and admin MFA.
+* **Listing race:** folder listing still enumerates by path after a handle check (`verify_dir`). A racing swap can only reveal names and sizes elsewhere; reads and writes are handle-based. Fix: a `RemoteFs::list_dir` hook.
+* **Hard links:** reading a protected file through a hard link the reader could already write is not detected (low).
+* **Allowed hours** use the device's local time zone, which a standard user can change.
+* **Desktop idle timeout** is enforced by the server only; the agent enforces max duration and 90 s server silence.
+* **The ceiling does not cover older response actions** (kill, quarantine, isolate, triage), which remain governed by RBAC.
+* **The desktop WebSocket takes the CSRF token in the query string** (may appear in reverse-proxy access logs). The session cookie is SameSite=Strict and Origin is checked.
+* **The enrollment token is on the msiexec command line** in the generated script (same as `install_command`).
+* **The banner cannot appear on the secure desktop** (UAC / lock); the tray notification still does.
+* **The mouse pointer is not drawn into frames**, and there is no clipboard or audio.
+
+**Decisions log.** The integration choices (one live channel, capability flags in `Hello`, interactive session only, server + agent checks, network paths refused, protected-folder rules, tray opt-in features, `jpeg-encoder` + IJG) still need entries in `docs/DECISIONS.md` (owned by the coordinator).
+
+## What changed in the v1.1 run
 
 **Windows for real.** Toolchain installed (Rust 1.99 MSVC, VS 2022 Build Tools, protoc, .NET 8 + WiX 6.0.2, Docker Desktop already present). Native build/test/clippy/fmt green; MSI, tray (Tauri MSI/NSIS) and the Docker image build. The agent now runs on a **clean** Windows 11 (static CRT — it needed `VCRUNTIME140.dll` before).
 

@@ -43,6 +43,7 @@ import {
 import { buildIncidents, type Ctx } from './scenarios'
 import { fullAlerts } from './story'
 import { hexId, int, pick, sha256, uuid } from './rng'
+import { profileGuarded, profileNone, profileUnrestricted } from '@/lib/remote-profile'
 
 function fnv(s: string): string {
   let h1 = 0x811c9dc5
@@ -327,9 +328,10 @@ export class MockDb {
 
   private seedEnrollment() {
     this.enrollment = [
-      { id: uuid(), group_id: 'grp-sales', group_name: 'Sales', token_prefix: 'kse_7Hq2', created_at: NOW - 20 * DAY, expires_at: NOW + 10 * DAY, max_uses: 50, uses: 5, revoked: false },
-      { id: uuid(), group_id: 'grp-fin', group_name: 'Finance', token_prefix: 'kse_Lm4x', created_at: NOW - 45 * DAY, expires_at: NOW - 15 * DAY, max_uses: 10, uses: 5, revoked: false },
-      { id: uuid(), group_id: 'grp-eng', group_name: 'Engineering', token_prefix: 'kse_p9Za', created_at: NOW - 70 * DAY, expires_at: NOW - 40 * DAY, max_uses: 25, uses: 6, revoked: true },
+      { id: uuid(), group_id: 'grp-sales', group_name: 'Sales', token_prefix: 'kse_7Hq2', created_at: NOW - 20 * DAY, expires_at: NOW + 10 * DAY, max_uses: 50, uses: 5, revoked: false, remote_profile: profileGuarded() },
+      { id: uuid(), group_id: 'grp-fin', group_name: 'Finance', token_prefix: 'kse_Lm4x', created_at: NOW - 45 * DAY, expires_at: NOW - 15 * DAY, max_uses: 10, uses: 5, revoked: false, remote_profile: profileNone() },
+      { id: uuid(), group_id: 'grp-eng', group_name: 'Engineering', token_prefix: 'kse_p9Za', created_at: NOW - 70 * DAY, expires_at: NOW - 40 * DAY, max_uses: 25, uses: 6, revoked: true, remote_profile: profileUnrestricted() },
+      { id: uuid(), group_id: 'grp-it', group_name: 'IT', token_prefix: 'kse_R2tw', created_at: NOW - 6 * DAY, expires_at: NOW + 24 * DAY, max_uses: 20, uses: 3, revoked: false, remote_profile: profileUnrestricted() },
     ]
   }
 

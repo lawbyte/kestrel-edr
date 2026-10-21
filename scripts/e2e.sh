@@ -8,7 +8,8 @@
 # telemetry (Lumma ClickFix, Vidar smash-and-grab, a benign workday) and checks
 # the results through the REST API: devices, incidents, priorities, data at
 # risk, storyline/process tree/checklist, an offline-queued response action,
-# the audit hash chain and a hunt query.
+# the audit hash chain and a hunt query, plus admin remote access (install
+# profile ceiling, file manager, remote desktop over the WebSocket).
 #
 # Environment:
 #   DATABASE_URL       Postgres server to use (a throwaway database is created on
@@ -349,6 +350,163 @@ else
   fail "agent did not record block_destination in sim-actions.jsonl"
 fi
 
+# --- Remote access: install ceiling, file manager, remote desktop ---------
+# A fourth simulated endpoint enrolls with a token whose remote-access profile
+# allows remote control + the file manager (consent and reason required; the
+# simulator's consent responder clicks Allow). The other devices keep the
+# default "no remote access" ceiling.
+log "remote access: profile-bound token, file manager, remote desktop"
+check "lumma (enrolled without a profile) reports ceiling 'none'" \
+  jq -e '.remote_access.ceiling.desktop == "off" and .remote_access.ceiling.files == "off" and .remote_access.files.available == false' \
+  <<<"$(api GET "/devices/$LUMMA_ID")" >/dev/null
+RPROFILE='{"desktop":"control","files":"full","guardrails":{"require_consent":true,"consent_timeout_secs":30,"require_reason":true,"require_mfa_reauth":false,"allow_upload":true,"allow_delete":true,"max_session_minutes":30,"idle_timeout_minutes":10,"allowed_hours":null,"blocked_paths":["C:\\Windows\\System32\\config"]}}'
+rtok="$(api POST /enrollment-tokens "$(jq -nc --argjson p "$RPROFILE" '{expires_in_days: 1, max_uses: 2, remote_profile: $p}')")" || die "profile token"
+RTOKEN="$(jq -r .token <<<"$rtok")"
+check "token carries the remote profile and summary" \
+  jq -e '.remote_profile.desktop == "control" and (.remote_summary | test("consent"))' <<<"$rtok" >/dev/null
+# The policy must allow it too (default policy: no remote access).
+pol="$(api GET /policies/default)" || die "get default policy"
+pol="$(jq -c --argjson p '{"desktop":"control","files":"full","guardrails":{"require_consent":false,"require_reason":false,"require_mfa_reauth":false,"allow_upload":true,"allow_delete":true,"max_session_minutes":0,"idle_timeout_minutes":0,"allowed_hours":null,"blocked_paths":[]}}' '.remote_access = $p' <<<"$pol")"
+api PUT /policies/default "$pol" >/dev/null || die "enable remote access in the default policy"
+
+REMOTE_HOST="E2E-REMOTE-04"
+(
+  exec "$BIN/kestrel-agent" --state-dir "$WORK/agent-remote" simulate \
+    --server "127.0.0.1:$GRPC_PORT" --server-name localhost --ca "$WORK/ca.pem" --token "$RTOKEN" \
+    --hostname "$REMOTE_HOST" --replay "$WORK/empty.jsonl" --speed 1 --heartbeat-secs 2 --sim-consent allow \
+    >"$WORK/agent-remote.log" 2>&1
+) & PREM=$!
+REMOTE_ID=""
+for _ in $(seq 1 100); do
+  REMOTE_ID="$(api GET '/devices?limit=100' | jq -r --arg h "$REMOTE_HOST" '.items[] | select(.hostname == $h) | .id')" || true
+  if [[ -n "$REMOTE_ID" ]]; then
+    rdet="$(api GET "/devices/$REMOTE_ID")" || rdet='{}'
+    jq -e '.remote_access.files.available and .remote_access.desktop.available' <<<"$rdet" >/dev/null 2>&1 && break
+  fi
+  sleep 0.3
+done
+check "remote device online with files + desktop available" \
+  jq -e '.remote_access.files.available and .remote_access.desktop.available' <<<"$rdet" >/dev/null
+check "effective profile = ceiling ∩ policy (consent + reason kept from the ceiling)" \
+  jq -e '.remote_access.effective.guardrails.require_consent and .remote_access.effective.guardrails.require_reason and .remote_access.effective.desktop == "control"' <<<"$rdet" >/dev/null
+
+rq() { # rq METHOD PATH [curl args...] -> sets RQ_CODE, body in $WORK/rresp
+  local m="$1" p="$2"; shift 2
+  RQ_CODE="$(curl -ks -o "$WORK/rresp" -w '%{http_code}' -b "$COOKIES" -X "$m" -H "X-CSRF-Token: $CSRF" "$@" "$API$p")" || RQ_CODE=000
+}
+FMS="$(cat /proc/sys/kernel/random/uuid)"
+Q="fm_session=$FMS&reason=e2e"
+enc() { jq -rn --arg v "$1" '$v|@uri'; }
+
+rq GET "/devices/$LUMMA_ID/files?path=&$Q"
+check "file manager refused on a device installed without remote access (HTTP $RQ_CODE)" \
+  bash -c '[[ "$1" == 403 ]] && jq -e ".error.reason == \"not_permitted\"" "$2" >/dev/null' _ "$RQ_CODE" "$WORK/rresp"
+rq GET "/devices/$REMOTE_ID/files?path=&fm_session=$FMS"
+check "reason is required by the install profile (HTTP $RQ_CODE)" test "$RQ_CODE" = 400
+rq GET "/devices/$REMOTE_ID/files?path=&$Q"
+check "list drives (HTTP $RQ_CODE)" jq -e '[.entries[] | select(.kind == "drive")] | length >= 1' "$WORK/rresp"
+rq GET "/devices/$REMOTE_ID/files?path=$(enc 'C:\Users')&$Q"
+check "list C:\\Users (HTTP $RQ_CODE)" test "$RQ_CODE" = 200
+rq GET "/devices/$REMOTE_ID/files?path=$(enc '\\server\share')&$Q"
+check "UNC path refused with 400 (HTTP $RQ_CODE)" test "$RQ_CODE" = 400
+
+head -c 1500000 /dev/urandom >"$WORK/upload.bin"
+UPSHA="$(sha256sum "$WORK/upload.bin" | cut -d' ' -f1)"
+rq POST "/devices/$REMOTE_ID/files/mkdir?$Q" -H 'Content-Type: application/json' --data '{"path":"C:\\Users\\Public\\e2e"}'
+check "mkdir (HTTP $RQ_CODE)" test "$RQ_CODE" = 200
+rq POST "/devices/$REMOTE_ID/files/upload?path=$(enc 'C:\Users\Public\e2e\blob.bin')&$Q" \
+  -H 'Content-Type: application/octet-stream' --data-binary "@$WORK/upload.bin"
+check "upload 1.5 MB (consent auto-allowed) returns the same SHA-256 (HTTP $RQ_CODE)" \
+  jq -e --arg s "$UPSHA" '.sha256 == $s and .size == 1500000' "$WORK/rresp"
+curl -ks -b "$COOKIES" -o "$WORK/download.bin" -D "$WORK/dlh" \
+  "$API/devices/$REMOTE_ID/files/download?path=$(enc 'C:\Users\Public\e2e\blob.bin')&$Q" || true
+check "download returns identical bytes" test "$(sha256sum "$WORK/download.bin" | cut -d' ' -f1)" = "$UPSHA"
+check "download has a safe Content-Disposition" grep -qi 'content-disposition: attachment; filename="blob.bin"' "$WORK/dlh"
+rq POST "/devices/$REMOTE_ID/files/rename?$Q" -H 'Content-Type: application/json' \
+  --data '{"from":"C:\\Users\\Public\\e2e\\blob.bin","to":"C:\\Users\\Public\\e2e\\renamed.bin"}'
+check "rename (HTTP $RQ_CODE)" test "$RQ_CODE" = 200
+rq POST "/devices/$REMOTE_ID/files/delete?$Q" -H 'Content-Type: application/json' \
+  --data '{"path":"C:\\Users\\Public\\e2e","recursive":true}'
+check "recursive delete (HTTP $RQ_CODE)" jq -e '.removed >= 2' "$WORK/rresp"
+rq GET "/devices/$REMOTE_ID/files?path=$(enc 'C:\Program Files\Kestrel')&$Q"
+check "Kestrel's own folder refused (HTTP $RQ_CODE, protected_path)" \
+  bash -c '[[ "$1" == 403 ]] && grep -q protected_path "$2"' _ "$RQ_CODE" "$WORK/rresp"
+rq GET "/devices/$REMOTE_ID/files?path=$(enc 'C:\Windows\System32\config')&$Q"
+check "install-profile blocked path refused (HTTP $RQ_CODE, blocked_path)" \
+  bash -c '[[ "$1" == 403 ]] && grep -q blocked_path "$2"' _ "$RQ_CODE" "$WORK/rresp"
+
+# Remote desktop over the WebSocket (python websockets).
+SESSION_COOKIE="$(awk '$6 == "kestrel_session" {print $7}' "$COOKIES" | tail -n1)"
+cat >"$WORK/ws.py" <<'PY'
+import asyncio, json, ssl, struct, sys
+import websockets
+url, cookie, origin = sys.argv[1], sys.argv[2], sys.argv[3]
+async def main():
+    ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+    seen = {"starting": 0, "started": 0, "frames": 0, "ended": 0, "consent_pending": 0}
+    async with websockets.connect(url, ssl=ctx, origin=origin, extra_headers={"Cookie": "kestrel_session=" + cookie}, max_size=4 << 20) as ws:
+        sent_input = False
+        async def rx():
+            nonlocal sent_input
+            while True:
+                m = await ws.recv()
+                if isinstance(m, bytes):
+                    seq, w, h = struct.unpack(">IHH", m[:8])
+                    assert m[16:18] == b"\xff\xd8", "not a JPEG"
+                    seen["frames"] += 1
+                    if not sent_input:
+                        sent_input = True
+                        await ws.send(json.dumps({"type": "input", "event": {"kind": "mouse_move", "x": 0.25, "y": 0.75}}))
+                        await ws.send(json.dumps({"type": "input", "event": {"kind": "mouse_button", "x": 0.25, "y": 0.75, "button": "left", "down": True}}))
+                        await ws.send(json.dumps({"type": "input", "event": {"kind": "mouse_button", "x": 0.25, "y": 0.75, "button": "left", "down": False}}))
+                    if seen["frames"] >= 3:
+                        await ws.send(json.dumps({"type": "stop"}))
+                else:
+                    t = json.loads(m).get("type")
+                    if t in seen: seen[t] += 1
+                    if t == "ended": return
+        try:
+            await asyncio.wait_for(rx(), 40)
+        except websockets.ConnectionClosed:
+            pass
+    print(json.dumps(seen))
+asyncio.run(main())
+PY
+WSURL="wss://127.0.0.1:$HTTPS_PORT/api/devices/$REMOTE_ID/remote-desktop?quality=50&fps=8&reason=e2e%20support&csrf=$CSRF"
+wsout="$(python3 "$WORK/ws.py" "$WSURL" "$SESSION_COOKIE" "https://127.0.0.1:$HTTPS_PORT" 2>"$WORK/ws.err" | tail -n1)" || wsout='{}'
+check "remote desktop: consent, started, ≥3 JPEG frames, ended ($wsout)" \
+  jq -e '.started == 1 and .frames >= 3 and .ended == 1 and .consent_pending == 1' <<<"$wsout" >/dev/null
+# The agent ends the capture asynchronously after the server's DesktopStop.
+for _ in $(seq 1 25); do
+  jq -e '.active == false' "$WORK/agent-remote/sim-desktop.json" >/dev/null 2>&1 && break
+  sleep 0.2
+done
+if jq -e '.inputs > 0 and .active == false' "$WORK/agent-remote/sim-desktop.json" >/dev/null 2>&1; then
+  pass "remote desktop: input reached the endpoint (sim-desktop.json inputs > 0) and the banner is cleared"
+else
+  fail "remote desktop: input reached the endpoint (sim-desktop.json inputs > 0) and the banner is cleared"
+  cat "$WORK/agent-remote/sim-desktop.json" >&2 2>/dev/null || echo "(no sim-desktop.json)" >&2
+  grep -iE "desktop|input|live" "$WORK/agent-remote.log" | tail -n 20 >&2 || true
+  tail -n 5 "$WORK/ws.err" >&2 2>/dev/null || true
+fi
+bad="$(curl -ks -o /dev/null -w '%{http_code}' -b "$COOKIES" -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' -H 'Origin: https://evil.example' \
+  "https://127.0.0.1:$HTTPS_PORT/api/devices/$REMOTE_ID/remote-desktop?reason=x&csrf=$CSRF")" || bad=000
+check "remote desktop refuses a foreign Origin (HTTP $bad)" test "$bad" = 403
+stop_pid "$PREM"
+
+audit="$(api GET '/audit-log?limit=200')" || audit='{}'
+check "audit: upload recorded with its SHA-256" \
+  jq -e --arg s "$UPSHA" '[.items[] | select(.action == "remote.files.upload" and .details.sha256 == $s)] | length == 1' <<<"$audit" >/dev/null
+check "audit: desktop start and stop recorded" \
+  jq -e '([.items[] | select(.action == "remote.desktop.start")] | length >= 1) and ([.items[] | select(.action == "remote.desktop.stop")] | length >= 1)' <<<"$audit" >/dev/null
+check "audit: consent results recorded" jq -e '[.items[] | select(.action == "remote.consent")] | length >= 1' <<<"$audit" >/dev/null
+if grep -rqa "$(head -c 24 "$WORK/upload.bin" | base64 | head -c 24)" "$SERVER_LOG" 2>/dev/null; then
+  fail "file contents leaked into the server log"
+else
+  pass "no file contents in the server log"
+fi
+
 # --- Audit chain and hunt ---------------------------------------------------
 verify="$(api GET /audit-log/verify)" || die "audit verify"
 check "audit log hash chain verifies ($(jq -c . <<<"$verify"))" jq -e '.ok == true and .count > 0' <<<"$verify" >/dev/null
@@ -360,7 +518,7 @@ check "hunt results have no duplicate events" \
   test "$(jq '[.items[] | [.device_id, .ts, .guid, .type]] | unique | length' <<<"$hunt")" -eq "$n_hunt"
 
 dash="$(api GET /dashboard)" || die "dashboard"
-check "dashboard counts 3 devices and ≥2 open incidents" jq -e '.devices.total == 3 and .incidents.open >= 2' <<<"$dash" >/dev/null
+check "dashboard counts 4 devices (3 replays + remote) and ≥2 open incidents" jq -e '.devices.total == 4 and .incidents.open >= 2' <<<"$dash" >/dev/null
 
 if grep -qE ' (ERROR|panicked)' "$SERVER_LOG"; then
   fail "server log contains errors"

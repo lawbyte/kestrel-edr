@@ -9,6 +9,7 @@ use crate::{
     alert::Alert,
     event::Event,
     policy::Policy,
+    remote::{LiveAgentMsg, LiveServerMsg, RemoteAccessProfile},
     response::{ActionOutcome, ResponseAction},
     rules::RuleBundle,
     TimestampMs,
@@ -55,6 +56,14 @@ pub enum AgentPayload {
         #[serde(default)]
         error: String,
     },
+    /// Remote-access live session traffic (remote desktop frames, file
+    /// manager replies). Ephemeral: envelope seq 0, never in the outbox,
+    /// never acked, never stored server-side. Older servers drop it as
+    /// malformed. See `kestrel_common::remote`.
+    Live {
+        session_id: Uuid,
+        msg: LiveAgentMsg,
+    },
 }
 
 /// Server → agent.
@@ -100,6 +109,14 @@ pub enum ServerPayload {
     SetUninstallToken {
         token: String,
     },
+    /// Remote-access live session traffic (desktop start/stop/input, file
+    /// manager requests). Not acked by the agent and not tracked by the
+    /// server; only sent to agents whose `Hello.capabilities` list the
+    /// feature. See `kestrel_common::remote`.
+    Live {
+        session_id: Uuid,
+        msg: LiveServerMsg,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -116,6 +133,14 @@ pub struct Hello {
     /// seq high-water mark instead of discarding new messages as duplicates.
     #[serde(default)]
     pub outbox_epoch: Option<Uuid>,
+    /// Optional features this agent supports (`remote::CAP_LIVE_FILES`,
+    /// `remote::CAP_LIVE_DESKTOP`). Empty for older agents.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Remote-access ceiling pinned on this agent at enrollment (`None` from
+    /// agents older than profiles = no remote access).
+    #[serde(default)]
+    pub remote_ceiling: Option<RemoteAccessProfile>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -173,6 +198,13 @@ pub struct AgentHealth {
     pub ip_addresses: Vec<String>,
     #[serde(default)]
     pub av_product: Option<String>,
+    /// Remote-access ceiling pinned at enrollment (see `Hello.remote_ceiling`).
+    #[serde(default)]
+    pub remote_ceiling: Option<RemoteAccessProfile>,
+    /// Effective remote-access profile the agent enforces now
+    /// (ceiling ∩ policy).
+    #[serde(default)]
+    pub remote_effective: Option<RemoteAccessProfile>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -232,6 +264,11 @@ pub struct EnrollResponse {
     /// only its Argon2id hash. Empty from old servers.
     #[serde(default)]
     pub uninstall_token: String,
+    /// Remote-access profile bound to the enrollment token. The agent pins it
+    /// as its ceiling; later server messages never change it (only a new
+    /// enrollment does). Absent from older servers = no remote access.
+    #[serde(default)]
+    pub remote_profile: RemoteAccessProfile,
 }
 
 /// Replace NUL characters in every string (and object key) of a JSON value

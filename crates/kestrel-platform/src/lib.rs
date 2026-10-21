@@ -16,6 +16,12 @@ use tokio::sync::mpsc;
 
 pub use detect::{CanarySpec, ProcessFacts};
 
+pub mod remote;
+pub use remote::{
+    DesktopEvent, DesktopSession, DesktopSink, DesktopStartParams, FsGuard, FsOpError,
+    RemoteDesktop, RemoteFs,
+};
+
 /// Sensor configuration derived from policy + host context.
 #[derive(Debug, Clone)]
 pub struct SensorConfig {
@@ -84,6 +90,9 @@ pub enum Audience {
     Public,
     /// Only the owner (lower-case SID or `DOMAIN\user`).
     Owner(String),
+    /// Only tray clients running in this Windows session (the active console
+    /// session: remote-access consent prompts).
+    Session(u32),
 }
 
 /// A push notification with its audience.
@@ -98,6 +107,7 @@ impl TrayPush {
         match &self.audience {
             Audience::Public => true,
             Audience::Owner(o) => c.owner_keys().iter().any(|k| k == o),
+            Audience::Session(s) => c.session_id == Some(*s) && c.is_identified(),
         }
     }
 }
@@ -319,6 +329,36 @@ pub trait Platform: Send + Sync {
     /// restricted DACL; simulator: a Unix socket in the state dir). Runs until
     /// the process exits.
     async fn serve_tray(&self, handler: Arc<dyn TrayHandler>) -> anyhow::Result<()>;
+
+    /// File-system access for the admin remote file manager (`None` =
+    /// unsupported on this platform). The agent core implements every
+    /// operation on top of it (path rules, protected folders, chunked
+    /// transfers); see [`remote::RemoteFs`].
+    fn remote_fs(&self) -> Option<Arc<dyn RemoteFs>> {
+        None
+    }
+
+    /// Screen capture + input injection for admin remote desktop (`None` =
+    /// unsupported). See [`remote::RemoteDesktop`].
+    fn remote_desktop(&self) -> Option<Arc<dyn RemoteDesktop>> {
+        None
+    }
+
+    /// Windows session id of the active console (physical) session, if a
+    /// user can be there (Windows: `WTSGetActiveConsoleSessionId`, `None`
+    /// for 0xFFFFFFFF). Remote-access consent prompts go only to trays in
+    /// this session, and only they may answer.
+    fn console_session_id(&self) -> Option<u32> {
+        None
+    }
+
+    /// Local wall-clock time of the device as (weekday 0 = Monday … 6 =
+    /// Sunday, minute since local midnight), for the remote-access
+    /// `allowed_hours` guardrail. `None` = unknown: profiles with allowed
+    /// hours then refuse (fail closed).
+    fn local_weekday_minute(&self) -> Option<(u8, u16)> {
+        None
+    }
 }
 
 #[cfg(test)]

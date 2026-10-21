@@ -16,7 +16,7 @@ mod sse;
 mod updates;
 mod users;
 
-use crate::{error::ApiError, state::AppState};
+use crate::{error::ApiError, remote, state::AppState};
 use axum::{
     extract::{FromRequest, FromRequestParts},
     routing::{delete, get, patch, post},
@@ -180,6 +180,12 @@ async fn not_found() -> ApiError {
     ApiError::not_found("no such API endpoint")
 }
 
+/// Routes that must not sit behind the 8 MiB request body limit (merged in
+/// `http_router` after the limit layer): the streaming file upload (≤ 4 GiB).
+pub fn upload_router() -> Router<AppState> {
+    Router::new().route("/devices/:id/files/upload", post(remote::files::upload))
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route(
@@ -198,6 +204,7 @@ pub fn router() -> Router<AppState> {
         .route("/me/mfa/setup", post(auth_routes::mfa_setup))
         .route("/me/mfa/enable", post(auth_routes::mfa_enable))
         .route("/me/mfa/disable", post(auth_routes::mfa_disable))
+        .route("/me/reauth", post(auth_routes::reauth))
         // dashboard
         .route("/dashboard", get(dashboard::get_dashboard))
         // devices
@@ -224,6 +231,18 @@ pub fn router() -> Router<AppState> {
             "/devices/:id/duplicates/dismiss",
             post(devices::dismiss_duplicate),
         )
+        // remote access (admin only, interactive sessions only)
+        .route("/devices/:id/files", get(remote::files::list))
+        .route("/devices/:id/files/stat", get(remote::files::stat))
+        .route("/devices/:id/files/download", get(remote::files::download))
+        .route("/devices/:id/files/rename", post(remote::files::rename))
+        .route("/devices/:id/files/delete", post(remote::files::delete))
+        .route("/devices/:id/files/mkdir", post(remote::files::mkdir))
+        .route(
+            "/devices/:id/remote-desktop/status",
+            get(remote::desktop::status),
+        )
+        .route("/devices/:id/remote-desktop", get(remote::desktop::connect))
         // groups & enrollment
         .route("/groups", get(groups::list).post(groups::create))
         .route("/groups/:id", patch(groups::update).delete(groups::remove))

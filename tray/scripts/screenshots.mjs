@@ -8,7 +8,8 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const out = join(root, "screenshots");
 const port = 4174;
-const server = spawn("npx", ["vite", "preview", "--outDir", "dist-mock", "--port", String(port), "--strictPort"], { cwd: root, stdio: "ignore" });
+// Fixed command string (no user input); a shell is needed for npx.cmd on Windows.
+const server = spawn(`npx vite preview --outDir dist-mock --port ${port} --strictPort`, { cwd: root, stdio: "ignore", shell: true });
 const base = `http://localhost:${port}/`;
 
 async function waitForServer() {
@@ -36,6 +37,38 @@ const shots = [
   ["activity-review-dialog", "tab=activity", async (p) => { await p.getByRole("button", { name: "Request review" }).first().click(); await p.locator("textarea").fill("This is the installer for SAP GUI from our vendor's portal. Finance needs it for month-end close."); await p.waitForTimeout(150); }],
   ["activity-empty", "tab=activity&empty=1"],
   ["activity-push-banner", "tab=activity&state=protected&push=0.4", async (p) => { await p.waitForTimeout(900); }],
+  ["status-remote-control", "tab=status&state=protected&remote=control"],
+  ["status-remote-view", "tab=status&state=attention&remote=view"],
+  ["status-remote-files", "tab=status&state=protected&remote=files"],
+  ["activity-remote-control", "tab=activity&state=protected&remote=control"],
+  // IT consent prompt. The hooks also check behaviour: an early Enter must not allow,
+  // Escape denies, Enter after the arm delay allows.
+  ["consent-desktop", "tab=status&state=protected&consent=desktop&consent_in=0.1", async (p) => { await p.locator(".consent").waitFor(); await p.waitForTimeout(1200); }],
+  ["consent-files-queue", "tab=status&state=protected&consent=queue&consent_in=0.1", async (p) => { await p.locator(".consent").waitFor(); await p.waitForTimeout(1200); }],
+  ["consent-early-enter-ignored", "tab=status&state=protected&consent=view&consent_in=0.1", async (p) => {
+    await p.locator(".consent").waitFor();
+    await p.keyboard.press("Enter");
+    await p.waitForTimeout(700);
+    if (!(await p.locator(".consent").isVisible())) throw new Error("early Enter must not answer the prompt");
+  }],
+  ["consent-denied-escape", "tab=status&state=protected&consent=desktop&consent_in=0.1", async (p) => {
+    await p.locator(".consent").waitFor();
+    await p.keyboard.press("Escape");
+    await p.locator(".consent-result").waitFor();
+    if (await p.locator(".remote").count()) throw new Error("Escape must deny");
+  }],
+  ["consent-allowed-enter", "tab=status&state=protected&consent=files&consent_in=0.1", async (p) => {
+    await p.locator(".consent").waitFor();
+    await p.waitForTimeout(1300);
+    await p.keyboard.press("Enter");
+    await p.locator(".remote").waitFor();
+    await p.waitForTimeout(150);
+  }],
+  ["consent-expired", "tab=status&state=protected&consent=desktop&consent_in=0.1&consent_timeout=2", async (p) => {
+    await p.locator(".consent").waitFor();
+    await p.locator(".consent-result").waitFor({ timeout: 5000 });
+    if (await p.locator(".consent").count()) throw new Error("expired prompt must close");
+  }],
   ["help", "tab=help"],
   ["help-notice", "tab=help", async (p) => { await p.locator("#h-notice").scrollIntoViewIfNeeded(); await p.waitForTimeout(100); }],
 ];
@@ -64,5 +97,7 @@ try {
   }
   await browser.close();
 } finally {
-  server.kill();
+  // With `shell: true` (Windows) kill() only stops the shell; take the whole tree down.
+  if (process.platform === "win32" && server.pid) spawn("taskkill", ["/pid", String(server.pid), "/T", "/F"], { stdio: "ignore" });
+  else server.kill();
 }

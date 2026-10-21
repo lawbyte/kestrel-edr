@@ -1199,3 +1199,128 @@ code {
     fill: CanvasText;
   }
 }
+
+/* ---- IT remote session banner ------------------------------------------- */
+/* Prominent, non-dismissable. Solid accent fill so it can't be mistaken for an
+   activity push; the mode is spelled out in text and shown by its icon. */
+.remote {
+  display: flex;
+  gap: 12px;
+  margin: 0 12px 8px;
+  padding: 10px 12px 10px 12px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-text);
+  box-shadow: 0 1px 3px rgba(10, 25, 40, 0.18);
+  animation: drop 200ms ease-out;
+  flex: none;
+}
+.remote__icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent-text) 16%, transparent);
+}
+.remote__body {
+  flex: 1;
+  min-width: 0;
+}
+.remote__body p {
+  margin: 0;
+}
+.remote__title {
+  font-weight: 600;
+  font-size: 14px;
+  line-height: 20px;
+  text-wrap: pretty;
+}
+.remote__meta,
+.remote__reason,
+.remote__help {
+  font-size: 12px;
+  line-height: 16px;
+  margin-top: 2px !important;
+  overflow-wrap: anywhere;
+}
+.remote__mode {
+  font-weight: 600;
+}
+.remote__help {
+  margin-top: 6px !important;
+}
+.remote__link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.remote :focus-visible {
+  outline-color: var(--accent-text);
+}
+.row__value--strong {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+/* ---- IT consent prompt -------------------------------------------------- */
+.consent {
+  padding: 20px 20px 0;
+}
+.consent:focus {
+  outline: none;
+}
+.consent:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+.consent__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.consent__icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.consent h2 {
+  text-wrap: pretty;
+}
+.consent__reason {
+  margin: 12px 0 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.consent__reason--none {
+  font-weight: 400;
+  color: var(--text-2);
+}
+.consent__timer {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 4px;
+  background: var(--layer);
+  border: 1px solid var(--stroke);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.consent__queued {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.consent-result {
+  flex: none;
+}

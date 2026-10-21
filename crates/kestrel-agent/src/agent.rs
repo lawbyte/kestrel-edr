@@ -93,6 +93,8 @@ pub struct Core {
     server_ips: RwLock<Vec<String>>,
     inflight_cmds: Mutex<HashSet<Uuid>>,
     salt: String,
+    /// Live remote-access sessions (remote desktop, file manager).
+    pub live: crate::live::LiveManager,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -137,6 +139,18 @@ impl Core {
         read(&self.policy).clone().unwrap_or_default()
     }
 
+    /// Remote-access ceiling pinned at enrollment (`none()` when absent).
+    /// Read from `agent.toml`'s in-memory copy; no server message changes it.
+    pub fn remote_ceiling(&self) -> kestrel_common::remote::RemoteAccessProfile {
+        read(&self.cfg).remote_ceiling()
+    }
+
+    /// Effective remote-access profile: ceiling ∩ policy.
+    pub fn remote_effective(&self) -> kestrel_common::remote::RemoteAccessProfile {
+        self.remote_ceiling()
+            .intersect(&self.policy().remote_access)
+    }
+
     /// Version of the server-provided policy in force (0 = none yet).
     pub fn policy_version(&self) -> u64 {
         read(&self.policy).as_ref().map(|p| p.version).unwrap_or(0)
@@ -176,6 +190,11 @@ impl Core {
 
     pub fn subscribe_tray(&self) -> broadcast::Receiver<TrayPush> {
         self.tray_tx.subscribe()
+    }
+
+    /// Broadcast a raw push to tray connections (e.g. `RemoteSession`).
+    pub fn broadcast_tray(&self, push: TrayPush) {
+        let _ = self.tray_tx.send(push);
     }
 
     // --------------------------------------------------------------- outbox
@@ -404,6 +423,8 @@ impl Core {
         let old = read(&self.policy).clone();
         *write(&self.filter) = Arc::new(PrivacyFilter::new(&p.privacy, &p.telemetry, &self.salt));
         *write(&self.policy) = Some(p.clone());
+        // Remote access switched off: end running sessions now.
+        self.live.policy_changed(&p.remote_access);
         let _ = self.engine_ctl.send(EngineCtl::Policy(Box::new(p.clone())));
         // Hardening (async: may touch registry / AppLocker).
         let me = self.clone();
@@ -547,6 +568,8 @@ impl Core {
                 .map(|u| self.filter().user(&u)),
             ip_addresses: self.platform.ip_addresses(),
             av_product: self.platform.av_product(),
+            remote_ceiling: Some(self.remote_ceiling()),
+            remote_effective: Some(self.remote_effective()),
         }
     }
 
@@ -657,6 +680,8 @@ impl AgentHandle {
     /// Stop all tasks and wait for them.
     pub async fn stop(mut self) {
         self.core.shutdown.cancel();
+        // Remote desktop banner / helper and transfers end with the agent.
+        self.core.live.shutdown();
         self.core.stop_sensors();
         for t in self.tasks.drain(..) {
             let _ = tokio::time::timeout(Duration::from_secs(10), t).await;
@@ -776,7 +801,12 @@ pub async fn start(
         server_ips: RwLock::new(server_ips.clone()),
         inflight_cmds: Mutex::new(HashSet::new()),
         salt,
+        live: crate::live::LiveManager::default(),
     });
+    {
+        let host: std::sync::Weak<dyn crate::live::LiveHost> = Arc::downgrade(&core) as _;
+        core.live.bind(host);
+    }
 
     tracing::info!(
         version = kestrel_common::VERSION,

@@ -1,5 +1,6 @@
 import type { AgentHealth, Device, Group, Inventory, Policy, PolicySummary, RuleMode, Software, User } from '@/api/types'
 import { HARDENING_CONTROLS } from '@/lib/labels'
+import { profileGuarded, profileUnrestricted } from '@/lib/remote-profile'
 import { chance, int, pick, rand, uuid } from './rng'
 
 export const NOW = Date.now()
@@ -101,6 +102,7 @@ function basePolicy(id: string, name: string, version: number): Policy {
     isolation_auto_release_hours: 72,
     ioc_block_ttl_secs: 24 * 3600,
     ioc_block_host_wide: false,
+    remote_access: profileGuarded(),
   }
 }
 
@@ -126,6 +128,12 @@ pSrv.hardening = { ...pSrv.hardening, mode: 'enforce', disable_run_dialog: true,
 pSrv.canaries = false
 pSrv.hardening = { ...pSrv.hardening, lsa_protection: true }
 pSrv.sensors = { file_activity: true, ransomware_canaries: false, persistence: true, credential_access: true }
+// Servers: no remote desktop and a read-only file manager (shows the "disabled by policy" state).
+pSrv.remote_access = { ...profileGuarded(), desktop: 'off', files: 'read_only' }
+// Finance: watch only, read-only files, office hours.
+pStrict.remote_access = { ...profileGuarded(), desktop: 'view_only', files: 'read_only', guardrails: { ...profileGuarded().guardrails, allowed_hours: { days: [0, 1, 2, 3, 4], start_minute: 8 * 60, end_minute: 19 * 60 } } }
+// Engineering: unrestricted (devices are still capped by their install ceiling).
+pEng.remote_access = profileUnrestricted()
 
 export const POLICIES: Policy[] = [pDefault, pStrict, pEng, pSrv]
 export const POLICY_UPDATED: Record<string, number> = {

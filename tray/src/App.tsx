@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ActivityItem, TrayStatus } from "./protocol";
-import { upsertActivity } from "./protocol";
+import { activeRemoteSession, upsertActivity } from "./protocol";
 import type { KestrelApi, Tab, WindowMode } from "./api/types";
 import { toApiError } from "./api/types";
 import { StatusTab, type CheckState } from "./components/StatusTab";
 import { ActivityTab } from "./components/ActivityTab";
 import { HelpTab } from "./components/HelpTab";
 import { ReviewDialog } from "./components/ReviewDialog";
+import { RemoteSessionBanner } from "./components/RemoteSessionBanner";
+import { ConsentPrompt, ConsentResultLine } from "./components/ConsentPrompt";
+import { consentReducer, initialConsentState } from "./consent";
 import { IconClose, IconDock, IconHelp, IconHome, IconList, IconPopOut, type ShieldKind } from "./components/Icons";
 import { stateCopy } from "./copy";
 
@@ -28,6 +31,8 @@ export function App({ api, initialTab }: Props) {
   const [banner, setBanner] = useState<ActivityItem | null>(null);
   const [mode, setMode] = useState<WindowMode>("flyout");
   const checkRunning = useRef(false);
+  const [consent, dispatchConsent] = useReducer(consentReducer, initialConsentState);
+  const [now, setNow] = useState(() => Date.now());
 
   const loadStatus = useCallback(async () => {
     try {
@@ -89,6 +94,11 @@ export function App({ api, initialTab }: Props) {
         setStatus(s);
         setUnavailable(false);
       }),
+      // Remote-session pushes patch the status immediately; the next status
+      // refresh (triggered by the paired notification) confirms it.
+      api.onRemoteSession((n) => {
+        setStatus((prev) => (prev ? { ...prev, remote_session: activeRemoteSession(n) } : prev));
+      }),
       api.onConnection(({ connected }) => {
         if (connected) {
           void loadStatus();
@@ -98,9 +108,15 @@ export function App({ api, initialTab }: Props) {
           setStatus(null);
         }
       }),
+      api.onConsentRequest((req) => dispatchConsent({ type: "received", req, now: Date.now() })),
       api.onNavigate((t) => setTab(t)),
       api.onQuickCheck(() => void runQuickCheck()),
     ];
+    // Requests that arrived before this UI was listening.
+    void api
+      .getPendingConsents()
+      .then((reqs) => reqs.forEach((req) => dispatchConsent({ type: "received", req, now: Date.now() })))
+      .catch(() => {});
     // Refresh when the flyout is shown again.
     const onVis = () => {
       if (document.visibilityState === "visible") {
@@ -118,13 +134,55 @@ export function App({ api, initialTab }: Props) {
   }, [api, loadStatus, loadActivity, runQuickCheck]);
 
   // Esc closes the flyout (like Windows flyouts) when no dialog is open.
+  const consentOpen = consent.queue.length > 0;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !reviewing && mode === "flyout") void api.hideWindow();
+      if (e.key === "Escape" && !reviewing && !consentOpen && mode === "flyout") void api.hideWindow();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [api, reviewing, mode]);
+  }, [api, reviewing, consentOpen, mode]);
+
+  // Countdown / expiry for pending consent requests (no answer = deny).
+  useEffect(() => {
+    if (!consentOpen) return;
+    const t = setInterval(() => {
+      const n = Date.now();
+      setNow(n);
+      dispatchConsent({ type: "tick", now: n });
+    }, 250);
+    return () => clearInterval(t);
+  }, [consentOpen]);
+
+  useEffect(() => {
+    if (!consent.result) return;
+    const t = setTimeout(() => dispatchConsent({ type: "dismiss_result" }), 10_000);
+    return () => clearTimeout(t);
+  }, [consent.result]);
+
+  const answerConsent = async (id: string, allow: boolean) => {
+    dispatchConsent({ type: "sending", id, allow });
+    try {
+      const ack = await api.respondConsent(id, allow);
+      dispatchConsent({ type: "answered", id, allow, ok: ack.ok, message: ack.message, now: Date.now() });
+      if (allow) void loadStatus();
+    } catch (e) {
+      const err = toApiError(e);
+      dispatchConsent({
+        type: "failed",
+        id,
+        now: Date.now(),
+        // The agent refused it (expired/unknown): drop it. Transport trouble: keep it so they can retry.
+        drop: err.kind === "agent",
+        message:
+          err.kind === "agent"
+            ? "Kestrel couldn't pass on your answer because the request is no longer valid. IT can't connect unless they ask again."
+            : err.kind === "unavailable"
+              ? "Kestrel service isn't running, so your answer couldn't be sent. If you don't answer, IT can't connect."
+              : "Your answer couldn't be sent. Try again.",
+      });
+    }
+  };
 
   useEffect(() => {
     if (!banner) return;
@@ -133,6 +191,7 @@ export function App({ api, initialTab }: Props) {
   }, [banner]);
 
   const kind: ShieldKind = unavailable ? "unavailable" : status ? status.state : "loading";
+  const remote = unavailable ? null : activeRemoteSession(status?.remote_session);
   const recentBlocks = useMemo(
     () => (items ?? []).filter((i) => i.severity !== "info" && i.review !== "approved" && Date.now() - i.ts < DAY).length,
     [items],
@@ -163,7 +222,7 @@ export function App({ api, initialTab }: Props) {
   const label = stateCopy(kind, status).label;
 
   return (
-    <div className={`app app--${mode}`} data-state={kind}>
+    <div className={`app app--${mode}`} data-state={kind} data-remote={remote ? "on" : undefined}>
       <header className="titlebar" data-tauri-drag-region>
         <img className="titlebar__mark" src="/kestrel-mark.svg" alt="" width={18} height={18} data-tauri-drag-region />
         <span className="titlebar__name" data-tauri-drag-region>
@@ -182,6 +241,8 @@ export function App({ api, initialTab }: Props) {
           <IconClose />
         </button>
       </header>
+
+      {remote && <RemoteSessionBanner session={remote} contact={status?.it_contact ?? null} onContactIT={() => setTab("help")} />}
 
       <nav className="pivot" role="tablist" aria-label="Sections">
         <PivotTab id="status" tab={tab} setTab={setTab} icon={<IconHome />} label="Status" badge={<span className={`dot dot--${kind}`} title={label} />} />
@@ -209,6 +270,7 @@ export function App({ api, initialTab }: Props) {
           <StatusTab
             kind={kind}
             status={status}
+            remote={remote}
             recentBlocks={recentBlocks}
             check={check}
             onQuickCheck={() => void runQuickCheck()}
@@ -220,7 +282,13 @@ export function App({ api, initialTab }: Props) {
         {tab === "help" && <HelpTab status={status} onLink={openLink} />}
       </main>
 
-      {reviewing && <ReviewDialog item={reviewing} hostname={status?.hostname ?? ""} onSubmit={submitReview} onClose={() => setReviewing(null)} />}
+      {consent.result && <ConsentResultLine message={consent.result.message} kind={consent.result.kind} onDismiss={() => dispatchConsent({ type: "dismiss_result" })} />}
+
+      {consent.queue[0] && (
+        <ConsentPrompt entry={consent.queue[0]} now={now} queued={consent.queue.length - 1} onAnswer={(allow) => void answerConsent(consent.queue[0]!.req.request_id, allow)} />
+      )}
+
+      {reviewing && !consentOpen && <ReviewDialog item={reviewing} hostname={status?.hostname ?? ""} onSubmit={submitReview} onClose={() => setReviewing(null)} />}
     </div>
   );
 }

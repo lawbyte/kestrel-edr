@@ -20,6 +20,7 @@ use kestrel_agent::{
     store,
 };
 use kestrel_common::{
+    remote::RemoteAccessProfile,
     wire::{AgentPayload, EnrollRequest, EnrollResponse, ServerPayload},
     Branding, Policy, ResponseAction,
 };
@@ -95,7 +96,13 @@ struct Mock {
     /// Rotate the uninstall token on the first session: an invalid
     /// `SetUninstallToken` (must not be acked) followed by this token.
     set_token: Option<String>,
+    /// Remote-access profile returned at enrollment (the agent's ceiling).
+    remote_profile: RemoteAccessProfile,
+    /// Sender of the current session's server stream (tests inject messages).
+    inject: Inject,
 }
+
+type Inject = Arc<Mutex<Option<mpsc::Sender<Result<ServerEnvelope, Status>>>>>;
 
 fn sign_csr(
     csr_pem: &str,
@@ -154,6 +161,7 @@ impl AgentService for Mock {
             cert_pem: cert,
             ca_pem: self.ca_cert.pem(),
             uninstall_token: SERVER_UNINSTALL_TOKEN.into(),
+            remote_profile: self.remote_profile.clone(),
         };
         Ok(Response::new(EnrollEnvelope {
             json: serde_json::to_vec(&resp).unwrap(),
@@ -172,6 +180,7 @@ impl AgentService for Mock {
         };
         let mut inbound = req.into_inner();
         let (tx, rx) = mpsc::channel(64);
+        *self.inject.lock().unwrap() = Some(tx.clone());
         let rec = self.rec.clone();
         let device_id = self.device_id;
         let command_id = self.command_id;
@@ -352,6 +361,8 @@ async fn enroll_connect_replay_ack_restart() {
         ask_renew_on_session: None,
         quiet: false,
         set_token: None,
+        remote_profile: RemoteAccessProfile::none(),
+        inject: Inject::default(),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -669,6 +680,8 @@ async fn certificate_renewal() {
         ask_renew_on_session: Some(1),
         quiet: true,
         set_token: None,
+        remote_profile: RemoteAccessProfile::none(),
+        inject: Inject::default(),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -784,6 +797,8 @@ async fn uninstall_token_rotation() {
         ask_renew_on_session: None,
         quiet: true,
         set_token: Some(ROTATED.into()),
+        remote_profile: RemoteAccessProfile::none(),
+        inject: Inject::default(),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -858,5 +873,513 @@ async fn uninstall_token_rotation() {
     assert!(!acked(&rec, bad_seq), "invalid token must not be acked");
     // In-memory config follows the file.
     assert!(handle.core.config().verify_uninstall_token(ROTATED));
+    handle.stop().await;
+}
+
+// ------------------------------------------------------------ remote access
+
+async fn inject(inj: &Inject, seq: u64, p: ServerPayload) {
+    let tx = inj.lock().unwrap().clone().expect("no stream");
+    tx.send(Ok(env(seq, &p))).await.unwrap();
+}
+
+async fn send_live(inj: &Inject, session_id: Uuid, msg: kestrel_common::remote::LiveServerMsg) {
+    inject(inj, 0, ServerPayload::Live { session_id, msg }).await;
+}
+
+/// Live messages the agent sent so far (envelope seq, session, message).
+fn live_msgs(rec: &Arc<Mutex<Recorded>>) -> Vec<(u64, Uuid, kestrel_common::remote::LiveAgentMsg)> {
+    all_msgs(rec)
+        .into_iter()
+        .filter_map(|(seq, p)| match p {
+            AgentPayload::Live { session_id, msg } => Some((seq, session_id, msg)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Wait for a live message of `session` matching `f`; returns it.
+async fn wait_live<F>(
+    rec: &Arc<Mutex<Recorded>>,
+    session: Uuid,
+    what: &str,
+    f: F,
+) -> kestrel_common::remote::LiveAgentMsg
+where
+    F: Fn(&kestrel_common::remote::LiveAgentMsg) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some((_, _, m)) = live_msgs(rec)
+            .into_iter()
+            .find(|(_, s, m)| *s == session && f(m))
+        {
+            return m;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("timed out waiting for {what}: {:?}", live_msgs(rec));
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+}
+
+/// Remote access end to end on the SimPlatform: ceiling pinned at
+/// enrollment (and reported), not changed by a policy push; effective
+/// profile in health; file manager list / upload (with consent answered by
+/// the simulated employee) / download; remote desktop start → frame → ack →
+/// input → stop with the banner state written by the simulator.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remote_access_live() {
+    use base64::Engine as _;
+    use kestrel_common::remote::{
+        DesktopSettings, DesktopStart, FileContext, FileOp, FileReply, InputEvent, LiveAgentMsg,
+        LiveServerMsg, CAP_LIVE_DESKTOP, CAP_LIVE_FILES,
+    };
+    use sha2::Digest as _;
+
+    kestrel_agent::pki::install_crypto_provider();
+    let pki = pki();
+    let ca_pem = pki.ca_cert.pem();
+    let rec = Arc::new(Mutex::new(Recorded::default()));
+    let device_id = Uuid::new_v4();
+    // Ceiling: control + full, consent required, delete not allowed.
+    let mut ceiling = RemoteAccessProfile::unrestricted();
+    ceiling.guardrails.require_consent = true;
+    ceiling.guardrails.consent_timeout_secs = 20;
+    ceiling.guardrails.allow_delete = false;
+    let inj = Inject::default();
+    let tls = tonic::transport::ServerTlsConfig::new()
+        .identity(tonic::transport::Identity::from_pem(
+            &pki.server_cert_pem,
+            &pki.server_key_pem,
+        ))
+        .client_ca_root(tonic::transport::Certificate::from_pem(&ca_pem))
+        .client_auth_optional(true);
+    let mock = Mock {
+        ca_cert: pki.ca_cert,
+        ca_key: pki.ca_key,
+        device_id,
+        command_id: Uuid::new_v4(),
+        rec: rec.clone(),
+        enroll_days: 365,
+        ask_renew_on_session: None,
+        quiet: true,
+        set_token: None,
+        remote_profile: ceiling.clone(),
+        inject: inj.clone(),
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        Server::builder()
+            .tls_config(tls)
+            .unwrap()
+            .add_service(AgentServiceServer::new(mock))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+            .unwrap();
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path();
+    commands::write_install_config(
+        state,
+        &commands::InstallOpts {
+            server: addr.to_string(),
+            ca: ca_pem.clone(),
+            token: TOKEN.into(),
+            server_name: Some(SERVER_NAME.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    commands::enroll(state, None, "SIM-E2E-04", Default::default())
+        .await
+        .unwrap();
+    let cfg = kestrel_agent::config::AgentConfig::load(state).unwrap();
+    assert_eq!(
+        cfg.remote_ceiling.as_ref(),
+        Some(&ceiling),
+        "ceiling pinned"
+    );
+    // A re-install for the same server keeps identity and ceiling.
+    let again = commands::write_install_config(
+        state,
+        &commands::InstallOpts {
+            server: addr.to_string(),
+            ca: ca_pem.clone(),
+            token: TOKEN.into(),
+            server_name: Some(SERVER_NAME.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(again.remote_ceiling.as_ref(), Some(&ceiling));
+
+    let platform = sim(state, None);
+    let handle = agent::start(platform.clone(), state.to_path_buf(), tuning())
+        .await
+        .unwrap();
+    wait_for("hello", Duration::from_secs(20), || {
+        all_msgs(&rec)
+            .iter()
+            .any(|(_, p)| matches!(p, AgentPayload::Hello(_)))
+    })
+    .await;
+    let hello = all_msgs(&rec)
+        .into_iter()
+        .find_map(|(_, p)| match p {
+            AgentPayload::Hello(h) => Some(h),
+            _ => None,
+        })
+        .unwrap();
+    assert!(hello.capabilities.iter().any(|c| c == CAP_LIVE_FILES));
+    assert!(hello.capabilities.iter().any(|c| c == CAP_LIVE_DESKTOP));
+    assert_eq!(hello.remote_ceiling.as_ref(), Some(&ceiling));
+    // Until a policy arrives the effective profile is none.
+    assert!(handle.core.remote_effective().is_none());
+
+    // Policy: unrestricted remote access (the ceiling still applies).
+    let policy = Policy {
+        id: "pol-ra".into(),
+        name: "Remote".into(),
+        version: 7,
+        remote_access: RemoteAccessProfile::unrestricted(),
+        ..Default::default()
+    };
+    inject(&inj, 1000, ServerPayload::Policy(Box::new(policy))).await;
+    wait_for("policy applied", Duration::from_secs(20), || {
+        handle.core.policy_version() == 7
+    })
+    .await;
+    let expected = ceiling.intersect(&RemoteAccessProfile::unrestricted());
+    assert_eq!(handle.core.remote_effective(), expected);
+    assert_eq!(
+        handle.core.remote_ceiling(),
+        ceiling,
+        "policy never changes the ceiling"
+    );
+    let cfg = kestrel_agent::config::AgentConfig::load(state).unwrap();
+    assert_eq!(cfg.remote_ceiling.as_ref(), Some(&ceiling));
+    wait_for(
+        "health with effective profile",
+        Duration::from_secs(20),
+        || {
+            all_msgs(&rec).iter().any(|(_, p)| match p {
+                AgentPayload::Heartbeat(h) => {
+                    h.health.remote_ceiling.as_ref() == Some(&ceiling)
+                        && h.health.remote_effective.as_ref() == Some(&expected)
+                }
+                _ => false,
+            })
+        },
+    )
+    .await;
+
+    // --- file manager
+    let fm = Uuid::new_v4();
+    let ctx = || {
+        Some(FileContext {
+            fm_session: fm,
+            admin_name: "Jane Doe".into(),
+            reason: "ticket 7".into(),
+        })
+    };
+    let req = |request_id, op| LiveServerMsg::FileRequest {
+        request_id,
+        op,
+        context: ctx(),
+    };
+    let s_list = Uuid::new_v4();
+    send_live(
+        &inj,
+        s_list,
+        req(
+            1,
+            FileOp::List {
+                path: String::new(),
+            },
+        ),
+    )
+    .await;
+    match wait_live(&rec, s_list, "drive list", |m| {
+        matches!(m, LiveAgentMsg::FileReply { request_id: 1, .. })
+    })
+    .await
+    {
+        LiveAgentMsg::FileReply {
+            reply: FileReply::List { entries, .. },
+            ..
+        } => {
+            let paths: Vec<_> = entries.iter().map(|e| e.path.as_str()).collect();
+            assert_eq!(paths, ["C:\\", "D:\\"]);
+        }
+        other => panic!("{other:?}"),
+    }
+    // Upload (consent answered "allow" by the simulated employee).
+    let target = r"C:\Users\j.doe\Documents\upload.txt";
+    let data = b"uploaded through the live channel".repeat(50);
+    let sha = hex::encode(sha2::Sha256::digest(&data));
+    let s_up = Uuid::new_v4();
+    send_live(
+        &inj,
+        s_up,
+        req(
+            10,
+            FileOp::WriteBegin {
+                path: target.into(),
+                size: data.len() as u64,
+            },
+        ),
+    )
+    .await;
+    wait_live(&rec, s_up, "consent pending", |m| {
+        matches!(
+            m,
+            LiveAgentMsg::ConsentPending {
+                request_id: Some(10),
+                ..
+            }
+        )
+    })
+    .await;
+    wait_live(&rec, s_up, "write begin", |m| {
+        matches!(
+            m,
+            LiveAgentMsg::FileReply {
+                request_id: 10,
+                reply: FileReply::Done { .. }
+            }
+        )
+    })
+    .await;
+    send_live(
+        &inj,
+        s_up,
+        req(
+            11,
+            FileOp::WriteChunk {
+                offset: 0,
+                data_b64: base64::engine::general_purpose::STANDARD.encode(&data),
+            },
+        ),
+    )
+    .await;
+    send_live(
+        &inj,
+        s_up,
+        req(
+            12,
+            FileOp::WriteEnd {
+                sha256: sha.clone(),
+            },
+        ),
+    )
+    .await;
+    match wait_live(&rec, s_up, "write end", |m| {
+        matches!(m, LiveAgentMsg::FileReply { request_id: 12, .. })
+    })
+    .await
+    {
+        LiveAgentMsg::FileReply {
+            reply: FileReply::Written { size, sha256, .. },
+            ..
+        } => {
+            assert_eq!(size, data.len() as u64);
+            assert_eq!(sha256, sha);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(std::fs::read(platform.map_path(target)).unwrap(), data);
+    // Download it back.
+    let s_dl = Uuid::new_v4();
+    send_live(
+        &inj,
+        s_dl,
+        req(
+            20,
+            FileOp::ReadChunk {
+                path: target.into(),
+                offset: 0,
+                len: 1 << 20,
+            },
+        ),
+    )
+    .await;
+    match wait_live(&rec, s_dl, "download", |m| {
+        matches!(m, LiveAgentMsg::FileReply { request_id: 20, .. })
+    })
+    .await
+    {
+        LiveAgentMsg::FileReply {
+            reply:
+                FileReply::Data {
+                    data_b64,
+                    eof,
+                    sha256,
+                    ..
+                },
+            ..
+        } => {
+            assert!(eof);
+            assert_eq!(sha256.as_deref(), Some(sha.as_str()));
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(data_b64)
+                    .unwrap(),
+                data
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    // Delete is not allowed by the ceiling.
+    let s_del = Uuid::new_v4();
+    send_live(
+        &inj,
+        s_del,
+        req(
+            30,
+            FileOp::Delete {
+                path: target.into(),
+                recursive: false,
+            },
+        ),
+    )
+    .await;
+    match wait_live(&rec, s_del, "delete refused", |m| {
+        matches!(m, LiveAgentMsg::FileReply { request_id: 30, .. })
+    })
+    .await
+    {
+        LiveAgentMsg::FileReply {
+            reply: FileReply::Error { code, .. },
+            ..
+        } => assert_eq!(code, kestrel_common::remote::RemoteErrorCode::NotPermitted),
+        other => panic!("{other:?}"),
+    }
+    // Kestrel's own folder is protected.
+    let s_prot = Uuid::new_v4();
+    send_live(
+        &inj,
+        s_prot,
+        req(
+            40,
+            FileOp::List {
+                path: r"C:\ProgramData\Kestrel".into(),
+            },
+        ),
+    )
+    .await;
+    match wait_live(&rec, s_prot, "protected", |m| {
+        matches!(m, LiveAgentMsg::FileReply { request_id: 40, .. })
+    })
+    .await
+    {
+        LiveAgentMsg::FileReply {
+            reply: FileReply::Error { code, .. },
+            ..
+        } => assert_eq!(code, kestrel_common::remote::RemoteErrorCode::ProtectedPath),
+        other => panic!("{other:?}"),
+    }
+
+    // --- remote desktop
+    let d = Uuid::new_v4();
+    send_live(
+        &inj,
+        d,
+        LiveServerMsg::DesktopStart(DesktopStart {
+            view_only: false,
+            admin_name: "Jane Doe".into(),
+            reason: "ticket 7".into(),
+            settings: DesktopSettings {
+                scale_pct: 25,
+                max_fps: 15,
+                ..Default::default()
+            },
+        }),
+    )
+    .await;
+    wait_live(&rec, d, "desktop consent", |m| {
+        matches!(
+            m,
+            LiveAgentMsg::ConsentPending {
+                request_id: None,
+                ..
+            }
+        )
+    })
+    .await;
+    wait_live(
+        &rec,
+        d,
+        "desktop started",
+        |m| matches!(m, LiveAgentMsg::DesktopStarted(i) if i.width == 1280 && !i.view_only),
+    )
+    .await;
+    let first = wait_live(
+        &rec,
+        d,
+        "frame 1",
+        |m| matches!(m, LiveAgentMsg::DesktopFrame(f) if f.seq == 1),
+    )
+    .await;
+    if let LiveAgentMsg::DesktopFrame(f) = first {
+        assert_eq!((f.width, f.height), (320, 180));
+        let jpeg = base64::engine::general_purpose::STANDARD
+            .decode(f.jpeg_b64)
+            .unwrap();
+        assert_eq!(&jpeg[..2], &[0xff, 0xd8]);
+    }
+    let banner = || -> serde_json::Value {
+        std::fs::read(state.join(kestrel_agent::sim_remote::SIM_DESKTOP_FILE))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    };
+    assert_eq!(banner()["active"], true);
+    assert_eq!(banner()["admin_name"], "Jane Doe");
+    assert_eq!(
+        handle.core.live.remote_session_notice().unwrap().admin_name,
+        "Jane Doe"
+    );
+    send_live(&inj, d, LiveServerMsg::DesktopAck { seq: 1 }).await;
+    send_live(
+        &inj,
+        d,
+        LiveServerMsg::DesktopInput {
+            event: InputEvent::MouseMove { x: 0.25, y: 0.75 },
+        },
+    )
+    .await;
+    // The input moved the crosshair (new frame) and was counted.
+    wait_live(
+        &rec,
+        d,
+        "a later frame",
+        |m| matches!(m, LiveAgentMsg::DesktopFrame(f) if f.seq >= 2),
+    )
+    .await;
+    wait_for("input counted", Duration::from_secs(10), || {
+        banner()["inputs"] == 1
+    })
+    .await;
+    send_live(
+        &inj,
+        d,
+        LiveServerMsg::DesktopStop {
+            reason: String::new(),
+        },
+    )
+    .await;
+    wait_live(&rec, d, "desktop ended", |m| {
+        matches!(m, LiveAgentMsg::DesktopEnded { code: None, .. })
+    })
+    .await;
+    wait_for("banner removed", Duration::from_secs(10), || {
+        banner()["active"] == false
+    })
+    .await;
+    // Live traffic is ephemeral: every agent live envelope has seq 0 and
+    // nothing live is in the outbox.
+    assert!(live_msgs(&rec).iter().all(|(seq, _, _)| *seq == 0));
     handle.stop().await;
 }

@@ -135,6 +135,7 @@ impl TrayService {
             privacy_notice_md: p.branding.privacy_notice_md.clone(),
             hostname: c.hostname.clone(),
             last_check: c.store.kv_get_i64(store::KV_LAST_CHECK),
+            remote_session: c.live.remote_session_notice(),
         }
     }
 }
@@ -271,10 +272,13 @@ impl TrayHandler for TrayService {
                     message: "Your request was sent to IT.".into(),
                 }
             }
-            TrayRequest::Subscribe => TrayResponse::Ack {
+            TrayRequest::Subscribe | TrayRequest::SubscribeWith { .. } => TrayResponse::Ack {
                 ok: true,
                 message: "subscribed".into(),
             },
+            TrayRequest::ConsentResponse { request_id, allow } => {
+                self.core.live.consent_response(request_id, allow, client)
+            }
         }
     }
 
@@ -284,7 +288,10 @@ impl TrayHandler for TrayService {
 }
 
 /// Serve one tray connection: JSON-lines requests → responses, plus pushed
-/// notifications (only those visible to `client`) after `Subscribe`.
+/// notifications (only those visible to `client`) after `Subscribe` /
+/// `SubscribeWith`. Opt-in push kinds (`TrayResponse::RemoteSession`) are
+/// only forwarded to connections that subscribed with the matching feature,
+/// so an older tray never receives a response type it cannot parse.
 /// Returns when the peer disconnects.
 pub async fn serve_connection<S>(stream: S, handler: Arc<dyn TrayHandler>, client: TrayClient)
 where
@@ -335,9 +342,13 @@ where
         }
         let resp = match serde_json::from_str::<TrayRequest>(line) {
             Ok(req) => {
-                let is_sub = matches!(req, TrayRequest::Subscribe);
+                let sub = match &req {
+                    TrayRequest::Subscribe => Some(Features::default()),
+                    TrayRequest::SubscribeWith { features } => Some(Features::from(features)),
+                    _ => None,
+                };
                 let r = handler.handle(req, &client).await;
-                if is_sub && sub_task.is_none() {
+                if let (Some(feat), None) = (sub, &sub_task) {
                     let mut rx = handler.subscribe();
                     let tx = out_tx.clone();
                     let who = client.clone();
@@ -345,7 +356,7 @@ where
                         loop {
                             match rx.recv().await {
                                 Ok(n) => {
-                                    if !n.visible_to(&who) {
+                                    if !n.visible_to(&who) || !feat.allows(&n.resp) {
                                         continue;
                                     }
                                     if tx.send(n.resp).await.is_err() {
@@ -373,6 +384,35 @@ where
     }
     drop(out_tx);
     let _ = writer.await;
+}
+
+/// Opt-in push kinds of one tray connection.
+#[derive(Debug, Clone, Copy, Default)]
+struct Features {
+    remote_session: bool,
+    remote_consent: bool,
+}
+
+impl Features {
+    fn from(list: &[String]) -> Features {
+        Features {
+            remote_session: list
+                .iter()
+                .any(|f| f == kestrel_common::tray::FEATURE_REMOTE_SESSION),
+            remote_consent: list
+                .iter()
+                .any(|f| f == kestrel_common::tray::FEATURE_REMOTE_CONSENT),
+        }
+    }
+
+    /// May this push kind go to a connection with these opt-ins?
+    fn allows(&self, resp: &TrayResponse) -> bool {
+        match resp {
+            TrayResponse::RemoteSession(_) => self.remote_session,
+            TrayResponse::ConsentRequest(_) => self.remote_consent,
+            _ => true,
+        }
+    }
 }
 
 use tokio::io::AsyncReadExt as _;
@@ -540,5 +580,96 @@ mod tests {
             serde_json::from_str::<TrayResponse>(&l).unwrap(),
             TrayResponse::Notification(item)
         );
+    }
+
+    fn remote_notice(active: bool) -> TrayResponse {
+        TrayResponse::RemoteSession(kestrel_common::tray::RemoteSessionNotice {
+            active,
+            kind: kestrel_common::tray::RemoteKind::Desktop,
+            admin_name: "Jane".into(),
+            view_only: true,
+            reason: String::new(),
+            started_at: 1,
+            ended_at: None,
+        })
+    }
+
+    /// Subscribe on a fresh connection with `req`, then push a
+    /// `RemoteSession` followed by a marker notification; return what the
+    /// client received after the subscription ack.
+    async fn pushes_after(req: &str) -> Vec<TrayResponse> {
+        let (tx, _) = broadcast::channel(8);
+        let h: Arc<dyn TrayHandler> = Arc::new(Echo(tx.clone()));
+        let (a, b) = tokio::io::duplex(4096);
+        tokio::spawn(serve_connection(a, h, TrayClient::default()));
+        let (rd, mut wr) = tokio::io::split(b);
+        let mut rd = BufReader::new(rd);
+        wr.write_all(
+            format!(
+                "{req}
+"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut l = String::new();
+        rd.read_line(&mut l).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<TrayResponse>(&l).unwrap(),
+            TrayResponse::Ack { ok: true, .. }
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let marker = TrayResponse::Error {
+            message: "marker".into(),
+        };
+        let consent = TrayResponse::ConsentRequest(kestrel_common::tray::ConsentRequest {
+            request_id: uuid::Uuid::nil(),
+            kind: kestrel_common::tray::RemoteKind::Files,
+            admin_name: "Jane".into(),
+            view_only: false,
+            reason: String::new(),
+            timeout_secs: 60,
+            expires_at: 0,
+        });
+        for resp in [remote_notice(true), consent, marker.clone()] {
+            tx.send(TrayPush {
+                audience: kestrel_platform::Audience::Public,
+                resp,
+            })
+            .unwrap();
+        }
+        let mut got = vec![];
+        loop {
+            l.clear();
+            rd.read_line(&mut l).await.unwrap();
+            let r: TrayResponse = serde_json::from_str(&l).unwrap();
+            let done = r == marker;
+            got.push(r);
+            if done {
+                return got;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_session_pushes_only_for_opted_in_trays() {
+        // Older tray: plain Subscribe never sees the new response type.
+        let got = pushes_after(r#"{"op":"subscribe"}"#).await;
+        assert_eq!(got.len(), 1, "{got:?}");
+        // SubscribeWith without the feature: same.
+        let got = pushes_after(r#"{"op":"subscribe_with","features":["other"]}"#).await;
+        assert_eq!(got.len(), 1, "{got:?}");
+        // Opted in to session notices only.
+        let got = pushes_after(r#"{"op":"subscribe_with","features":["remote_session"]}"#).await;
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0], remote_notice(true));
+        // Both.
+        let got = pushes_after(
+            r#"{"op":"subscribe_with","features":["remote_session","remote_consent"]}"#,
+        )
+        .await;
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert!(matches!(got[1], TrayResponse::ConsentRequest(_)));
     }
 }

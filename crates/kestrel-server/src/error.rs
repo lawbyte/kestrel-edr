@@ -48,9 +48,39 @@ impl ApiError {
     pub fn internal(m: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", m)
     }
+    /// 411: a streaming upload without `Content-Length`.
+    pub fn length_required(m: impl Into<String>) -> Self {
+        Self::new(StatusCode::LENGTH_REQUIRED, "length_required", m)
+    }
+    /// 413: a transfer above the size limit.
+    pub fn payload_too_large(m: impl Into<String>) -> Self {
+        Self::new(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", m)
+    }
+    /// 503: the endpoint cannot serve the request right now.
+    pub fn unavailable(m: impl Into<String>) -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, "unavailable", m)
+    }
+    /// 504: the agent did not answer in time.
+    pub fn gateway_timeout(m: impl Into<String>) -> Self {
+        Self::new(StatusCode::GATEWAY_TIMEOUT, "gateway_timeout", m)
+    }
     pub fn with_extra(mut self, extra: serde_json::Value) -> Self {
         self.extra = Some(extra);
         self
+    }
+    /// Add one field to the `error` object (keeps earlier extra fields).
+    pub fn with_field(mut self, key: &str, value: impl Into<serde_json::Value>) -> Self {
+        let mut obj = match self.extra.take() {
+            Some(serde_json::Value::Object(o)) => o,
+            _ => serde_json::Map::new(),
+        };
+        obj.insert(key.to_string(), value.into());
+        self.extra = Some(serde_json::Value::Object(obj));
+        self
+    }
+    /// Remote-access failures carry the agent's `RemoteErrorCode` as `remote_code`.
+    pub fn with_remote_code(self, code: kestrel_common::remote::RemoteErrorCode) -> Self {
+        self.with_field("remote_code", code.as_str())
     }
 }
 

@@ -34,7 +34,7 @@ export const api = {
   patchGroup: (id: string, b: Partial<Pick<T.Group, 'name' | 'description' | 'policy_id' | 'update_ring'>>) => http.patch<T.Group>(`/groups/${id}`, b),
   deleteGroup: (id: string) => http.del(`/groups/${id}`),
   enrollmentTokens: () => http.get<T.EnrollmentToken[]>('/enrollment-tokens'),
-  createEnrollmentToken: (b: { group_id: string; expires_in_days: number; max_uses: number }) =>
+  createEnrollmentToken: (b: { group_id: string; expires_in_days: number; max_uses: number; remote_profile?: T.RemoteAccessProfile }) =>
     http.post<T.CreatedEnrollmentToken>('/enrollment-tokens', b),
   revokeEnrollmentToken: (id: string) => http.del(`/enrollment-tokens/${id}`),
   installer: () => http.get<T.InstallerMeta>('/agent/installer'),

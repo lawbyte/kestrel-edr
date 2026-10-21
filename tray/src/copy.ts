@@ -1,5 +1,6 @@
-import type { ProtectionState, ReviewState, TrayStatus } from "./protocol";
+import type { ItContact, ProtectionState, RemoteSessionNotice, ReviewState, TrayStatus } from "./protocol";
 import type { ShieldKind } from "./components/Icons";
+import { clockTime } from "./format";
 
 // All user-facing state wording lives here so it stays consistent between the
 // window, the tray tooltip (mirrored in src-tauri/src/lib.rs) and tests.
@@ -51,6 +52,37 @@ export function stateCopy(kind: ShieldKind, s?: TrayStatus | null, recentBlocks 
 
 export function isProtectionState(k: ShieldKind): k is ProtectionState {
   return k !== "unavailable" && k !== "loading";
+}
+
+export interface RemoteSessionCopy {
+  headline: string;
+  /** "View only" / "Can control your screen" (text, not just the icon). */
+  mode: string;
+  since: string;
+  reason: string | null;
+  help: string;
+  /** Status-tab row value. */
+  row: string;
+}
+
+/** Wording for an active IT remote session (banner + Status tab). */
+export function remoteSessionCopy(n: RemoteSessionNotice, contact?: ItContact | null, now = Date.now()): RemoteSessionCopy {
+  const who = n.admin_name.trim() || "Someone";
+  const reason = n.reason.trim();
+  const sameDay = new Date(n.started_at).toDateString() === new Date(now).toDateString();
+  const since = `Since ${clockTime(n.started_at)}${sameDay ? "" : ` on ${new Date(n.started_at).toLocaleDateString(undefined, { day: "numeric", month: "short" })}`}`;
+  // One way to reach IT fits the banner; the Help tab has the full contact card.
+  const reach = contact ? contact.phone || contact.email : "";
+  const team = contact?.name || "IT";
+  return {
+    headline:
+      n.kind === "files" ? `${who} from IT is accessing files on this PC` : n.view_only ? `${who} from IT is viewing your screen` : `${who} from IT can see and control your screen`,
+    mode: n.kind === "files" ? "File access" : n.view_only ? "View only" : "Can control your screen",
+    since,
+    reason: reason ? `Reason: ${reason}` : null,
+    help: `Didn't expect this? Contact ${team}${reach ? ` (${reach})` : ""} now.`,
+    row: n.kind === "files" ? `${who} is accessing files` : n.view_only ? `${who} is viewing` : `${who} is in control`,
+  };
 }
 
 export const reviewCopy: Record<ReviewState, { label: string; detail: string }> = {

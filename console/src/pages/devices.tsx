@@ -15,6 +15,8 @@ import { DEVICE_STATUS_LABEL } from '@/lib/labels'
 import { formatDateTime, timeAgo } from '@/lib/format'
 import { toCsv, downloadText } from '@/lib/csv'
 import { cn } from '@/lib/utils'
+import { useAuth } from '@/lib/auth'
+import { InstallAgentWizard } from '@/components/install-wizard'
 
 export default function Devices() {
   const nav = useNavigate()
@@ -22,6 +24,8 @@ export default function Devices() {
   const [groups, setGroups] = useUrlList('group')
   const [q, setQ] = useUrlString('q')
   const [active, setActive] = useState<string | null>(null)
+  const [installing, setInstalling] = useState(false)
+  const { can } = useAuth()
   const list = useQuery({ queryKey: qk.devices({ q, status: status.join(',') }), queryFn: () => api.devices({ q, status: status.join(',') }), placeholderData: (p) => p, refetchInterval: 30_000 })
   const g = useQuery({ queryKey: qk.groups, queryFn: api.groups, staleTime: 60_000 })
   const latest = useMemo(() => (list.data?.items ?? []).map((d) => d.agent_version).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))[0], [list.data])
@@ -117,9 +121,11 @@ export default function Devices() {
             <Button size="sm" onClick={() => downloadText('kestrel-devices.csv', toCsv(items.map((d) => ({ hostname: d.hostname, status: d.status, user: d.logged_on_user, os: `${d.os_name} ${d.os_build}`, agent: d.agent_version, last_seen: new Date(d.last_seen).toISOString(), group: d.group_name, policy: d.policy_name, open_incidents: d.open_incidents, ip: d.ip_addresses.join(' ') }))))}>
               <Download /> Export CSV
             </Button>
-            <Button size="sm" variant="primary" onClick={() => nav('/settings/enrollment')}>
-              <Plus /> Enroll devices
-            </Button>
+            {can('devices.write') ? (
+              <Button size="sm" variant="primary" onClick={() => setInstalling(true)}>
+                <Plus /> Install agent
+              </Button>
+            ) : null}
           </>
         }
       >
@@ -129,6 +135,7 @@ export default function Devices() {
           <FilterChip label="Group" value={groups} onChange={setGroups} options={(g.data ?? []).map((x) => ({ value: x.id, label: x.name }))} />
         </div>
       </PageHeader>
+      {installing ? <InstallAgentWizard onClose={() => setInstalling(false)} /> : null}
       <div className="min-h-0 flex-1 bg-surface">
         {list.error ? (
           <ErrorState error={list.error} onRetry={() => list.refetch()} />
@@ -153,7 +160,7 @@ export default function Devices() {
               onActiveChange={setActive}
               onRowClick={(d) => nav(`/devices/${d.id}`)}
               initialSorting={[{ id: 'hostname', desc: false }]}
-              empty={<EmptyState title={q || status.length ? 'No devices match' : 'No devices enrolled yet'} action={q || status.length ? null : <Button size="sm" variant="primary" onClick={() => nav('/settings/enrollment')}>Create an enrollment token</Button>}>{q || status.length ? 'Try a different hostname or clear the status filter.' : 'Install the agent with an enrollment token to see devices here.'}</EmptyState>}
+              empty={<EmptyState title={q || status.length ? 'No devices match' : 'No devices enrolled yet'} action={q || status.length ? null : <Button size="sm" variant="primary" onClick={() => setInstalling(true)}>Install the agent</Button>}>{q || status.length ? 'Try a different hostname or clear the status filter.' : 'Install the agent with an enrollment token to see devices here.'}</EmptyState>}
             />
           </>
         )}

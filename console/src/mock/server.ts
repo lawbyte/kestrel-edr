@@ -29,16 +29,35 @@ import { MockUpdates, UpdateError, seedUpdates } from './updates'
 import { parseManifest } from '@/lib/updates'
 import type { GroupUpdateRing, UpdateRing } from '@/api/types'
 import { GROUP_UPDATE_RINGS } from '@/api/types'
+import type { EnrollmentToken, FileUploadResult, RemoteAccessProfile, RemoteErrorCode } from '@/api/types'
+import { ApiError, apiErrorFrom } from '@/api/client'
+import { blockedPrefix, fileOpDenied, hoursContain, isNoneProfile, normaliseProfile, presetOf, profileSummary, validateProfile, type FileOpClass } from '@/lib/remote-profile'
+import { pathIsWithin, validateRemotePath } from '@/lib/remote-path'
+import { fsFor, RemoteFsError } from './remote-files'
+import { consentedFmSessions, desktopSessions, reauth, remoteAccessFor } from './remote-state'
 
 type Handler = (req: { params: Record<string, string>; query: URLSearchParams; body: unknown; method: string }) => unknown
 
 class HttpError extends Error {
   status: number
   code: string
-  constructor(status: number, code: string, message: string) {
+  remoteCode?: RemoteErrorCode
+  extra?: Record<string, unknown>
+  constructor(status: number, code: string, message: string, remoteCode?: RemoteErrorCode, extra?: Record<string, unknown>) {
     super(message)
     this.status = status
     this.code = code
+    this.remoteCode = remoteCode
+    this.extra = extra
+  }
+}
+/** A non-JSON response (file download). */
+class RawBody {
+  blob: Blob
+  headers: Record<string, string>
+  constructor(blob: Blob, headers: Record<string, string>) {
+    this.blob = blob
+    this.headers = headers
   }
 }
 const notFound = (what = 'Resource') => new HttpError(404, 'not_found', `${what} not found`)
@@ -221,6 +240,7 @@ route('GET', '/devices/:id', ({ params }) => {
     inventory: inventoryFor(d),
     recent_alerts: alertRows().filter((a) => a.device_id === d.id).slice(0, 20),
     effective_policy: effectivePolicy(pol),
+    remote_access: remoteAccessFor(d, pol),
     hardening: HARDENING_CONTROLS.map((c) => ({
       control: c,
       desired: pol.hardening.mode !== 'off' && pol.hardening[c],
@@ -518,21 +538,59 @@ route('DELETE', '/groups/:id', ({ params }) => {
   db.log(u, 'group.delete', g.name)
   return undefined
 })
-route('GET', '/enrollment-tokens', () => (me(), db.enrollment))
+function tokenView(t: EnrollmentToken): EnrollmentToken {
+  const p = normaliseProfile(t.remote_profile)
+  return { ...t, remote_profile: p, remote_summary: profileSummary(p), remote_preset: presetOf(p) }
+}
+route('GET', '/enrollment-tokens', () => (me(), db.enrollment.map(tokenView)))
 route('POST', '/enrollment-tokens', ({ body }): CreatedEnrollmentToken => {
   const u = me()
-  const b = body as { group_id: string; expires_in_days: number; max_uses: number }
+  const b = body as { group_id: string; expires_in_days: number; max_uses: number; remote_profile?: RemoteAccessProfile }
   const g = db.groups.find((x) => x.id === b.group_id)
   if (!g) throw bad('Choose a group')
+  const profile = normaliseProfile(b.remote_profile)
+  if (!isNoneProfile(profile) && !(canDo(u, 'remote.desktop') && canDo(u, 'remote.files')))
+    throw new HttpError(403, 'forbidden', 'Only administrators (remote.desktop and remote.files) can create installers with remote access')
+  const invalid = validateProfile(profile)
+  if (invalid) throw bad(invalid)
   const token = db.newEnrollmentSecret()
-  const t = { id: uuid(), group_id: g.id, group_name: g.name, token_prefix: token.slice(0, 8), created_at: Date.now(), expires_at: Date.now() + b.expires_in_days * DAY, max_uses: b.max_uses, uses: 0, revoked: false }
+  const t: EnrollmentToken = { id: uuid(), group_id: g.id, group_name: g.name, token_prefix: token.slice(0, 8), created_at: Date.now(), expires_at: Date.now() + b.expires_in_days * DAY, max_uses: b.max_uses, uses: 0, revoked: false, remote_profile: profile }
   db.enrollment.unshift(t)
-  db.log(u, 'enrollment_token.create', g.name, { expires_in_days: b.expires_in_days, max_uses: b.max_uses })
+  const view = tokenView(t)
+  db.log(u, 'enrollment_token.created', g.name, { expires_in_days: b.expires_in_days, max_uses: b.max_uses, remote_profile: profile, remote_summary: view.remote_summary })
   const host = typeof location !== 'undefined' ? location.host : 'kestrel.example.com'
+  const preset = view.remote_preset ?? 'custom'
+  const filename = `Install-Kestrel-${preset}.cmd`
+  const msiSha = '4f9c2a1be8d7360c51e2a9f04b7d3c86e1f5a0b9d2c48e7f6a3b1d0c9e8f7a6b'
+  const cmd = [
+    '@echo off',
+    `rem Kestrel EDR agent installer (${filename})`,
+    `rem Server:          ${host}`,
+    `rem Group:           ${g.name}`,
+    `rem Remote access:   ${view.remote_summary}`,
+    `rem Token:           ${t.token_prefix}... (expires ${new Date(t.expires_at).toISOString().slice(0, 10)}, up to ${t.max_uses} devices)`,
+    'rem This file contains an enrollment token. Treat it like a password and delete it after use.',
+    'setlocal',
+    'net session >nul 2>&1 || (powershell -NoProfile -Command "Start-Process -Verb RunAs -FilePath \'%~f0\'" & exit /b)',
+    `set "KESTREL_SERVER=${host}"`,
+    `set "KESTREL_TOKEN=${token}"`,
+    `set "KESTREL_MSI_SHA256=${msiSha}"`,
+    'powershell -NoProfile -ExecutionPolicy Bypass -Command ^',
+    '  "$m=Join-Path $env:TEMP \'KestrelAgent.msi\';" ^',
+    '  "Invoke-WebRequest -UseBasicParsing https://$env:KESTREL_SERVER/downloads/KestrelAgent.msi -OutFile $m;" ^',
+    '  "if ((Get-FileHash $m -Algorithm SHA256).Hash -ne $env:KESTREL_MSI_SHA256) { Write-Error \'MSI hash mismatch\'; exit 2 };" ^',
+    '  "$p=Start-Process msiexec.exe -Wait -PassThru -ArgumentList \'/i\',$m,\'/qn\',(\'SERVER=\'+$env:KESTREL_SERVER),(\'TOKEN=\'+$env:KESTREL_TOKEN),\'/l*v\',(Join-Path $env:TEMP \'kestrel-install.log\');" ^',
+    '  "exit $p.ExitCode"',
+    'echo Kestrel installer finished with exit code %ERRORLEVEL%.',
+    'endlocal',
+    '',
+  ].join('\r\n')
   return {
-    ...t,
+    ...view,
     token,
     install_command: `$m="$env:TEMP\\kestrel-agent.msi"; Invoke-WebRequest -UseBasicParsing https://${host}/downloads/kestrel-agent-1.0.1-x64.msi -OutFile $m; Start-Process msiexec.exe -Wait -ArgumentList "/i \`"$m\`" /qn KESTREL_SERVER=${host}:8443 ENROLL_TOKEN=${token}"`,
+    installer_cmd: cmd,
+    installer_filename: filename,
   }
 })
 route('DELETE', '/enrollment-tokens/:id', ({ params }) => {
@@ -1042,10 +1100,266 @@ route('POST', '/updates/releases/:id/halt', ({ params, body }) => {
   return updates.view(r)
 })
 
+
+// ------------------------------------------------------------------ remote access (admin only)
+
+function canDo(u: User, priv: string) {
+  const p = ROLE_PRIVILEGES[u.role] ?? []
+  return p.includes('*') || p.includes(priv)
+}
+const REMOTE_STATUS: Record<RemoteErrorCode, [number, string]> = {
+  not_found: [404, 'not_found'],
+  protected_path: [403, 'forbidden'],
+  blocked_path: [403, 'forbidden'],
+  access_denied: [403, 'forbidden'],
+  disabled_by_policy: [403, 'forbidden'],
+  not_permitted: [403, 'forbidden'],
+  consent_denied: [403, 'forbidden'],
+  outside_allowed_hours: [403, 'forbidden'],
+  reason_required: [400, 'bad_request'],
+  consent_timeout: [408, 'consent_timeout'],
+  already_exists: [409, 'conflict'],
+  busy: [409, 'conflict'],
+  integrity_error: [409, 'conflict'],
+  invalid_operation: [400, 'bad_request'],
+  invalid_path: [400, 'bad_request'],
+  too_large: [413, 'payload_too_large'],
+  timeout: [504, 'gateway_timeout'],
+  unavailable: [503, 'unavailable'],
+  io: [500, 'internal'],
+  other: [500, 'internal'],
+}
+function remoteHttpError(code: RemoteErrorCode, message: string): HttpError {
+  const [status, c] = REMOTE_STATUS[code]
+  return new HttpError(status, c, message, code, ['not_permitted', 'disabled_by_policy', 'reason_required'].includes(code) ? { reason: code } : undefined)
+}
+/** Device local time (the mock uses the browser's clock): weekday 0 = Monday. */
+function localNow() {
+  const n = new Date()
+  return { weekday: (n.getDay() + 6) % 7, minute: n.getHours() * 60 + n.getMinutes() }
+}
+
+/**
+ * RBAC → device → effective profile allows the feature / operation (ceiling
+ * vs policy) → reason → MFA re-auth → online → capability, as in the contract;
+ * then the agent-side checks (allowed hours).
+ */
+export function remoteGuard(id: string, feature: 'desktop' | 'files', need: FileOpClass, reason: string) {
+  const u = me()
+  if (!canDo(u, `remote.${feature}`)) throw new HttpError(403, 'forbidden', `Remote ${feature === 'desktop' ? 'desktop' : 'file access'} needs the remote.${feature} privilege (admins only)`)
+  db.refreshDevices()
+  const d = findDevice(id)
+  const pol = db.policies.find((p) => p.id === d.policy_id) ?? db.policies[0]
+  const info = remoteAccessFor(d, pol)
+  const eff = info.effective!
+  const denied = (r: 'not_permitted' | 'disabled_by_policy', m: string) => remoteHttpError(r, m)
+  if (feature === 'files') {
+    const ceil = fileOpDenied(info.ceiling!, need)
+    if (ceil) throw denied('not_permitted', `Not permitted by the install profile: ${ceil}`)
+    const pol2 = fileOpDenied(info.policy!, need)
+    if (pol2) throw denied('disabled_by_policy', `Not allowed by the policy: ${pol2}`)
+  } else {
+    if (info.ceiling!.desktop === 'off') throw denied('not_permitted', 'Remote desktop is not permitted by the install profile')
+    if (info.policy!.desktop === 'off') throw denied('disabled_by_policy', 'Remote desktop is off in the policy')
+  }
+  if (eff.guardrails.require_reason && !reason.trim()) throw remoteHttpError('reason_required', 'A reason is required')
+  if (eff.guardrails.require_mfa_reauth) {
+    if (!u.mfa_enabled) throw new HttpError(403, 'forbidden', 'MFA is not enabled for your account', undefined, { reason: 'mfa_not_enabled' })
+    if (reauth.until < Date.now()) throw new HttpError(403, 'forbidden', 'Re-authentication required', undefined, { reason: 'reauth_required' })
+  }
+  const a = info[feature]
+  if (!a.available) {
+    if (a.reason === 'offline') throw new HttpError(409, 'conflict', 'device is offline')
+    if (a.reason === 'agent_too_old') throw new HttpError(409, 'conflict', 'the agent on this device is too old for remote access; update it')
+    throw new HttpError(409, 'conflict', 'device is decommissioned')
+  }
+  const h = eff.guardrails.allowed_hours
+  if (h) {
+    const n = localNow()
+    if (!hoursContain(h, n.weekday, n.minute)) throw remoteHttpError('outside_allowed_hours', 'Outside the allowed hours (device local time)')
+  }
+  return { u, d, eff, fs: fsFor(d.id, d.logged_on_user) }
+}
+
+function fmCtx(query: URLSearchParams) {
+  return { fmSession: query.get('fm_session') ?? '', reason: query.get('reason') ?? '' }
+}
+/** Agent-side consent for the first non-read op of an fm_session: the mock employee clicks Allow after ~2 s. */
+async function consentFor(eff: RemoteAccessProfile, fmSession: string, u: User, deviceId: string) {
+  if (!eff.guardrails.require_consent || (fmSession && consentedFmSessions.has(fmSession))) return
+  await new Promise((r) => setTimeout(r, CONSENT_DELAY_MS))
+  if (fmSession) consentedFmSessions.add(fmSession)
+  db.log(u, 'remote.consent', deviceId, { kind: 'files', fm_session: fmSession, result: 'allowed', ok: true })
+}
+export const CONSENT_DELAY_MS = typeof window === 'undefined' ? 10 : 2000
+
+/** Agent-side path checks: blocked paths of the effective profile (and, for rename / delete, folders that contain one). */
+function checkBlocked(eff: RemoteAccessProfile, ...paths: string[]) {
+  for (const p of paths) {
+    const v = validateRemotePath(p)
+    if (v.ok && blockedPrefix(eff.guardrails, v.path)) throw remoteHttpError('blocked_path', `${v.path} is blocked by the remote-access profile`)
+  }
+}
+function checkBlockedAncestor(eff: RemoteAccessProfile, ...paths: string[]) {
+  checkBlocked(eff, ...paths)
+  for (const p of paths) {
+    const v = validateRemotePath(p)
+    const b = v.ok ? eff.guardrails.blocked_paths.find((x) => x.trim() && pathIsWithin(x, v.path)) : undefined
+    if (b) throw remoteHttpError('blocked_path', `${v.ok ? v.path : p} contains ${b}, which is blocked by the remote-access profile`)
+  }
+}
+/** Run a file op, audit it like the server does, and map agent errors to HTTP. */
+function fileOp<T>(u: User, hostname: string, deviceId: string, action: string | null, details: Record<string, unknown>, f: () => T): T {
+  try {
+    const out = f()
+    if (action) db.log(u, action, deviceId, { hostname, ...details, ok: true })
+    return out
+  } catch (e) {
+    if (e instanceof RemoteFsError) {
+      if (action) db.log(u, action, deviceId, { hostname, ...details, ok: false, error: e.message })
+      throw remoteHttpError(e.code, e.message)
+    }
+    throw e
+  }
+}
+/** Blob bytes (jsdom's Blob in tests has no arrayBuffer()). */
+export async function blobBytes(b: Blob): Promise<ArrayBuffer> {
+  if (typeof b.arrayBuffer === 'function') return b.arrayBuffer()
+  return new Promise((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => resolve(r.result as ArrayBuffer)
+    r.onerror = () => reject(r.error)
+    r.readAsArrayBuffer(b)
+  })
+}
+async function sha256Hex(b: Blob): Promise<string> {
+  const d = await crypto.subtle.digest('SHA-256', await blobBytes(b))
+  return [...new Uint8Array(d)].map((x) => x.toString(16).padStart(2, '0')).join('')
+}
+
+route('POST', '/me/reauth', ({ body }) => {
+  const u = me()
+  const totp = String((body as { totp?: unknown })?.totp ?? '')
+  if (!u.mfa_enabled) throw new HttpError(403, 'forbidden', 'MFA is not enabled for your account', undefined, { reason: 'mfa_not_enabled' })
+  // Mock: any 6 digits except 000000 (to show the wrong-code path).
+  if (!/^\d{6}$/.test(totp) || totp === '000000') {
+    db.log(u, 'auth.reauth', u.email, { ok: false })
+    throw new HttpError(400, 'bad_request', 'invalid code', undefined, { reason: 'invalid_totp' })
+  }
+  reauth.until = Date.now() + 10 * MIN
+  db.log(u, 'auth.reauth', u.email, { ok: true })
+  return { reauth_until: reauth.until }
+})
+route('GET', '/devices/:id/files', ({ params, query }) => {
+  const c = fmCtx(query)
+  const { u, d, fs, eff } = remoteGuard(params.id, 'files', 'read', c.reason)
+  const path = query.get('path') ?? ''
+  if (path) checkBlocked(eff, path)
+  return fileOp(u, d.hostname, d.id, 'remote.files.list', { path, reason: c.reason }, () => fs.list(path))
+})
+route('GET', '/devices/:id/files/stat', ({ params, query }) => {
+  const c = fmCtx(query)
+  const { u, d, fs, eff } = remoteGuard(params.id, 'files', 'read', c.reason)
+  const path = query.get('path') ?? ''
+  checkBlocked(eff, path)
+  return fileOp(u, d.hostname, d.id, null, { path }, () => fs.stat(path))
+})
+route('GET', '/devices/:id/files/download', async ({ params, query }) => {
+  const c = fmCtx(query)
+  const { u, d, fs, eff } = remoteGuard(params.id, 'files', 'read', c.reason)
+  const path = query.get('path') ?? ''
+  checkBlocked(eff, path)
+  const { entry, blob } = fileOp(u, d.hostname, d.id, null, { path }, () => fs.read(path))
+  db.log(u, 'remote.files.download', d.id, { hostname: d.hostname, path, bytes: blob.size, sha256: await sha256Hex(blob), ok: true })
+  const ascii = entry.name.replace(/[^\x20-\x7e]|["\\]/g, '_')
+  return new RawBody(blob, {
+    'Content-Type': 'application/octet-stream',
+    'Content-Length': String(blob.size),
+    'Content-Disposition': `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(entry.name)}`,
+    'X-Content-Type-Options': 'nosniff',
+  })
+})
+route('POST', '/devices/:id/files/upload', async ({ params, query, body }): Promise<FileUploadResult> => {
+  const c = fmCtx(query)
+  const { u, d, fs, eff } = remoteGuard(params.id, 'files', 'write', c.reason)
+  const path = query.get('path') ?? ''
+  if (!(body instanceof Blob)) throw new HttpError(411, 'length_required', 'Content-Length is required')
+  checkBlocked(eff, path)
+  // Overwriting an existing file is a delete too: it needs allow_delete as well as upload.
+  const exists = (() => {
+    try {
+      return fs.stat(path).kind === 'file'
+    } catch {
+      return false
+    }
+  })()
+  if (exists && fileOpDenied(eff, 'delete')) {
+    const r = remoteAccessFor(d, db.policies.find((p) => p.id === d.policy_id) ?? db.policies[0])
+    const code = fileOpDenied(r.ceiling!, 'delete') ? 'not_permitted' : 'disabled_by_policy'
+    throw remoteHttpError(code, 'overwriting an existing file needs delete permission')
+  }
+  await consentFor(eff, c.fmSession, u, d.id)
+  const sha256 = await sha256Hex(body)
+  const r = fileOp(u, d.hostname, d.id, 'remote.files.upload', { path, bytes: body.size, sha256 }, () => fs.write(path, body))
+  return { path: r.path, size: r.size, sha256 }
+})
+route('POST', '/devices/:id/files/rename', async ({ params, query, body }) => {
+  const c = fmCtx(query)
+  const { u, d, fs, eff } = remoteGuard(params.id, 'files', 'delete', c.reason)
+  const b = body as { from: string; to: string; overwrite?: boolean }
+  checkBlockedAncestor(eff, b.from, b.to)
+  await consentFor(eff, c.fmSession, u, d.id)
+  return fileOp(u, d.hostname, d.id, 'remote.files.rename', { from: b.from, to: b.to, overwrite: !!b.overwrite }, () => fs.rename(b.from, b.to, !!b.overwrite))
+})
+route('POST', '/devices/:id/files/delete', async ({ params, query, body }) => {
+  const c = fmCtx(query)
+  const { u, d, fs, eff } = remoteGuard(params.id, 'files', 'delete', c.reason)
+  const b = body as { path: string; recursive?: boolean }
+  checkBlockedAncestor(eff, b.path)
+  await consentFor(eff, c.fmSession, u, d.id)
+  return fileOp(u, d.hostname, d.id, 'remote.files.delete', { path: b.path, recursive: !!b.recursive }, () => fs.remove(b.path, !!b.recursive))
+})
+route('POST', '/devices/:id/files/mkdir', async ({ params, query, body }) => {
+  const c = fmCtx(query)
+  const { u, d, fs, eff } = remoteGuard(params.id, 'files', 'write', c.reason)
+  const b = body as { path: string }
+  checkBlocked(eff, b.path)
+  await consentFor(eff, c.fmSession, u, d.id)
+  return fileOp(u, d.hostname, d.id, 'remote.files.mkdir', { path: b.path }, () => fs.mkdir(b.path))
+})
+route('GET', '/devices/:id/remote-desktop/status', ({ params }) => {
+  const u = me()
+  if (!canDo(u, 'remote.desktop')) throw new HttpError(403, 'forbidden', 'Remote desktop needs the remote.desktop privilege (admins only)')
+  findDevice(params.id)
+  const s = desktopSessions.get(params.id) ?? null
+  return { active: !!s, session: s }
+})
+
+/** Mock upload with simulated progress (the patched fetch has no upload progress). */
+export async function mockUpload(deviceId: string, target: string, file: Blob, c: { fmSession: string; reason: string }, onProgress: (loaded: number, total: number) => void, signal?: AbortSignal): Promise<FileUploadResult> {
+  const steps = 8
+  const total = file.size
+  const per = Math.min(300, Math.max(60, total / 2_000_000))
+  for (let i = 1; i <= steps; i++) {
+    if (signal?.aborted) throw new ApiError(0, 'aborted', 'Upload cancelled.')
+    await new Promise((r) => setTimeout(r, per))
+    onProgress(Math.round((total * i) / steps), total)
+  }
+  const q = new URLSearchParams({ path: target, fm_session: c.fmSession })
+  if (c.reason.trim()) q.set('reason', c.reason.trim())
+  const res = await handleMock('POST', `/devices/${deviceId}/files/upload`, q, file)
+  if (res.status >= 300) throw apiErrorFrom(res.status, JSON.stringify(res.body))
+  return res.body as FileUploadResult
+}
+
+
 // ------------------------------------------------------------------ dispatcher
 
-export async function handleMock(method: string, path: string, query: URLSearchParams, body: unknown): Promise<{ status: number; body: unknown }> {
-  await new Promise((r) => setTimeout(r, 90 + Math.random() * 160))
+/** Tests switch the simulated network latency off. */
+export const mockOptions = { latency: true }
+
+export async function handleMock(method: string, path: string, query: URLSearchParams, body: unknown): Promise<{ status: number; body: unknown; headers?: Record<string, string> }> {
+  if (mockOptions.latency) await new Promise((r) => setTimeout(r, 90 + Math.random() * 160))
   for (const r of routes) {
     if (r.method !== method) continue
     const m = r.re.exec(path)
@@ -1053,10 +1367,15 @@ export async function handleMock(method: string, path: string, query: URLSearchP
     const params: Record<string, string> = {}
     r.keys.forEach((k, i) => (params[k] = decodeURIComponent(m[i + 1])))
     try {
-      const out = r.h({ params, query, body, method })
+      const out = await r.h({ params, query, body, method })
+      if (out instanceof RawBody) return { status: 200, body: out.blob, headers: out.headers }
       return { status: out === undefined ? 204 : 200, body: out }
     } catch (e) {
-      if (e instanceof HttpError) return { status: e.status, body: { error: { code: e.code, message: e.message } } }
+      if (e instanceof HttpError)
+        return {
+          status: e.status,
+          body: { error: { code: e.code, message: e.message, ...(e.remoteCode ? { remote_code: e.remoteCode } : {}), ...(e.extra ?? {}) } },
+        }
       console.error(e)
       return { status: 500, body: { error: { code: 'internal', message: String(e) } } }
     }
@@ -1064,20 +1383,28 @@ export async function handleMock(method: string, path: string, query: URLSearchP
   return { status: 404, body: { error: { code: 'not_found', message: `No route for ${method} ${path}` } } }
 }
 
+/** `fetch` replacement serving `/api/*` from memory (used by installMock and component tests). */
+export async function mockFetch(input: RequestInfo | URL, init?: RequestInit, orig?: typeof fetch): Promise<Response> {
+  const base = typeof location !== 'undefined' ? location.href : 'http://localhost/'
+  const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, base)
+  const i = url.pathname.indexOf('/api/')
+  if (i < 0) {
+    if (orig) return orig(input, init)
+    return new Response(null, { status: 404 })
+  }
+  const path = url.pathname.slice(i + 4)
+  const method = (init?.method ?? 'GET').toUpperCase()
+  const body = init?.body instanceof Blob ? init.body : init?.body ? JSON.parse(String(init.body)) : undefined
+  const res = await handleMock(method, path, url.searchParams, body)
+  if (res.body instanceof Blob) return new Response(res.body, { status: res.status, headers: res.headers })
+  return new Response(res.status === 204 ? null : JSON.stringify(res.body), { status: res.status, headers: { 'Content-Type': 'application/json' } })
+}
+
 /** Patch window.fetch so `/api/*` is served from memory. */
 export function installMock(opts: { autoLogin: boolean }) {
   if (opts.autoLogin) db.session = db.users[0]
   const orig = window.fetch.bind(window)
-  window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, location.href)
-    const i = url.pathname.indexOf('/api/')
-    if (i < 0) return orig(input, init)
-    const path = url.pathname.slice(i + 4)
-    const method = (init?.method ?? 'GET').toUpperCase()
-    const body = init?.body ? JSON.parse(String(init.body)) : undefined
-    const res = await handleMock(method, path, url.searchParams, body)
-    return new Response(res.status === 204 ? null : JSON.stringify(res.body), { status: res.status, headers: { 'Content-Type': 'application/json' } })
-  }
+  window.fetch = (input: RequestInfo | URL, init?: RequestInit) => mockFetch(input, init, orig)
   // Simulate a live detection a little after load so the queue's live update is visible.
   setTimeout(() => {
     const inc = liveIncident(db.ctx(), db.devices)

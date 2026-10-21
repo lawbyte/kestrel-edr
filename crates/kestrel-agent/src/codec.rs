@@ -12,7 +12,12 @@ pub const MAX_DECOMPRESSED: usize = 64 * 1024 * 1024;
 /// Serialise `v` as JSON; compress when large or when `force_compress`.
 /// Returns `(bytes, compressed)`.
 pub fn encode<T: Serialize>(v: &T, force_compress: bool) -> Result<(Vec<u8>, bool)> {
-    let mut json = serde_json::to_vec(v)?;
+    encode_json(serde_json::to_vec(v)?, force_compress)
+}
+
+/// [`encode`] for a value already serialised to JSON (callers that need the
+/// JSON size first, e.g. live messages checked against `LIVE_MAX_MESSAGE`).
+pub fn encode_json(mut json: Vec<u8>, force_compress: bool) -> Result<(Vec<u8>, bool)> {
     // NUL characters (seen in real command lines) cannot be stored by the
     // server's database; replace them before the payload leaves the device.
     if json.windows(6).any(|w| w == b"\\u0000") {

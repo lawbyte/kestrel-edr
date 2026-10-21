@@ -84,7 +84,24 @@ fn payload_type(p: &AgentPayload) -> &'static str {
         AgentPayload::Ack { .. } => "ack",
         AgentPayload::RenewCertificate { .. } => "renew_certificate",
         AgentPayload::UpdateResult { .. } => "update_result",
+        AgentPayload::Live { .. } => "live",
     }
+}
+
+/// M5: largest decoded agent payload of kind `live` the server accepts
+/// (`remote::LIVE_MAX_MESSAGE` plus slack for the envelope / JSON framing).
+pub const LIVE_PAYLOAD_MAX: usize = kestrel_common::remote::LIVE_MAX_MESSAGE + 64 * 1024;
+
+/// Is this decoded agent payload an `AgentPayload::Live`? Reads only the
+/// `kind` tag (every other field is skipped without being stored).
+pub fn is_live_payload(raw: &[u8]) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Kind {
+        kind: String,
+    }
+    serde_json::from_slice::<Kind>(raw)
+        .map(|k| k.kind == "live")
+        .unwrap_or(false)
 }
 
 pub fn decode_payload(compressed: bool, payload: &[u8]) -> Result<Vec<u8>, String> {
@@ -254,25 +271,34 @@ impl AgentSvc {
             let issued = renew_certificate(st, device_id, &serial, &req.csr_pem)
                 .await
                 .map_err(|e| Status::invalid_argument(format!("renewal refused: {e}")))?;
+            // The agent keeps the ceiling it pinned at enrollment; echo the
+            // server's record (never a different one).
+            let (ceiling,): (serde_json::Value,) =
+                sqlx::query_as("SELECT remote_ceiling FROM devices WHERE id = $1")
+                    .bind(device_id)
+                    .fetch_one(&st.db)
+                    .await
+                    .map_err(|_| Status::unavailable("database unavailable"))?;
             return Ok(EnrollResponse {
                 device_id,
                 cert_pem: issued.cert_pem,
                 ca_pem: st.ca.cert_pem.clone(),
                 uninstall_token: String::new(),
+                remote_profile: crate::remote::profile_from_json(ceiling),
             });
         }
         let now = now_ms();
         let hash = sha256_hex(req.token.as_bytes());
-        let tok: Option<(Uuid, Uuid, String)> = sqlx::query_as(
+        let tok: Option<(Uuid, Uuid, String, serde_json::Value)> = sqlx::query_as(
             "UPDATE enrollment_tokens SET uses = uses + 1 WHERE token_hash = $1 AND NOT revoked AND expires_at > $2 AND uses < max_uses \
-             RETURNING id, group_id, token_prefix",
+             RETURNING id, group_id, token_prefix, remote_profile",
         )
         .bind(&hash)
         .bind(now)
         .fetch_optional(&st.db)
         .await
         .map_err(|_| Status::unavailable("database unavailable"))?;
-        let Some((token_id, group_id, prefix)) = tok else {
+        let Some((token_id, group_id, prefix, remote_profile)) = tok else {
             tracing::warn!("enrollment rejected: invalid, expired, revoked or exhausted token");
             return Err(Status::unauthenticated(
                 "invalid or expired enrollment token",
@@ -281,6 +307,8 @@ impl AgentSvc {
         // H2: every enrollment is a new device. The hardware UUID is client
         // asserted, so a match never re-binds (or revokes) an existing identity;
         // it is only flagged on both devices for an administrator to merge.
+        // The token's remote-access profile becomes the device's ceiling.
+        let remote_profile = crate::remote::profile_from_json(remote_profile);
         let id = Uuid::new_v4();
         let issued = st
             .ca
@@ -308,7 +336,7 @@ impl AgentSvc {
             let mut tx = st.db.begin().await?;
             sqlx::query(
                 "INSERT INTO devices (id, hostname, os_name, os_build, arch, domain, hw_uuid, group_id, first_seen, last_seen, \
-                 possible_duplicate_ids, uninstall_token_enc) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10,$11)",
+                 possible_duplicate_ids, uninstall_token_enc, remote_ceiling) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10,$11,$12)",
             )
             .bind(id)
             .bind(&req.hostname)
@@ -321,6 +349,7 @@ impl AgentSvc {
             .bind(now)
             .bind(&dup_ids)
             .bind(st.mk.seal_str(&uninstall_token))
+            .bind(serde_json::to_value(&remote_profile).unwrap_or_default())
             .execute(&mut *tx)
             .await?;
             if !dup_ids.is_empty() {
@@ -349,7 +378,8 @@ impl AgentSvc {
             &Actor::system(),
             "device.enrolled",
             id.to_string(),
-            json!({"hostname": req.hostname, "group_id": group_id, "token_id": token_id, "token_prefix": prefix, "possible_duplicates": dup_ids}),
+            json!({"hostname": req.hostname, "group_id": group_id, "token_id": token_id, "token_prefix": prefix, "possible_duplicates": dup_ids,
+                   "remote_ceiling": remote_profile.summary()}),
         )
         .await;
         for (dup, host, last_seen) in &dups {
@@ -378,6 +408,7 @@ impl AgentSvc {
             cert_pem: issued.cert_pem,
             ca_pem: st.ca.cert_pem.clone(),
             uninstall_token,
+            remote_profile,
         })
     }
 }
@@ -438,6 +469,20 @@ impl AgentService for AgentSvc {
         if let Err(e) = mark_cert_in_use(&state, device_id, &serial).await {
             tracing::warn!(%device_id, error = %e, "recording certificate use failed");
         }
+        // Remember the ceiling the agent says it pinned (device detail, offline).
+        if let Err(e) = sqlx::query("UPDATE devices SET agent_remote_ceiling = $2 WHERE id = $1")
+            .bind(device_id)
+            .bind(
+                hello
+                    .remote_ceiling
+                    .as_ref()
+                    .and_then(|c| serde_json::to_value(c).ok()),
+            )
+            .execute(&state.db)
+            .await
+        {
+            tracing::warn!(%device_id, error = %e, "recording the agent's remote-access ceiling failed");
+        }
         let mut initial = ingest::hello(&state, device_id, &hello, peer_ip)
             .await
             .map_err(|e| Status::internal(format!("hello: {e}")))?;
@@ -454,6 +499,13 @@ impl AgentService for AgentSvc {
             last_hb: AtomicI64::new(0),
             silence_alerted: AtomicBool::new(false),
             kill: tokio::sync::Notify::new(),
+            capabilities: hello
+                .capabilities
+                .iter()
+                .take(64)
+                .map(|c| c.chars().take(64).collect())
+                .collect(),
+            remote_ceiling: hello.remote_ceiling.clone(),
         });
         if let Some(old) = state.agents.register(device_id, conn.clone()) {
             old.kill.notify_one();
@@ -487,6 +539,7 @@ impl AgentService for AgentSvc {
                 serial: serial.clone(),
             };
             let mut hwm = hwm.max(0) as u64;
+            let mut live_oversize: u64 = 0;
             tokio::spawn(async move {
                 loop {
                     let next = tokio::select! {
@@ -520,6 +573,17 @@ impl AgentService for AgentSvc {
                         continue;
                     }
                     let decoded = decode_payload(msg.compressed, &msg.payload);
+                    // M5: oversized live traffic is dropped before it is parsed
+                    // or queued (never acked: live messages are seq 0).
+                    if let Ok(raw) = decoded.as_deref() {
+                        if raw.len() > LIVE_PAYLOAD_MAX && is_live_payload(raw) {
+                            live_oversize += 1;
+                            if live_oversize == 1 || live_oversize.is_multiple_of(100) {
+                                tracing::warn!(%device_id, bytes = raw.len(), dropped = live_oversize, "oversized live message from the agent dropped");
+                            }
+                            continue;
+                        }
+                    }
                     let payload = match decoded.as_deref().map_err(|e| e.clone()).and_then(
                         |raw| {
                             let mut v: serde_json::Value =
@@ -586,6 +650,13 @@ impl AgentService for AgentSvc {
                             }
                             Ok(())
                         }
+                        // Remote-access live traffic: handed to the waiting
+                        // session, never stored, acked or logged (frames and file
+                        // contents must not reach logs or telemetry).
+                        Some(AgentPayload::Live { session_id, msg }) => {
+                            state.remote.dispatch(device_id, session, session_id, msg);
+                            Ok(())
+                        }
                         Some(AgentPayload::Ack { seq: acked }) => {
                             // Server acks are per message; the agent acks each server seq.
                             if let Some((_, p)) = sent.remove(&acked) {
@@ -608,8 +679,10 @@ impl AgentService for AgentSvc {
                             break;
                         }
                     };
-                    if seq == 0 {
-                        continue; // seq 0 (Hello / agent Acks) is never acked or deduped
+                    if seq == 0 || ptype == "live" {
+                        // seq 0 (Hello / agent Acks / live traffic) is never acked
+                        // or deduped; live messages never move the high-water mark.
+                        continue;
                     }
                     match res {
                         Ok(()) => {
@@ -662,6 +735,8 @@ impl AgentService for AgentSvc {
                     }
                 }
                 state.agents.unregister(device_id, session);
+                // Every live session riding this stream ends ("device disconnected").
+                state.remote.close_conn(device_id, session);
                 let _ = sqlx::query(
                     "UPDATE devices SET last_seen = GREATEST(last_seen, $2) WHERE id = $1",
                 )
@@ -696,5 +771,22 @@ impl AgentService for AgentSvc {
         });
         drop(tx);
         Ok(Response::new(Box::pin(stream)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_payload_detection() {
+        assert!(is_live_payload(
+            br#"{"kind":"live","session_id":"x","msg":{"type":"desktop_ping"}}"#
+        ));
+        assert!(is_live_payload(
+            br#"{"session_id":"x","msg":{"kind":"y"},"kind":"live"}"#
+        ));
+        assert!(!is_live_payload(br#"{"kind":"events","events":[]}"#));
+        assert!(!is_live_payload(b"not json"));
     }
 }

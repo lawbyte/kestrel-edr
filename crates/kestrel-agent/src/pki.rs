@@ -198,6 +198,9 @@ pub async fn enroll(
     }
     cfg.device_id = Some(er.device_id);
     cfg.pending_enroll_token = None;
+    // Remote-access ceiling from the enrollment token: pinned here and never
+    // changed by any later server message (a new enrollment replaces it).
+    cfg.remote_ceiling = Some(er.remote_profile.clone());
     // M5: the server issues the per-device uninstall token; only its
     // Argon2id hash is stored. Old servers send none: keep what we have.
     if !er.uninstall_token.trim().is_empty() {

@@ -45,11 +45,15 @@ pub fn write_install_config(state_dir: &Path, o: &InstallOpts) -> Result<AgentCo
         pending_enroll_token: Some(o.token.trim().to_string()).filter(|t| !t.is_empty()),
         tags: o.tags.clone(),
         hostname: o.hostname.clone(),
+        remote_ceiling: None,
     };
     if let Some(p) = &prev {
         if p.server == cfg.server && p.ca_pem == cfg.ca_pem {
             cfg.device_id = p.device_id;
             cfg.uninstall_token_hash = p.uninstall_token_hash.clone();
+            // The identity is kept (see `keep_existing_enrollment`), and so is
+            // the remote-access ceiling pinned when it was enrolled.
+            cfg.remote_ceiling = p.remote_ceiling.clone();
         }
     }
     if let Some(t) = o
@@ -188,6 +192,8 @@ pub struct SimulateOpts {
     pub hostname: String,
     /// Exit this long after the replay completes (once the outbox drains).
     pub exit_after_replay: Option<Duration>,
+    /// How the simulated employee answers remote-access consent prompts.
+    pub consent: crate::sim::SimConsent,
 }
 
 /// Configure (if needed), enroll, then run the full agent on `SimPlatform`.
@@ -212,6 +218,7 @@ pub async fn simulate(state_dir: &Path, o: SimulateOpts, tuning: Tuning) -> Resu
         hostname: o.hostname.clone(),
         user: crate::sim::SIM_USER.into(),
     }));
+    sim.set_consent(o.consent);
     let cfg = AgentConfig::load(state_dir)?;
     if !crate::pki::is_enrolled(state_dir, &cfg) {
         use kestrel_platform::Platform;

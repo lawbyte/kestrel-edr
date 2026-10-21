@@ -25,6 +25,9 @@ pub mod applocker;
 pub mod autorun_plan;
 pub mod canary;
 pub mod consts;
+pub mod desktop_image;
+pub mod desktop_keymap;
+pub mod desktop_proto;
 pub mod dnswire;
 pub mod etwparse;
 pub mod evtxml;
@@ -39,6 +42,7 @@ pub mod proctrack;
 pub mod qpolicy;
 pub mod rcanary;
 pub mod regdiff;
+pub mod remotefs;
 pub mod sddl;
 pub mod spawnreg;
 pub mod taskxml;
@@ -50,6 +54,13 @@ pub mod zipw;
 #[cfg(windows)]
 mod win;
 
+/// Hidden `kestrel-agent desktop-helper --pipe <name> --parent <pid>`
+/// subcommand: the remote-desktop helper (capture, input, banner).
+#[cfg(windows)]
+pub use win::desktop::run_desktop_helper;
+/// RedirectionGuard for the current process (called by `WindowsPlatform::new`).
+#[cfg(windows)]
+pub use win::hardfs::enable_redirection_guard;
 #[cfg(windows)]
 pub use win::platform::{resolve_host_direct, WindowsPlatform};
 #[cfg(windows)]

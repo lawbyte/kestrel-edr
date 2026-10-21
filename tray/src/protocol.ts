@@ -17,6 +17,38 @@ export interface ItContact {
   url: string;
 }
 
+export type RemoteKind = "desktop" | "files";
+export const REMOTE_KINDS: readonly RemoteKind[] = ["desktop", "files"];
+
+/** An admin's remote session on this PC (no consent step; the employee is always told). */
+export interface RemoteSessionNotice {
+  active: boolean;
+  /** Desktop session or file-manager session (missing → "desktop"). */
+  kind: RemoteKind;
+  admin_name: string;
+  /** true = the admin can only see the screen. */
+  view_only: boolean;
+  reason: string;
+  started_at: TimestampMs;
+  ended_at: TimestampMs | null;
+}
+
+/** `SubscribeWith.features` value enabling `remote_session` pushes. */
+export const FEATURE_REMOTE_SESSION = "remote_session";
+/** `SubscribeWith.features` value enabling `consent_request` pushes. */
+export const FEATURE_REMOTE_CONSENT = "remote_consent";
+
+/** IT asks to connect (only pushed to `remote_consent` subscribers). */
+export interface ConsentRequest {
+  request_id: Uuid;
+  kind: RemoteKind;
+  admin_name: string;
+  view_only: boolean;
+  reason: string;
+  timeout_secs: number;
+  expires_at: TimestampMs;
+}
+
 export interface TrayStatus {
   state: ProtectionState;
   agent_version: string;
@@ -28,6 +60,8 @@ export interface TrayStatus {
   privacy_notice_md: string;
   hostname: string;
   last_check: TimestampMs | null;
+  /** Remote-desktop session in progress (missing from older agents → null). */
+  remote_session: RemoteSessionNotice | null;
 }
 
 export interface ActivityItem {
@@ -47,14 +81,18 @@ export type TrayRequest =
   | { op: "activity"; limit: number }
   | { op: "quick_check" }
   | { op: "request_review"; alert_id: Uuid; justification: string }
-  | { op: "subscribe" };
+  | { op: "subscribe" }
+  | { op: "subscribe_with"; features: string[] }
+  | { op: "consent_response"; request_id: Uuid; allow: boolean };
 
 export type TrayResponse =
   | ({ type: "status" } & TrayStatus)
   | { type: "activity"; items: ActivityItem[] }
   | { type: "ack"; ok: boolean; message: string }
   | ({ type: "notification" } & ActivityItem)
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | ({ type: "remote_session" } & RemoteSessionNotice)
+  | ({ type: "consent_request" } & ConsentRequest);
 
 export const PROTECTION_STATES: readonly ProtectionState[] = ["protected", "attention", "isolated", "degraded", "offline"];
 export const SEVERITIES: readonly Severity[] = ["info", "low", "medium", "high", "critical"];
@@ -104,6 +142,32 @@ export function parseItContact(v: unknown): ItContact {
   return { name: str(o, "name", ""), email: str(o, "email", ""), phone: str(o, "phone", ""), url: str(o, "url", "") };
 }
 
+export function parseRemoteSession(o: unknown): RemoteSessionNotice {
+  if (!isObj(o)) throw new ProtocolError("remote session must be an object");
+  return {
+    active: bool(o, "active"),
+    kind: o["kind"] === undefined ? "desktop" : oneOf(o, "kind", REMOTE_KINDS),
+    admin_name: str(o, "admin_name"),
+    view_only: bool(o, "view_only"),
+    reason: str(o, "reason", ""),
+    started_at: num(o, "started_at"),
+    ended_at: opt(o, "ended_at", num),
+  };
+}
+
+export function parseConsentRequest(o: unknown): ConsentRequest {
+  if (!isObj(o)) throw new ProtocolError("consent request must be an object");
+  return {
+    request_id: str(o, "request_id"),
+    kind: oneOf(o, "kind", REMOTE_KINDS),
+    admin_name: str(o, "admin_name"),
+    view_only: o["view_only"] === undefined ? false : bool(o, "view_only"),
+    reason: str(o, "reason", ""),
+    timeout_secs: num(o, "timeout_secs"),
+    expires_at: num(o, "expires_at"),
+  };
+}
+
 export function parseStatus(o: unknown): TrayStatus {
   if (!isObj(o)) throw new ProtocolError("status must be an object");
   return {
@@ -117,6 +181,7 @@ export function parseStatus(o: unknown): TrayStatus {
     privacy_notice_md: str(o, "privacy_notice_md"),
     hostname: str(o, "hostname"),
     last_check: opt(o, "last_check", num),
+    remote_session: opt(o, "remote_session", (oo, k) => parseRemoteSession(oo[k])),
   };
 }
 
@@ -152,6 +217,10 @@ export function parseResponse(v: unknown): TrayResponse {
       return { type: "notification", ...parseActivityItem(v) };
     case "error":
       return { type: "error", message: str(v, "message") };
+    case "remote_session":
+      return { type: "remote_session", ...parseRemoteSession(v) };
+    case "consent_request":
+      return { type: "consent_request", ...parseConsentRequest(v) };
     default:
       throw new ProtocolError(`unknown response type ${JSON.stringify(v["type"])}`);
   }
@@ -171,6 +240,11 @@ export function parseResponseLine(line: string): TrayResponse {
 /** Serialise a request as one protocol line (newline-terminated). */
 export function encodeRequest(req: TrayRequest): string {
   return JSON.stringify(req) + "\n";
+}
+
+/** The session to show: only an active one counts. */
+export function activeRemoteSession(n: RemoteSessionNotice | null | undefined): RemoteSessionNotice | null {
+  return n && n.active ? n : null;
 }
 
 /** Insert or replace an item by id, newest first (pushes may update review state). */

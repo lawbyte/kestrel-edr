@@ -27,6 +27,11 @@ export function relativeTime(ts: number, now = Date.now()): string {
   return `${dateFmt.format(d)} at ${timeFmt.format(d)}`;
 }
 
+/** Wall-clock time, e.g. "9:41" / "9:41 AM" (locale). */
+export function clockTime(ts: number): string {
+  return timeFmt.format(ts);
+}
+
 /** Coarse version for status rows: "4 minutes ago", "2 days ago", "Never". */
 export function ago(ts: number | null, now = Date.now()): string {
   if (ts === null) return "Never";

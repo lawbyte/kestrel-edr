@@ -137,6 +137,44 @@ export const IconClock = ({ size = 16 }: P) =>
     </>,
   );
 
+/** Remote session, view only: a screen with an eye. */
+export const IconRemoteView = ({ size = 16 }: P) =>
+  svg(
+    size,
+    <>
+      <rect x="1.75" y="2.5" width="12.5" height="8.5" rx="1" />
+      <path d="M6 13.5h4M8 11v2.5" />
+      <path d="M4.6 6.75C5.4 5.6 6.6 5 8 5s2.6.6 3.4 1.75C10.6 7.9 9.4 8.5 8 8.5S5.4 7.9 4.6 6.75Z" />
+      <circle cx="8" cy="6.75" r=".6" />
+    </>,
+  );
+/** Remote session with control: a screen with a pointer. */
+export const IconRemoteControl = ({ size = 16 }: P) =>
+  svg(
+    size,
+    <>
+      <path d="M14.25 7.5V3.5a1 1 0 0 0-1-1H2.75a1 1 0 0 0-1 1V10a1 1 0 0 0 1 1H7.5" />
+      <path d="M5 13.5h3M6.5 11v2.5" />
+      <path d="M9.5 6.5 14 8.4l-1.9.7-.7 1.9Z" />
+    </>,
+  );
+
+/** Remote file access: a folder with an arrow. */
+export const IconRemoteFiles = ({ size = 16 }: P) =>
+  svg(
+    size,
+    <>
+      <path d="M1.75 4a1 1 0 0 1 1-1h3.2l1.5 1.5h5.8a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H2.75a1 1 0 0 1-1-1Z" />
+      <path d="M6 9h4.5M9 7.5 10.5 9 9 10.5" />
+    </>,
+  );
+
+/** The icon for a remote session's mode (files / view only / control). */
+export function RemoteIcon({ session, size = 16 }: { session: { kind: "desktop" | "files"; view_only: boolean }; size?: number }) {
+  if (session.kind === "files") return <IconRemoteFiles size={size} />;
+  return session.view_only ? <IconRemoteView size={size} /> : <IconRemoteControl size={size} />;
+}
+
 /** Severity marker: different shapes per level, so colour isn't the only signal. */
 export function SeverityMark({ severity }: { severity: "info" | "low" | "medium" | "high" | "critical" }) {
   return (

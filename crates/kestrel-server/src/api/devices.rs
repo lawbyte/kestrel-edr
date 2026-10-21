@@ -148,6 +148,7 @@ pub async fn detail(
         "duplicates": duplicates,
         "inventory": inv,
         "recent_alerts": alerts.iter().map(|a| a.to_api()).collect::<Vec<_>>(),
+        "remote_access": crate::remote::availability_json(&st, id).await?,
         "effective_policy": policy,
         "hardening": hardening,
     })))

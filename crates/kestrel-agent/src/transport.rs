@@ -24,6 +24,11 @@
 //! Every server message with seq > 0 is acked after it was handled, except a
 //! `SetUninstallToken` whose new hash could not be saved (the server re-sends
 //! it on the next connect and only promotes the token once acked).
+//!
+//! Remote access (`ServerPayload::Live`) is routed to `Core::live` without
+//! blocking the read loop and is never acked. The live manager sends its
+//! replies (`AgentPayload::Live`, seq 0) directly on this stream while it is
+//! attached; when the stream ends every live session ends.
 
 use anyhow::{anyhow, Context, Result};
 use kestrel_common::{
@@ -148,6 +153,30 @@ async fn ensure_enrolled(core: &Core) -> Result<AgentConfig> {
     Ok(cfg)
 }
 
+/// Optional features announced in `Hello.capabilities`.
+fn capabilities(core: &Core) -> Vec<String> {
+    let mut caps = vec![];
+    if core.platform.remote_fs().is_some() {
+        caps.push(kestrel_common::remote::CAP_LIVE_FILES.to_string());
+    }
+    if core.platform.remote_desktop().is_some() {
+        caps.push(kestrel_common::remote::CAP_LIVE_DESKTOP.to_string());
+    }
+    caps
+}
+
+/// Detaches the live manager from a stream when the session ends.
+struct LiveAttachment {
+    core: Arc<Core>,
+    gen: u64,
+}
+
+impl Drop for LiveAttachment {
+    fn drop(&mut self) {
+        self.core.live.detach(self.gen);
+    }
+}
+
 fn envelope(seq: u64, p: &AgentPayload) -> Result<AgentEnvelope> {
     let (payload, compressed) = codec::encode(p, false)?;
     Ok(AgentEnvelope {
@@ -194,6 +223,8 @@ async fn session(core: &Arc<Core>, backoff: &mut Backoff, st: &mut SessionState)
         policy_version: core.policy_version(),
         rules_version: core.rules_version(),
         outbox_epoch: core.store.outbox_epoch(),
+        capabilities: capabilities(core),
+        remote_ceiling: Some(core.remote_ceiling()),
     });
     tx.send(envelope(0, &hello)?)
         .await
@@ -207,6 +238,12 @@ async fn session(core: &Arc<Core>, backoff: &mut Backoff, st: &mut SessionState)
     tracing::info!(server = %cfg.server, %device_id, "connected");
     core.set_connected(true);
 
+    // Live remote-access sessions ride this stream; they all end with it
+    // (the guard detaches on every exit path).
+    let _live = LiveAttachment {
+        core: core.clone(),
+        gen: core.live.attach(tx.clone()),
+    };
     // Highest outbox seq acked by the server during this session.
     let (acked_tx, acked_rx) = tokio::sync::watch::channel(0u64);
     let pump = tokio::spawn(pump_outbox(core.clone(), tx.clone(), acked_rx));
@@ -235,6 +272,14 @@ async fn session(core: &Arc<Core>, backoff: &mut Backoff, st: &mut SessionState)
                     tracing::warn!(seq = env.seq, "undecodable server payload: {e:#}");
                     continue;
                 }
+            };
+            // Live traffic: routed without blocking, never acked.
+            let payload = match payload {
+                ServerPayload::Live { session_id, msg } => {
+                    core.live.handle(session_id, msg);
+                    continue;
+                }
+                other => other,
             };
             let flow = handle_server(core, payload, &acked_tx, backoff, &tx, st).await;
             if env.seq > 0 && !matches!(flow, Flow::NoAck) {
@@ -451,6 +496,11 @@ async fn handle_server(
                     return Flow::NoAck;
                 }
             }
+        }
+        // Normally intercepted by the read loop; never acked.
+        ServerPayload::Live { session_id, msg } => {
+            core.live.handle(session_id, msg);
+            return Flow::NoAck;
         }
     }
     Flow::Continue

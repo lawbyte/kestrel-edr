@@ -176,6 +176,43 @@ It never overwrites existing files, and it never follows junctions or symbolic l
 * **Audit chain.** Every administrative action is appended to `audit_log` with `hash = HMAC-SHA256(k, prev_hash || canonical_json(row))`, where `k` is derived from `KESTREL_MASTER_KEY`, so database access alone cannot recompute the chain. Every 15 minutes the head `(id, hash)` is written to the server log and, when configured, to syslog as an external anchor against truncation. Older unkeyed chains are re-chained once at startup if they verify. Administrative actions include login, policy and rule changes, token issuance, response actions, enrollment and hunt queries. `GET /api/audit-log/verify` recomputes the chain and returns `{ok, broken_at, count}`. After restoring a backup, run the verification.
 * **Secrets at rest.** The CA key, web TLS key, TOTP secrets and notification secrets are encrypted with a key derived from `KESTREL_MASTER_KEY`. The server refuses to start if it cannot decrypt them, which happens when it is given the wrong master key. Write-only settings return only `*_set: bool`.
 
+### Remote access (remote desktop + file manager)
+
+Details are in contracts.md ("Remote access") and the wire types are in `kestrel_common::remote`.
+
+* **Transport.** Both features use `ServerPayload::Live` / `AgentPayload::Live { session_id, msg }` on the existing mTLS stream.
+  * Messages are JSON; frames and file chunks are base64.
+  * They are ephemeral: agent envelopes carry seq 0, skip the SQLite outbox and are never acked. The server routes them through an in-memory hub keyed by session id, and checks that the session belongs to the sending device.
+  * When the stream drops, every live session of that device ends.
+  * Older peers ignore unknown kinds. The server opens sessions only with agents whose `Hello.capabilities` list `live.files` / `live.desktop`.
+* **Who may use it.**
+  * Admins only, through the privileges `remote.desktop` / `remote.files`.
+  * Interactive console session only; API tokens are refused.
+  * The remote-desktop WebSocket additionally checks `Origin` against `Host` and takes the CSRF token as a query parameter.
+* **Install ceiling.** Each enrollment token carries a `RemoteAccessProfile`.
+  * The agent pins it at enrollment as its ceiling. Only a new enrollment (a reinstall with the uninstall token) changes it; no later server message does.
+  * The effective profile is `ceiling ∩ policy` (stricter wins). The agent enforces it: modes, upload/delete, allowed hours in device local time, required reason, blocked paths and session length.
+  * The server checks the same intersection to show the result in the UI and to refuse early.
+  * A device installed with *No remote access* cannot be opened by a compromised server or admin account. Every device enrolled before profiles existed has that ceiling.
+* **Guardrails.**
+  * *Consent:* the tray in the active console session shows Allow/Deny. No answer, no user signed in, or an old tray means deny.
+  * *MFA step-up:* `POST /me/reauth`, valid for 10 minutes.
+  * *Session and idle limits:* enforced by the server's timers; the agent also enforces the maximum length.
+* **Remote desktop.**
+  * The agent (SYSTEM, session 0) starts `kestrel-agent.exe desktop-helper` in the active console session, using a copy of its own token with `TokenSessionId` set.
+  * The helper runs inside a kill-on-close job object, so it dies with the agent.
+  * It talks to the agent over a per-session pipe whose DACL allows only SYSTEM. Each side checks the other's process id.
+  * The helper captures the screen with GDI (`BitBlt`), follows input-desktop switches (UAC, lock screen), JPEG-encodes changed frames, and injects input with `SendInput`.
+  * It also shows a click-through, always-on-top banner that cannot be closed: "IT (name) is viewing / controlling this PC".
+  * Flow control: at most 3 frames in flight; the server acks each frame after writing it to the browser's WebSocket.
+* **File manager.**
+  * Paths are validated identically on server and agent (`validate_remote_path`): only absolute `X:\…` paths, never UNC/device paths or network drives.
+  * Kestrel's install and state folders are refused after canonicalisation (8.3 names, junctions, symlinks). Their ancestors cannot be renamed or deleted.
+  * Uploads go to an exclusive temp file and are renamed over the target only after the size and SHA-256 match.
+  * Recursive delete removes links, never their targets.
+  * Downloads stream from the agent's 512 KiB chunks straight to the browser; the server never stores file data.
+* **Accountability.** The hash-chained audit log records every session start, mode change and stop, every consent result and every file operation, with path, byte count and SHA-256 for transfers. Frames and file contents are never logged or stored.
+
 ## Privacy controls (PDPA / UU PDP)
 
 Kestrel is built to be deployable under Singapore's PDPA and Indonesia's UU PDP. These laws allow monitoring of company devices, but they require notice, purpose limitation and minimisation, and UU PDP requires a DPIA for systematic monitoring. The controls are per policy:
@@ -191,4 +228,4 @@ Kestrel is built to be deployable under Singapore's PDPA and Indonesia's UU PDP.
 | Retention (Settings) | Events default to 30 days (ClickHouse TTL, or 7 days on the Postgres fallback), alerts to 365 days and the audit log to 730 days. |
 | Branding → employee notice | Markdown notice shown in the tray app's Help & privacy tab: what is collected, why, retention, and a contact. |
 
-Detection always runs locally on full-fidelity events. The filters apply only to what **leaves** the device. Analyst access to employee telemetry (hunt queries) is recorded in the audit log, and all data stays on the organisation's own server.
+Detection always runs locally on full-fidelity events. The filters apply only to what **leaves** the device. Admin remote access (above) is the one deliberate exception to "no screen or keystroke capture": interactive, admin-initiated, limited by the device's install profile, visible to the employee and audited, and nothing it carries is stored. Analyst access to employee telemetry (hunt queries) is recorded in the audit log, and all data stays on the organisation's own server.

@@ -11,7 +11,8 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "test": "vitest run",
-    "screenshots": "node scripts/screenshots.mjs"
+    "screenshots": "node scripts/screenshots.mjs",
+    "screenshots:remote": "node scripts/screenshots-remote.mjs"
   },
   "dependencies": {
     "@fontsource-variable/ibm-plex-sans": "^5.3.0",

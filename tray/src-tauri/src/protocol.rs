@@ -23,7 +23,24 @@ pub enum TrayRequest {
         justification: String,
     },
     Subscribe,
+    /// `Subscribe` plus opt-in push kinds (e.g. [`FEATURE_REMOTE_SESSION`]).
+    /// Older agents answer `Error`; the tray then falls back to `Subscribe`.
+    SubscribeWith {
+        #[serde(default)]
+        features: Vec<String>,
+    },
+    /// The employee's answer to a `ConsentRequest` push (mirrored for the
+    /// contract; this tray doesn't opt into consent prompts yet).
+    ConsentResponse {
+        request_id: Uuid,
+        allow: bool,
+    },
 }
+
+/// `SubscribeWith.features` value enabling `TrayResponse::RemoteSession` pushes.
+pub const FEATURE_REMOTE_SESSION: &str = "remote_session";
+/// `SubscribeWith.features` value enabling `TrayResponse::ConsentRequest` pushes.
+pub const FEATURE_REMOTE_CONSENT: &str = "remote_consent";
 
 fn default_limit() -> u32 {
     50
@@ -33,10 +50,62 @@ fn default_limit() -> u32 {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TrayResponse {
     Status(TrayStatus),
-    Activity { items: Vec<ActivityItem> },
-    Ack { ok: bool, message: String },
+    Activity {
+        items: Vec<ActivityItem>,
+    },
+    Ack {
+        ok: bool,
+        message: String,
+    },
     Notification(ActivityItem),
-    Error { message: String },
+    Error {
+        message: String,
+    },
+    /// Remote-desktop session state changed (only pushed to connections that
+    /// subscribed with [`FEATURE_REMOTE_SESSION`]). `active: false` = ended.
+    RemoteSession(RemoteSessionNotice),
+    /// IT asks to connect; only pushed to `remote_consent` subscribers.
+    ConsentRequest(ConsentRequest),
+}
+
+/// What the admin wants to do (consent prompt / session notice).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteKind {
+    #[default]
+    Desktop,
+    Files,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ConsentRequest {
+    pub request_id: Uuid,
+    pub kind: RemoteKind,
+    pub admin_name: String,
+    #[serde(default)]
+    pub view_only: bool,
+    #[serde(default)]
+    pub reason: String,
+    pub timeout_secs: u32,
+    pub expires_at: TimestampMs,
+}
+
+/// An admin's remote-desktop session on this PC, as shown to the employee.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RemoteSessionNotice {
+    pub active: bool,
+    /// Desktop session or file-manager session.
+    #[serde(default)]
+    pub kind: RemoteKind,
+    /// Display name of the admin ("Jane Doe").
+    pub admin_name: String,
+    /// `true` = the admin can only see the screen.
+    pub view_only: bool,
+    #[serde(default)]
+    pub reason: String,
+    pub started_at: TimestampMs,
+    #[serde(default)]
+    pub ended_at: Option<TimestampMs>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -85,6 +154,9 @@ pub struct TrayStatus {
     pub hostname: String,
     #[serde(default)]
     pub last_check: Option<TimestampMs>,
+    /// Remote-desktop session in progress, if any (absent from older agents).
+    #[serde(default)]
+    pub remote_session: Option<RemoteSessionNotice>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

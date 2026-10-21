@@ -417,6 +417,8 @@ pub fn hello(agent: &TestAgent, hostname: &str) -> Hello {
         policy_version: 0,
         rules_version: 0,
         outbox_epoch: None,
+        capabilities: vec![],
+        remote_ceiling: None,
     }
 }
 

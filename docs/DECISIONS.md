@@ -58,3 +58,38 @@ Append-only. Format: date — decision — why — alternatives considered.
 * **Version 1.1.0, tag `v1.1.0-rc1`.** An RC rather than final because the binaries are unsigned (Defender flags them) and the update signing key is not provisioned. Both are owner tasks.
 * **Network blocks need an analyst "lift" action.** The lab showed that ST-02/ST-07/ST-16 image blocks are permanent (`ttl_secs: None`), and nothing in the console could lift them; a false positive on a business app would need a reinstall. Added `UnblockNetwork` (by image, block id, or all non-isolation blocks); restoring a quarantined file also lifts that image's blocks. Automatic blocks stay permanent by default, because a confirmed stealer should stay cut off until an analyst decides.
 * **Lab VM hostname is `W-`.** The unattend `ComputerName` was not applied; the agent reports Windows' real name correctly. Cosmetic, lab only.
+
+### 2026-10-21 — remote desktop and remote file manager (owner request)
+
+* **The owner asked for VNC-style remote control and a full remote file manager in the admin console.** This reverses the "no screenshot/keystroke capture" privacy rule for **interactive, admin-initiated sessions only**; CLAUDE.md is updated accordingly.
+* **Owner's choices:**
+  * Screen sessions start **without employee consent**; the employee always sees a notification and an on-screen banner for the whole session.
+  * The file manager has **full SYSTEM access** (browse, download, upload, rename, delete, mkdir) with no extra confirmation step.
+  * Both are on by default in policy, and each has a policy switch.
+* **Kept regardless:**
+  * only the admin role can use them;
+  * every session and file operation is in the hash-chained audit log;
+  * frames and file contents never enter telemetry or ClickHouse;
+  * the agent refuses when the policy switch is off.
+* **Risk accepted by the owner:** a compromised admin account or server can now view and control every enrolled PC and read or modify any file on it. Recommend MFA for all admins and a restricted network path to the console.
+
+* **Remote access is chosen per installer and locked on the device (owner request, refined).**
+  * The admin web generates an installer per remote-access profile:
+    * **None**;
+    * **Unrestricted** (remote control + full file manager);
+    * **Guarded** (remote control + file manager, with customisable guardrails: consent, reason, MFA re-auth, upload/delete, session and idle limits, allowed hours, blocked paths).
+  * The profile is bound to the enrollment token and pinned on the agent at enrollment as a **ceiling** that later server messages cannot raise. The effective setting is the intersection of that ceiling and the policy, and the agent enforces it.
+  * So "no remote access" devices stay closed even if the server or an admin account is compromised. Changing a device's profile requires reinstalling with the uninstall token.
+  * Existing policies and previously enrolled agents default to **None**.
+  * The banner and notification on the employee's screen are mandatory in every profile, including Unrestricted: covert screen viewing creates legal exposure under PDPA and UU PDP.
+  * Building one MSI per profile is impractical, because WiX doesn't run on the Linux server. The server instead generates a setup script that embeds the server address, the agent CA, the MSI hash and the profile-bound token.
+### 2026-10-21 â€” remote access: implementation choices
+
+* **One generic live channel on the existing stream.** `AgentPayload::Live` / `ServerPayload::Live { session_id, msg }` carry both features (JSON over the mTLS gRPC bidi stream, binary as base64). Agent-side they use envelope seq 0, bypass the SQLite outbox and are never acked; the server never tracks them in its ack map and never stores them. *Why:* no new port, listener or certificate path; the stream is already authenticated per device. *Alt:* a second gRPC method with `bytes` fields: ~30 % less bandwidth for frames, but a proto change for every agent and server and a second stream to authenticate and tear down. Base64 + zstd is acceptable for 5â€“10 fps JPEG.
+* **Compatibility by capability, not by version.** `Hello.capabilities` (`live.files`, `live.desktop`) tells the server what the agent supports; the server returns 409 "agent too old" otherwise. The live message enums carry `#[serde(other)] Unknown` so either side can add message kinds later. An old agent that somehow receives a `Live` payload logs it as undecodable (not acked); an old server drops an agent `Live` as malformed (seq 0, not acked).
+* **Interactive console session required, API tokens refused.** `remote.desktop` / `remote.files` are only reachable through the admin role's `*`, and additionally require a cookie session (CSRF-protected). *Why:* a leaked automation token must not be able to read or change files on every PC. The WebSocket cannot carry a custom header, so it takes the CSRF token as a query parameter and checks `Origin` against `Host`.
+* **Server-side policy check as well as the agent's.** The server refuses with 403 `disabled_by_policy` before contacting the agent (clear UI message, no round trip); the agent still enforces its own copy of the policy (an agent with a newer/older policy is authoritative for itself).
+* **Network paths refused.** The file manager accepts only `X:\â€¦` paths and refuses network drives, consistent with V-M1 (the agent never opens network paths as SYSTEM).
+* **Protected folders:** the agent install folder and `%ProgramData%\Kestrel` are refused for every operation, and their ancestors for rename / delete / overwrite, after canonicalisation (8.3 names, junctions, symlinks). Uploads never open an existing file for writing (temp file + rename), so a hard link cannot be used to overwrite a protected file. *Residual:* reading a file through a hard link that an admin created by other means into a protected folder is not detected.
+* **Tray compatibility.** A new `TrayRequest::SubscribeWith { features }` opts a tray into `TrayResponse::RemoteSession` pushes; older trays keep using `Subscribe` and never receive the new response type (their parser would reject it). The employee notification itself is an ordinary `Notification` (severity High) that every tray version shows as a Windows toast, plus the helper's on-screen banner, which does not depend on the tray at all.
+* **JPEG encoder: `jpeg-encoder` 0.7.1** (MIT OR Apache-2.0, plus the permissive Independent JPEG Group licence for the DCT code). `IJG` was added to the `deny.toml` allow list; the IJG notice is in the README's third-party notices. *Alt:* the `image` crate (larger dependency tree for one encoder).

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { encodeRequest, parseResponseLine, ProtocolError, upsertActivity, type ActivityItem } from "./protocol";
+import { activeRemoteSession, encodeRequest, FEATURE_REMOTE_CONSENT, FEATURE_REMOTE_SESSION, parseResponseLine, ProtocolError, upsertActivity, type ActivityItem } from "./protocol";
 
 const item = {
   id: "6b657374-7265-6c00-0000-000000000001",
@@ -95,5 +95,66 @@ describe("upsertActivity", () => {
     expect(list.map((i) => i.id)).toEqual(["b", "a"]);
     expect(list[1]!.review).toBe("requested");
     expect(upsertActivity(list, { ...a, id: "c", ts: 3 })[0]!.id).toBe("c");
+  });
+});
+
+describe("remote session", () => {
+  const notice = {
+    active: true,
+    kind: "desktop",
+    admin_name: "Jane Doe",
+    view_only: false,
+    reason: "VPN ticket",
+    started_at: 1_760_000_000_000,
+    ended_at: null,
+  };
+
+  it("parses the remote_session push", () => {
+    const r = parseResponseLine(JSON.stringify({ type: "remote_session", ...notice }));
+    expect(r).toEqual({ type: "remote_session", ...notice });
+    const ended = parseResponseLine(JSON.stringify({ type: "remote_session", ...notice, active: false, ended_at: 1_760_000_600_000 }));
+    expect(ended.type === "remote_session" && activeRemoteSession(ended)).toBeNull();
+  });
+
+  it("applies serde defaults (kind, reason, ended_at)", () => {
+    const { reason: _r, ended_at: _e, kind: _k, ...minimal } = notice;
+    const r = parseResponseLine(JSON.stringify({ type: "remote_session", ...minimal }));
+    if (r.type !== "remote_session") throw new Error("type");
+    expect(r.kind).toBe("desktop");
+    expect(r.reason).toBe("");
+    expect(r.ended_at).toBeNull();
+  });
+
+  it("rejects malformed notices", () => {
+    expect(() => parseResponseLine(JSON.stringify({ type: "remote_session", ...notice, active: "yes" }))).toThrow(/active/);
+    expect(() => parseResponseLine(JSON.stringify({ type: "remote_session", ...notice, kind: "shell" }))).toThrow(/kind/);
+    expect(() => parseResponseLine(JSON.stringify({ type: "remote_session", ...notice, admin_name: 7 }))).toThrow(/admin_name/);
+    expect(() => parseResponseLine(JSON.stringify({ type: "remote_session", ...notice, started_at: null }))).toThrow(/started_at/);
+    expect(() => parseResponseLine(JSON.stringify({ type: "status", ...status, remote_session: "on" }))).toThrow(/remote session/);
+  });
+
+  it("status carries remote_session; missing or null means none (older agents)", () => {
+    const withSession = parseResponseLine(JSON.stringify({ type: "status", ...status, remote_session: notice }));
+    expect(withSession.type === "status" && withSession.remote_session).toEqual(notice);
+    const old = parseResponseLine(JSON.stringify({ type: "status", ...status }));
+    expect(old.type === "status" && old.remote_session).toBeNull();
+    const nul = parseResponseLine(JSON.stringify({ type: "status", ...status, remote_session: null }));
+    expect(nul.type === "status" && nul.remote_session).toBeNull();
+  });
+
+  it("parses files sessions and consent requests", () => {
+    const f = parseResponseLine(JSON.stringify({ type: "remote_session", ...notice, kind: "files" }));
+    expect(f.type === "remote_session" && f.kind).toBe("files");
+    const c = parseResponseLine(
+      JSON.stringify({ type: "consent_request", request_id: "r1", kind: "desktop", admin_name: "Jane", timeout_secs: 60, expires_at: 5 }),
+    );
+    expect(c).toEqual({ type: "consent_request", request_id: "r1", kind: "desktop", admin_name: "Jane", view_only: false, reason: "", timeout_secs: 60, expires_at: 5 });
+    expect(() => parseResponseLine(JSON.stringify({ type: "consent_request", request_id: "r1", kind: "shell", admin_name: "J", timeout_secs: 1, expires_at: 5 }))).toThrow(/kind/);
+    expect(() => parseResponseLine(JSON.stringify({ type: "consent_request", request_id: "r1", kind: "files", admin_name: "J", expires_at: 5 }))).toThrow(/timeout_secs/);
+    expect(encodeRequest({ op: "consent_response", request_id: "r1", allow: true })).toBe('{"op":"consent_response","request_id":"r1","allow":true}\n');
+  });
+
+  it("encodes subscribe_with like the Rust contract", () => {
+    expect(encodeRequest({ op: "subscribe_with", features: [FEATURE_REMOTE_SESSION, FEATURE_REMOTE_CONSENT] })).toBe('{"op":"subscribe_with","features":["remote_session","remote_consent"]}\n');
   });
 });

@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import type { TrayStatus } from "../protocol";
+import type { RemoteSessionNotice, TrayStatus } from "../protocol";
 import type { Ack } from "../api/types";
-import { stateCopy } from "../copy";
+import { remoteSessionCopy, stateCopy } from "../copy";
 import { ago, fullDate } from "../format";
-import { IconCheck, IconChevron, IconClock, IconCross, IconPc, IconPolicy, IconScan, IconSync, StateShield, type ShieldKind } from "./Icons";
+import { IconCheck, IconChevron, IconClock, IconCross, IconPc, IconPolicy, IconScan, RemoteIcon, IconSync, StateShield, type ShieldKind } from "./Icons";
 
 export type CheckState = { phase: "idle" } | { phase: "running"; started: number } | { phase: "done"; ack: Ack } | { phase: "failed"; message: string };
 
 interface Props {
   kind: ShieldKind;
   status: TrayStatus | null;
+  /** Active IT remote session, if any. */
+  remote?: RemoteSessionNotice | null;
   recentBlocks: number;
   check: CheckState;
   onQuickCheck: () => void;
@@ -17,8 +19,9 @@ interface Props {
   onGo: (tab: "activity" | "help") => void;
 }
 
-export function StatusTab({ kind, status, recentBlocks, check, onQuickCheck, onDismissCheck, onGo }: Props) {
+export function StatusTab({ kind, status, remote, recentBlocks, check, onQuickCheck, onDismissCheck, onGo }: Props) {
   const copy = stateCopy(kind, status, recentBlocks);
+  const remoteCopy = remote ? remoteSessionCopy(remote, status?.it_contact) : null;
   const unavailable = kind === "unavailable";
   return (
     <div className="status">
@@ -49,6 +52,15 @@ export function StatusTab({ kind, status, recentBlocks, check, onQuickCheck, onD
         <section className="group" aria-label="This PC">
           <p className="group__intro">Your company's IT team protects this PC with Kestrel.</p>
           <dl className="rows">
+            {remote && remoteCopy && (
+              <Row
+                icon={<RemoteIcon session={remote} />}
+                label="IT remote access"
+                value={remoteCopy.row}
+                sub={`${remoteCopy.mode}. ${remoteCopy.since}`}
+                tone="strong"
+              />
+            )}
             <Row icon={<IconPc />} label="PC name" value={status.hostname} mono />
             <Row
               icon={<IconSync />}
@@ -86,7 +98,7 @@ export function StatusTab({ kind, status, recentBlocks, check, onQuickCheck, onD
   );
 }
 
-function Row(p: { icon: React.ReactNode; label: string; value: string; sub?: string; mono?: boolean; title?: string | undefined; tone?: "muted" | undefined }) {
+function Row(p: { icon: React.ReactNode; label: string; value: string; sub?: string; mono?: boolean; title?: string | undefined; tone?: "muted" | "strong" | undefined }) {
   return (
     <div className="row">
       <span className="row__icon">{p.icon}</span>

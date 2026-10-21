@@ -7,7 +7,13 @@
 //   ?empty=1                       no activity
 //   ?push=<seconds>                push a demo notification after N seconds
 //   ?notice=0                      org has no privacy notice
-import type { ActivityItem, ProtectionState, TrayStatus } from "../protocol";
+//   ?remote=view|control|files|cycle  IT remote session: active (view-only /
+//                                  control / file access) from the start, or
+//                                  starting after 3 s, ending after 30 s, repeating
+//   ?consent=desktop|view|files|queue  IT asks for consent after ?consent_in=<s>
+//                                  (default 1); queue = two requests at once;
+//                                  ?consent_timeout=<s> (default 60)
+import type { ActivityItem, ConsentRequest, ProtectionState, RemoteKind, RemoteSessionNotice, TrayStatus } from "../protocol";
 import type { Ack, KestrelApi, Tab, Unlisten, WindowMode } from "./types";
 
 const MIN = 60_000;
@@ -52,6 +58,26 @@ function sampleStatus(): TrayStatus {
     privacy_notice_md: params.get("notice") === "0" ? "" : SAMPLE_NOTICE,
     hostname: "LT-JKT-0142",
     last_check: now - 2 * 24 * 60 * MIN,
+    remote_session:
+      remoteParam === "view" || remoteParam === "control"
+        ? sampleRemoteSession(remoteParam === "view")
+        : remoteParam === "files"
+          ? { ...sampleRemoteSession(false), kind: "files" }
+          : null,
+  };
+}
+
+const remoteParam = params.get("remote");
+
+export function sampleRemoteSession(viewOnly: boolean, startedAt = Date.now() - 3 * MIN): RemoteSessionNotice {
+  return {
+    active: true,
+    kind: "desktop",
+    admin_name: "Rina Wijaya",
+    view_only: viewOnly,
+    reason: "Checking the VPN problem you reported (ticket #4821)",
+    started_at: startedAt,
+    ended_at: null,
   };
 }
 
@@ -137,6 +163,38 @@ let items = params.get("empty") === "1" ? [] : sampleActivity();
 let mode: WindowMode = "flyout";
 const notifications = emitter<ActivityItem>();
 const statuses = emitter<TrayStatus>();
+const remoteSessions = emitter<RemoteSessionNotice>();
+const consentRequests = emitter<ConsentRequest>();
+let pendingConsents: ConsentRequest[] = [];
+let consentSeq = 0;
+
+function requestConsent(kind: RemoteKind, viewOnly: boolean, timeoutSecs: number, admin = "Rina Wijaya") {
+  const req: ConsentRequest = {
+    request_id: `c0115e47-0000-4000-8000-${String(++consentSeq).padStart(12, "0")}`,
+    kind,
+    admin_name: admin,
+    view_only: viewOnly && kind === "desktop",
+    reason: "Checking the VPN problem you reported (ticket #4821)",
+    timeout_secs: timeoutSecs,
+    expires_at: Date.now() + timeoutSecs * 1000,
+  };
+  pendingConsents.push(req);
+  consentRequests.emit(req);
+}
+
+const consentParam = params.get("consent");
+if (consentParam) {
+  const timeout = Number(params.get("consent_timeout") ?? "60") || 60;
+  setTimeout(
+    () => {
+      if (consentParam === "queue") {
+        requestConsent("desktop", false, timeout);
+        requestConsent("files", false, timeout + 30, "Budi Santoso");
+      } else requestConsent(consentParam === "files" ? "files" : "desktop", consentParam === "view", timeout);
+    },
+    Number(params.get("consent_in") ?? "1") * 1000,
+  );
+}
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const down = () => Promise.reject({ kind: "unavailable", message: "Kestrel service is not running" });
 
@@ -157,6 +215,46 @@ if (pushAfter > 0) {
     items = [item, ...items];
     notifications.emit(item);
   }, pushAfter * 1000);
+}
+
+// Like the agent: each start/end pushes a remote_session state change plus a
+// regular high-severity notification (which is what raises the toast).
+function remoteNotice(n: RemoteSessionNotice) {
+  const item: ActivityItem = {
+    id: id(800 + (Date.now() % 100)),
+    ts: Date.now(),
+    title: n.active
+      ? n.kind === "files"
+        ? `${n.admin_name} from IT is accessing files on this PC`
+        : n.view_only
+        ? `${n.admin_name} from IT started viewing your screen`
+        : `${n.admin_name} from IT connected and can control your screen`
+      : `${n.admin_name} from IT disconnected from your PC`,
+    body: n.active ? `Reason: ${n.reason}. Contact IT if you weren't expecting this.` : "IT can no longer see your screen.",
+    severity: "high",
+    alert_id: null,
+    file: null,
+    action_taken: n.active ? "Remote session started" : "Remote session ended",
+    review: null,
+  };
+  status.remote_session = n.active ? n : null;
+  items = [item, ...items];
+  remoteSessions.emit(n);
+  notifications.emit(item);
+}
+
+if (remoteParam === "cycle") {
+  let viewOnly = false;
+  const cycle = () => {
+    const n = sampleRemoteSession(viewOnly, Date.now());
+    remoteNotice(n);
+    setTimeout(() => {
+      remoteNotice({ ...n, active: false, ended_at: Date.now() });
+      viewOnly = !viewOnly;
+      setTimeout(cycle, 15_000);
+    }, 30_000);
+  };
+  setTimeout(cycle, 3_000);
 }
 
 export const mockApi: KestrelApi = {
@@ -196,6 +294,22 @@ export const mockApi: KestrelApi = {
   hideWindow: async () => {},
   onNotification: notifications.on,
   onStatus: statuses.on,
+  onRemoteSession: remoteSessions.on,
+  onConsentRequest: consentRequests.on,
+  async getPendingConsents() {
+    pendingConsents = pendingConsents.filter((r) => r.expires_at > Date.now());
+    return pendingConsents.slice();
+  },
+  async respondConsent(requestId, allow): Promise<Ack> {
+    await delay(400);
+    const req = pendingConsents.find((r) => r.request_id === requestId && r.expires_at > Date.now());
+    pendingConsents = pendingConsents.filter((r) => r.request_id !== requestId);
+    if (!req) return Promise.reject({ kind: "agent", message: "no pending request with that id (it may have expired)" });
+    if (!allow) return { ok: true, message: "IT has been told you said no. They can't connect." };
+    remoteNotice({ active: true, kind: req.kind, admin_name: req.admin_name, view_only: req.view_only, reason: req.reason, started_at: Date.now(), ended_at: null });
+    statuses.emit({ ...status });
+    return { ok: true, message: "IT can now connect. You'll see a banner while they're connected." };
+  },
   onConnection: () => Promise.resolve(() => {}),
   onNavigate: () => Promise.resolve(() => {}),
   onQuickCheck: () => Promise.resolve(() => {}),

@@ -1,4 +1,4 @@
-import type { ApiErrorBody } from './types'
+import type { ApiErrorBody, RemoteErrorCode } from './types'
 
 export const API_BASE = '/api'
 export const IS_MOCK = import.meta.env.VITE_MOCK === '1'
@@ -7,15 +7,49 @@ let csrfToken: string | null = null
 export function setCsrfToken(t: string | null) {
   csrfToken = t
 }
+export function getCsrfToken(): string | null {
+  return csrfToken
+}
 
 export class ApiError extends Error {
   status: number
   code: string
-  constructor(status: number, code: string, message: string) {
+  /** Remote-access failures carry the machine-readable `remote_code`. */
+  remoteCode?: RemoteErrorCode
+  extra?: Record<string, unknown>
+  constructor(status: number, code: string, message: string, remoteCode?: RemoteErrorCode, extra?: Record<string, unknown>) {
     super(message)
     this.status = status
     this.code = code
+    this.remoteCode = remoteCode
+    this.extra = extra
   }
+}
+
+/**
+ * Extra error details. The server flattens them into the `error` object
+ * (`{"error":{"code","message","reason":"reauth_required"}}`); an `extra`
+ * object is accepted too.
+ */
+export function extraOf(err: ApiErrorBody['error'] | undefined): Record<string, unknown> | undefined {
+  if (!err) return undefined
+  const { code: _c, message: _m, remote_code: _r, extra, ...rest } = err as ApiErrorBody['error'] & Record<string, unknown>
+  const merged = { ...(extra && typeof extra === 'object' ? (extra as Record<string, unknown>) : {}), ...rest }
+  return Object.keys(merged).length ? merged : undefined
+}
+
+/** 401s from these paths are answers, not an expired session (no global logout). */
+const NOT_A_LOGOUT = (path: string) => path.startsWith('/auth/') || path === '/me' || path === '/me/reauth'
+
+/** Build an ApiError from a failed response's (possibly empty / non-JSON) body text. */
+export function apiErrorFrom(status: number, text: string): ApiError {
+  let err: ApiErrorBody['error'] | undefined
+  try {
+    err = text ? (JSON.parse(text) as ApiErrorBody | undefined)?.error : undefined
+  } catch {
+    err = undefined
+  }
+  return new ApiError(status, err?.code ?? 'internal', err?.message ?? `Request failed (${status})`, err?.remote_code, extraOf(err))
 }
 
 type Query = Record<string, string | number | boolean | null | undefined | string[]>
@@ -65,8 +99,8 @@ export async function request<T>(method: string, path: string, body?: unknown, q
   }
   if (!res.ok) {
     const err = (data as ApiErrorBody | undefined)?.error
-    if (res.status === 401 && !path.startsWith('/auth/') && path !== '/me') unauthorizedListeners.forEach((f) => f())
-    throw new ApiError(res.status, err?.code ?? 'internal', err?.message ?? `Request failed (${res.status})`)
+    if (res.status === 401 && !NOT_A_LOGOUT(path)) unauthorizedListeners.forEach((f) => f())
+    throw new ApiError(res.status, err?.code ?? 'internal', err?.message ?? `Request failed (${res.status})`, err?.remote_code, extraOf(err))
   }
   return data as T
 }

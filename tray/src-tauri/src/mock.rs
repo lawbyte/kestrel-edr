@@ -5,6 +5,17 @@
 //! `KESTREL_TRAY_MOCK_STATE=protected|attention|isolated|degraded|offline`
 //! picks the initial state (default `attention`). After the first `Subscribe`
 //! the mock pushes one demo notification after ~15 s.
+//!
+//! `KESTREL_TRAY_MOCK_REMOTE` simulates an admin remote-desktop session:
+//! `view` / `control` / `files` = a session is already active at launch
+//! (view-only desktop, full-control desktop, or file access); `cycle` = after the first subscription a session starts
+//! ~5 s later, ends ~40 s after that, and repeats every ~90 s. Like the real
+//! agent, `RemoteSession` pushes only go to `subscribe_with` connections that
+//! asked for `remote_session`, and each start/end also pushes a `Notification`.
+//!
+//! `KESTREL_TRAY_MOCK_CONSENT=desktop|view|files` pushes an IT consent request
+//! ~5 s after the first subscription (60 s timeout; only to `remote_consent`
+//! subscribers). Allowing it starts a matching remote session.
 
 use crate::protocol::*;
 use std::sync::Mutex;
@@ -22,6 +33,19 @@ struct Inner {
     status: TrayStatus,
     items: Vec<ActivityItem>,
     demo_pushed: bool,
+    /// Behave like an agent that predates `subscribe_with` (answers `Error`).
+    legacy: bool,
+    remote_mode: RemoteMode,
+    remote_cycle_started: bool,
+    consents: Vec<ConsentRequest>,
+    consent_demo: Option<(RemoteKind, bool)>,
+    consent_demo_started: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RemoteMode {
+    Off,
+    Cycle,
 }
 
 const MIN: i64 = 60_000;
@@ -54,6 +78,20 @@ pub fn sample_status(state: ProtectionState) -> TrayStatus {
         privacy_notice_md: SAMPLE_NOTICE.into(),
         hostname: "LT-JKT-0142".into(),
         last_check: Some(now - 2 * 24 * 60 * MIN),
+        remote_session: None,
+    }
+}
+
+/// A sample admin session for the mock and tests.
+pub fn sample_remote_session(view_only: bool) -> RemoteSessionNotice {
+    RemoteSessionNotice {
+        active: true,
+        kind: RemoteKind::Desktop,
+        admin_name: "Rina Wijaya".into(),
+        view_only,
+        reason: "Checking the VPN problem you reported (ticket #4821)".into(),
+        started_at: now_ms() - 3 * MIN,
+        ended_at: None,
     }
 }
 
@@ -149,14 +187,197 @@ impl MockAgent {
             Ok("offline") => ProtectionState::Offline,
             _ => ProtectionState::Attention,
         };
+        let mut status = sample_status(state);
+        let remote_mode = match std::env::var("KESTREL_TRAY_MOCK_REMOTE").as_deref() {
+            Ok("view") => {
+                status.remote_session = Some(sample_remote_session(true));
+                RemoteMode::Off
+            }
+            Ok("control") => {
+                status.remote_session = Some(sample_remote_session(false));
+                RemoteMode::Off
+            }
+            Ok("files") => {
+                let mut n = sample_remote_session(false);
+                n.kind = RemoteKind::Files;
+                status.remote_session = Some(n);
+                RemoteMode::Off
+            }
+            Ok("cycle") => RemoteMode::Cycle,
+            _ => RemoteMode::Off,
+        };
+        let consent_demo = match std::env::var("KESTREL_TRAY_MOCK_CONSENT").as_deref() {
+            Ok("desktop") => Some((RemoteKind::Desktop, false)),
+            Ok("view") => Some((RemoteKind::Desktop, true)),
+            Ok("files") => Some((RemoteKind::Files, false)),
+            _ => None,
+        };
         let (push, _) = broadcast::channel(32);
         MockAgent {
             inner: Mutex::new(Inner {
-                status: sample_status(state),
+                status,
                 items: sample_activity(),
                 demo_pushed: false,
+                legacy: false,
+                remote_mode,
+                remote_cycle_started: false,
+                consents: Vec::new(),
+                consent_demo,
+                consent_demo_started: false,
             }),
             push,
+        }
+    }
+
+    /// A mock that behaves like an agent from before `subscribe_with` existed.
+    pub fn legacy() -> Self {
+        let m = Self::new();
+        m.inner.lock().unwrap().legacy = true;
+        m
+    }
+
+    /// Simulate IT asking the employee for consent (pushed to `remote_consent`
+    /// subscribers only). Returns the request so tests can answer it.
+    pub fn request_consent(
+        &self,
+        kind: RemoteKind,
+        view_only: bool,
+        timeout_secs: u32,
+    ) -> ConsentRequest {
+        let req = ConsentRequest {
+            request_id: Uuid::new_v4(),
+            kind,
+            admin_name: "Rina Wijaya".into(),
+            view_only: view_only && kind == RemoteKind::Desktop,
+            reason: "Checking the VPN problem you reported (ticket #4821)".into(),
+            timeout_secs,
+            expires_at: now_ms() + i64::from(timeout_secs) * 1000,
+        };
+        self.inner.lock().unwrap().consents.push(req.clone());
+        let _ = self.push.send(TrayResponse::ConsentRequest(req.clone()));
+        req
+    }
+
+    fn answer_consent(&self, request_id: Uuid, allow: bool) -> TrayResponse {
+        let req = {
+            let mut g = self.inner.lock().unwrap();
+            let now = now_ms();
+            g.consents.retain(|r| r.expires_at > now);
+            let i = g.consents.iter().position(|r| r.request_id == request_id);
+            i.map(|i| g.consents.remove(i))
+        };
+        let Some(req) = req else {
+            return TrayResponse::Error {
+                message: "no pending request with that id (it may have expired)".into(),
+            };
+        };
+        if !allow {
+            return TrayResponse::Ack {
+                ok: true,
+                message: "IT has been told you said no. They can't connect.".into(),
+            };
+        }
+        self.start_remote_session(RemoteSessionNotice {
+            active: true,
+            kind: req.kind,
+            admin_name: req.admin_name,
+            view_only: req.view_only,
+            reason: req.reason,
+            started_at: now_ms(),
+            ended_at: None,
+        });
+        TrayResponse::Ack {
+            ok: true,
+            message: "IT can now connect. You'll see a banner while they're connected.".into(),
+        }
+    }
+
+    fn schedule_consent_demo(self: &std::sync::Arc<Self>) {
+        let demo = {
+            let mut g = self.inner.lock().unwrap();
+            if g.consent_demo_started {
+                return;
+            }
+            g.consent_demo_started = true;
+            g.consent_demo
+        };
+        let Some((kind, view_only)) = demo else {
+            return;
+        };
+        let me = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            me.request_consent(kind, view_only, 60);
+        });
+    }
+
+    /// Simulate an admin opening a remote session (pushes like the real agent).
+    pub fn start_remote_session(&self, notice: RemoteSessionNotice) {
+        let item = ActivityItem {
+            id: Uuid::new_v4(),
+            ts: now_ms(),
+            title: if notice.kind == RemoteKind::Files {
+                format!(
+                    "{} from IT is accessing files on this PC",
+                    notice.admin_name
+                )
+            } else if notice.view_only {
+                format!("{} from IT started viewing your screen", notice.admin_name)
+            } else {
+                format!(
+                    "{} from IT connected and can control your screen",
+                    notice.admin_name
+                )
+            },
+            body: if notice.reason.is_empty() {
+                "Contact IT if you weren't expecting this.".into()
+            } else {
+                format!(
+                    "Reason: {}. Contact IT if you weren't expecting this.",
+                    notice.reason
+                )
+            },
+            severity: Severity::High,
+            alert_id: None,
+            file: None,
+            action_taken: "Remote session started".into(),
+            review: None,
+        };
+        {
+            let mut g = self.inner.lock().unwrap();
+            g.status.remote_session = Some(notice.clone());
+            g.items.insert(0, item.clone());
+        }
+        let _ = self.push.send(TrayResponse::RemoteSession(notice));
+        let _ = self.push.send(TrayResponse::Notification(item));
+    }
+
+    /// Simulate the admin's session ending.
+    pub fn end_remote_session(&self) {
+        let ended = {
+            let mut g = self.inner.lock().unwrap();
+            let taken = g.status.remote_session.take();
+            taken.map(|mut n| {
+                n.active = false;
+                n.ended_at = Some(now_ms());
+                let item = ActivityItem {
+                    id: Uuid::new_v4(),
+                    ts: now_ms(),
+                    title: format!("{} from IT disconnected from your PC", n.admin_name),
+                    body: "IT can no longer see your screen.".into(),
+                    severity: Severity::High,
+                    alert_id: None,
+                    file: None,
+                    action_taken: "Remote session ended".into(),
+                    review: None,
+                };
+                g.items.insert(0, item.clone());
+                (n, item)
+            })
+        };
+        if let Some((n, item)) = ended {
+            let _ = self.push.send(TrayResponse::RemoteSession(n));
+            let _ = self.push.send(TrayResponse::Notification(item));
         }
     }
 
@@ -175,7 +396,21 @@ impl MockAgent {
         let mut lines = BufReader::new(r).lines();
         while let Some(line) = lines.next_line().await? {
             let resp = match serde_json::from_str::<TrayRequest>(&line) {
-                Ok(TrayRequest::Subscribe) => {
+                Ok(TrayRequest::SubscribeWith { .. }) if self.inner.lock().unwrap().legacy => {
+                    // Exactly what an older agent says about an op it doesn't know.
+                    TrayResponse::Error {
+                        message: "bad request: unknown variant `subscribe_with`".into(),
+                    }
+                }
+                Ok(req @ (TrayRequest::Subscribe | TrayRequest::SubscribeWith { .. })) => {
+                    let wants = |feature: &str| {
+                        matches!(&req, TrayRequest::SubscribeWith { features }
+                            if features.iter().any(|f| f == feature))
+                    };
+                    let (remote, consent) =
+                        (wants(FEATURE_REMOTE_SESSION), wants(FEATURE_REMOTE_CONSENT));
+                    // Subscribe before acking so no push between the two is lost.
+                    let mut rx = self.push.subscribe();
                     write(
                         &mut w,
                         &TrayResponse::Ack {
@@ -185,10 +420,13 @@ impl MockAgent {
                     )
                     .await?;
                     self.schedule_demo_push();
-                    let mut rx = self.push.subscribe();
+                    self.schedule_remote_cycle();
+                    self.schedule_consent_demo();
                     // From here on this connection only carries pushes.
                     loop {
                         match rx.recv().await {
+                            Ok(TrayResponse::RemoteSession(_)) if !remote => continue,
+                            Ok(TrayResponse::ConsentRequest(_)) if !consent => continue,
                             Ok(msg) => write(&mut w, &msg).await?,
                             Err(broadcast::error::RecvError::Lagged(_)) => continue,
                             Err(broadcast::error::RecvError::Closed) => return Ok(()),
@@ -203,6 +441,30 @@ impl MockAgent {
             write(&mut w, &resp).await?;
         }
         Ok(())
+    }
+
+    fn schedule_remote_cycle(self: &std::sync::Arc<Self>) {
+        {
+            let mut g = self.inner.lock().unwrap();
+            if g.remote_mode != RemoteMode::Cycle || g.remote_cycle_started {
+                return;
+            }
+            g.remote_cycle_started = true;
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            let mut view_only = false;
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let mut n = sample_remote_session(view_only);
+                n.started_at = now_ms();
+                me.start_remote_session(n);
+                tokio::time::sleep(Duration::from_secs(40)).await;
+                me.end_remote_session();
+                tokio::time::sleep(Duration::from_secs(45)).await;
+                view_only = !view_only;
+            }
+        });
     }
 
     fn schedule_demo_push(self: &std::sync::Arc<Self>) {
@@ -277,7 +539,12 @@ impl MockAgent {
                     },
                 }
             }
-            TrayRequest::Subscribe => unreachable!("handled in serve"),
+            TrayRequest::Subscribe | TrayRequest::SubscribeWith { .. } => TrayResponse::Error {
+                message: "subscribe is handled by the connection loop".into(),
+            },
+            TrayRequest::ConsentResponse { request_id, allow } => {
+                self.answer_consent(request_id, allow)
+            }
         }
     }
 }

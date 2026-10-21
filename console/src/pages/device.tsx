@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, CheckCircle2, ChevronLeft, CircleDashed, Copy, KeyRound, RefreshCw, RotateCw, XCircle } from 'lucide-react'
 import { toast } from 'sonner'
 import { useMemo, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { api, qk } from '@/api/endpoints'
 import type { DeviceDetail, EventKind, HardeningControl, ProcessInfo, TreeNode } from '@/api/types'
 import { ActionStatusBadge, DeviceStatusBadge, ModeBadge, ProvenanceBadges, SeverityBadge } from '@/components/badges'
@@ -19,6 +19,12 @@ import { EVENT_KIND_LABEL, EVENT_KINDS_UI, HARDENING_INFO, describeAction } from
 import { describeEvent } from '@/lib/events'
 import { formatBytes, formatDateTime, formatTime, formatUptime, timeAgo } from '@/lib/format'
 import { basename, cn } from '@/lib/utils'
+import { visibleRemoteTabs } from '@/lib/remote-tabs'
+import { normaliseProfile, profileSummary, profileUnrestricted } from '@/lib/remote-profile'
+import { RemoteDesktop } from '@/components/remote/remote-desktop'
+import { FileManager } from '@/components/remote/file-manager'
+import { ReauthProvider } from '@/components/remote/reauth'
+import { RemoteAccessSummaryCard, RemoteAccessSummaryLine } from '@/components/remote/summary'
 
 export default function DevicePage() {
   const { id = '' } = useParams()
@@ -35,6 +41,12 @@ function DeviceView({ d }: { d: DeviceDetail }) {
   const [action, setAction] = useState<ActionSpec | null>(null)
   const isolated = dev.status === 'isolated'
   const drift = d.hardening.filter((x) => x.desired && x.applied === false && !x.pending_reboot && !x.report_only).length
+  const { can } = useAuth()
+  const [search] = useSearchParams()
+  const ra = d.remote_access
+  const remoteTabs = visibleRemoteTabs(can, ra)
+  // Servers before remote-access profiles send no effective profile: they enforce nothing extra, so don't hide controls.
+  const effective = ra?.effective ? normaliseProfile(ra.effective) : profileUnrestricted()
 
   return (
     <div className="pb-16">
@@ -107,7 +119,10 @@ function DeviceView({ d }: { d: DeviceDetail }) {
           </Card>
         </div>
 
-        <Tabs defaultValue="timeline">
+        {ra?.ceiling ? <RemoteAccessSummaryCard info={ra} policyId={dev.policy_id} policyName={dev.policy_name} /> : null}
+
+        <ReauthProvider>
+        <Tabs defaultValue={search.get('tab') ?? 'timeline'}>
           <TabsList>
             <TabsTrigger value="timeline">Event timeline</TabsTrigger>
             <TabsTrigger value="alerts">Recent alerts</TabsTrigger>
@@ -116,6 +131,8 @@ function DeviceView({ d }: { d: DeviceDetail }) {
             <TabsTrigger value="hardening">Hardening {drift ? <span className="rounded bg-warn-soft px-1 text-[11px] text-warn">{drift}</span> : null}</TabsTrigger>
             <TabsTrigger value="inventory">Inventory</TabsTrigger>
             <TabsTrigger value="actions">Actions</TabsTrigger>
+            {remoteTabs.desktop ? <TabsTrigger value="remote-desktop">Remote desktop</TabsTrigger> : null}
+            {remoteTabs.files ? <TabsTrigger value="files">Files</TabsTrigger> : null}
           </TabsList>
           <TabsContent value="timeline" className="pt-4">
             <EventTimeline deviceId={dev.id} />
@@ -236,7 +253,20 @@ function DeviceView({ d }: { d: DeviceDetail }) {
           <TabsContent value="actions" className="pt-4">
             <DeviceActions deviceId={dev.id} onPick={setAction} />
           </TabsContent>
+          {remoteTabs.desktop && ra ? (
+            <TabsContent value="remote-desktop" className="space-y-3 pt-4">
+              {ra.ceiling ? <RemoteAccessSummaryLine info={ra} /> : null}
+              <RemoteDesktop deviceId={dev.id} hostname={dev.hostname} availability={ra.desktop} policyId={dev.policy_id} effective={effective} />
+            </TabsContent>
+          ) : null}
+          {remoteTabs.files && ra ? (
+            <TabsContent value="files" className="space-y-3 pt-4">
+              {ra.ceiling ? <RemoteAccessSummaryLine info={ra} /> : null}
+              <FileManager deviceId={dev.id} hostname={dev.hostname} availability={ra.files} policyId={dev.policy_id} effective={effective} />
+            </TabsContent>
+          ) : null}
         </Tabs>
+        </ReauthProvider>
       </div>
       <ConfirmActionDialog open={!!action} onOpenChange={(o) => !o && setAction(null)} spec={action} device={dev} />
     </div>
@@ -407,6 +437,7 @@ function EffectiveSettings({ d }: { d: DeviceDetail }) {
     ['Isolation auto-release', p.isolation_auto_release_hours ? `After ${p.isolation_auto_release_hours} h without server contact` : 'Never', src],
     ['Indicator block lifetime', formatTtl(p.ioc_block_ttl_secs), src],
     ['Indicator block scope', p.ioc_block_host_wide ? 'Every program' : 'Offending program only', src],
+    ['Remote access (policy)', profileSummary(normaliseProfile(p.remote_access)), `${src}, capped by the install profile`],
     ['Exclusions in effect', String(p.exclusions.length), `${src} + global exclusions`],
     ['Indicators in effect', String(p.iocs.length), 'Global indicator list'],
   ]

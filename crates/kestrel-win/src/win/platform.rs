@@ -17,7 +17,8 @@ use crate::wfp_plan;
 use kestrel_common::wire::OsInfo;
 use kestrel_common::*;
 use kestrel_platform::{
-    ActionOrigin, BlockSelector, CanarySpec, Platform, SensorConfig, SensorHandle, TrayHandler,
+    ActionOrigin, BlockSelector, CanarySpec, Platform, RemoteDesktop, RemoteFs, SensorConfig,
+    SensorHandle, TrayHandler,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::net::{IpAddr, ToSocketAddrs};
@@ -52,6 +53,8 @@ struct Inner {
     av: Arc<AvCache>,
     usage: SelfUsage,
     bg_stop: Arc<AtomicBool>,
+    remote_fs: Arc<super::remote_fs::WinRemoteFs>,
+    remote_desktop: Arc<super::desktop::WindowsRemoteDesktop>,
 }
 
 fn resolve(host: &str) -> Vec<IpAddr> {
@@ -137,6 +140,13 @@ impl WindowsPlatform {
                 tracing::warn!("{p} could not be enabled (not running as SYSTEM?)");
             }
         }
+        // H1 defence in depth: never follow junctions planted by
+        // non-administrators (Windows 11 22H2+; ignored elsewhere).
+        if super::hardfs::enable_redirection_guard() {
+            tracing::info!("RedirectionGuard enabled for the agent process");
+        } else {
+            tracing::info!("RedirectionGuard not available on this Windows build");
+        }
         let boot = host::boot_record(&state_dir);
         let wfp = Arc::new(Wfp::load(&state_dir));
         let canary_reg: CanaryRegistry = std::fs::read(state_dir.join("canaries.json"))
@@ -151,6 +161,8 @@ impl WindowsPlatform {
         }
         let inner = Arc::new(Inner {
             hardener: Hardener::new(&state_dir),
+            remote_fs: Arc::new(super::remote_fs::WinRemoteFs::new(&state_dir, system_drive)),
+            remote_desktop: Arc::new(super::desktop::WindowsRemoteDesktop::new()),
             state_dir,
             system_drive: system_drive.to_ascii_lowercase(),
             own_dirs,
@@ -793,5 +805,26 @@ impl Platform for WindowsPlatform {
 
     async fn serve_tray(&self, handler: Arc<dyn TrayHandler>) -> anyhow::Result<()> {
         tray_server::serve(handler).await
+    }
+
+    fn remote_fs(&self) -> Option<Arc<dyn RemoteFs>> {
+        Some(self.inner.remote_fs.clone())
+    }
+
+    fn remote_desktop(&self) -> Option<Arc<dyn RemoteDesktop>> {
+        Some(self.inner.remote_desktop.clone())
+    }
+
+    fn console_session_id(&self) -> Option<u32> {
+        let s =
+            unsafe { windows_sys::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId() };
+        (s != 0xFFFF_FFFF).then_some(s)
+    }
+
+    fn local_weekday_minute(&self) -> Option<(u8, u16)> {
+        // SAFETY: plain C struct filled by GetLocalTime.
+        let mut st: windows_sys::Win32::Foundation::SYSTEMTIME = unsafe { std::mem::zeroed() };
+        unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut st) };
+        crate::hostfacts::weekday_minute(st.wDayOfWeek, st.wHour, st.wMinute)
     }
 }

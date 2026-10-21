@@ -51,6 +51,12 @@ pub struct Policy {
     /// Optional sensor groups (general-malware coverage).
     #[serde(default)]
     pub sensors: SensorSettings,
+    /// Admin remote access (remote desktop, file manager) allowed by this
+    /// policy. Devices are additionally capped by the ceiling pinned at
+    /// install (`remote::RemoteAccessProfile::intersect`). Default (and for
+    /// policies saved before this field existed): no remote access.
+    #[serde(default)]
+    pub remote_access: crate::remote::RemoteAccessProfile,
 }
 
 /// Optional sensor groups. Defaults are on; each can be turned off per policy
@@ -141,6 +147,7 @@ impl Default for Policy {
             ioc_block_ttl_secs: default_ioc_block_ttl_secs(),
             ioc_block_host_wide: false,
             sensors: SensorSettings::default(),
+            remote_access: crate::remote::RemoteAccessProfile::none(),
         }
     }
 }

@@ -37,6 +37,18 @@ pub struct AgentConfig {
     /// Hostname override (simulator / tests).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
+    /// Remote-access ceiling pinned at enrollment (`EnrollResponse.remote_profile`).
+    /// Never changed by any later server message; only a new enrollment
+    /// replaces it. `None` (enrolled before profiles) = no remote access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_ceiling: Option<kestrel_common::remote::RemoteAccessProfile>,
+}
+
+impl AgentConfig {
+    /// The pinned remote-access ceiling (`none()` when absent).
+    pub fn remote_ceiling(&self) -> kestrel_common::remote::RemoteAccessProfile {
+        self.remote_ceiling.clone().unwrap_or_default()
+    }
 }
 
 impl AgentConfig {
@@ -279,6 +291,15 @@ mod tests {
             ca_pem: "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n".into(),
             device_id: Some(Uuid::new_v4()),
             tags: vec!["finance".into()],
+            remote_ceiling: Some({
+                let mut p = kestrel_common::remote::RemoteAccessProfile::guarded_default();
+                p.guardrails.allowed_hours = Some(kestrel_common::remote::AllowedHours {
+                    days: vec![0, 1, 2, 3, 4],
+                    start_minute: 480,
+                    end_minute: 1080,
+                });
+                p
+            }),
             ..Default::default()
         };
         c.set_uninstall_token("s3cret").unwrap();

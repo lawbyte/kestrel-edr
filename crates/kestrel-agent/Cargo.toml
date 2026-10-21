@@ -60,6 +60,8 @@ toml = "0.8"
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
+# Simulator test-pattern frames for remote desktop (MIT OR Apache-2.0, AND IJG notice).
+jpeg-encoder = { version = "0.7.1", default-features = false, features = ["std"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 argon2 = { version = "0.5", features = ["std"] }
 rand = "0.8"

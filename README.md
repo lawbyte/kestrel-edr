@@ -52,6 +52,25 @@ It has four parts:
   * a hash-chained audit log with a verify endpoint
   * live updates in the console through server-sent events (SSE)
   * signed agent updates (Ed25519)
+* **Admin remote access: remote desktop and a remote file manager**, from the device page of the console.
+  * **Remote desktop:** view-only or full control of the signed-in user's screen. It follows the UAC prompt and the lock screen where Windows allows, and has a Ctrl+Alt+Del button.
+  * **File manager:** runs as SYSTEM. It can browse drives, download, upload, rename or move, delete and create folders. Kestrel's own folders and network paths are always refused.
+  * **What each device allows is fixed when the agent is installed.** The console's *Install agent* wizard creates an enrollment token and a ready-to-run `Install-Kestrel-<profile>.cmd` with one of three remote-access profiles:
+    * *No remote access* (the default);
+    * *Remote control + file manager*;
+    * *Remote control + file manager with guardrails*.
+  * **The installed profile is a ceiling that the server can never raise.** The policy can only narrow it further.
+  * **Guardrails** (all optional, chosen per profile):
+    * the employee must click Allow in the tray;
+    * the admin must give a reason;
+    * MFA re-authentication before each session;
+    * no upload and/or no delete;
+    * session and idle limits;
+    * allowed hours;
+    * blocked folders.
+  * **The employee always knows.** A banner stays at the top of their screen for the whole desktop session and the tray shows a notification, in every profile. There is no hidden mode.
+  * **Admins only, interactive console session only** (API tokens are refused).
+  * **Every session and file operation is in the hash-chained audit log,** with the SHA-256 of each transfer. Frames and file contents never reach telemetry, ClickHouse or logs.
 * **Privacy controls for PDPA (Singapore) and UU PDP (Indonesia).**
   * Each upload category can be switched off separately: command lines, DNS, script content and raw telemetry.
   * User names can be replaced with salted hashes.
@@ -69,6 +88,16 @@ It has four parts:
 * The binaries are not code-signed yet. Microsoft Defender currently flags the unsigned agent (a heuristic on its credential-store path tables); sign it before deployment (see [docs/BUILDING.md](docs/BUILDING.md)).
 * Only Windows endpoints. The agent core and simulator also run on Linux and macOS for development, but there is no real sensor layer for them.
 * Alert grouping and the hunt language are deliberately simple (see [docs/contracts.md](docs/contracts.md)).
+* Remote desktop limits:
+  * **Screen capture is GDI-based JPEG at 5–10 fps.** This is fine for support work but not for video, and a 4K screen at high quality costs bandwidth and CPU.
+  * **No audio and no clipboard sync**; the console can type text instead.
+  * **The mouse pointer is not drawn** into frames.
+  * **UAC prompts and the lock screen** are captured and controllable because the helper runs as SYSTEM, but the on-screen banner cannot appear on that secure desktop; the tray notification still does.
+  * **Ctrl+Alt+Del only works** when the Windows policy `SoftwareSASGeneration` allows services to send it.
+  * **Multiple monitors** are shown as one virtual screen.
+  * **No one signed in:** a desktop session needs a user at the console. With consent required, no answer counts as Deny.
+  * **Lab validation pending:** the remote desktop has only been unit-tested on Windows so far; checklist in [docs/HANDOFF.md](docs/HANDOFF.md).
+* **A compromised admin account or server can use remote access on every device whose install profile allows it.** Enable MFA for every admin, consider the guarded profile, and restrict network access to the console.
 
 ## Detection rules
 
@@ -342,3 +371,4 @@ Apache-2.0. See `Cargo.toml` (`license = "Apache-2.0"`). The dependency licence 
 * Rule logic draws on public research by SigmaHQ, Elastic Security Labs, Google (Chrome DPAPI event-log detection), Microsoft Threat Intelligence (ClickFix, Lumma), SpecterOps, Unit 42, Kaspersky and Intrinsec. Each rule's references are listed in `crates/kestrel-detect/src/catalog.rs` and on the console's Rules page.
 * **SigmaHQ rules are licensed under the [Detection Rule License (DRL) 1.1](https://github.com/SigmaHQ/Detection-Rule-License).** Kestrel's built-in rules are original Rust implementations. If you import SigmaHQ rules as custom Sigma rules, the DRL requires you to keep the author attribution. Kestrel keeps the rule's `author` as `rule_author` on every alert and shows it in the console. The server recognises DRL/SigmaHQ rules by their `license` and `references` fields.
 * Kestrel ships a curated pack of 70 SigmaHQ rules from a pinned upstream commit, Audit by default, under the DRL 1.1; the console shows each rule's authors, licence and upstream link. Sigma evaluation uses `rsigma-parser`/`rsigma-eval` (MIT). ETW uses `ferrisetw`. On-demand scanning uses YARA-X (BSD-3-Clause).
+* Remote-desktop frames are encoded with `jpeg-encoder` (MIT OR Apache-2.0). This software is based in part on the work of the Independent JPEG Group.

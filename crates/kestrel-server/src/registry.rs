@@ -23,6 +23,11 @@ pub struct AgentConn {
     pub silence_alerted: AtomicBool,
     /// Signalled to terminate the stream (decommission / revocation).
     pub kill: tokio::sync::Notify,
+    /// `Hello.capabilities` of this stream (e.g. `live.files`, `live.desktop`).
+    pub capabilities: Vec<String>,
+    /// Remote-access ceiling the agent reported in its `Hello` (`None`:
+    /// agent older than profiles).
+    pub remote_ceiling: Option<kestrel_common::remote::RemoteAccessProfile>,
 }
 
 #[derive(Default)]
@@ -80,6 +85,11 @@ impl AgentRegistry {
 }
 
 impl AgentConn {
+    /// Did the agent announce `cap` in its `Hello`?
+    pub fn has_capability(&self, cap: &str) -> bool {
+        self.capabilities.iter().any(|c| c == cap)
+    }
+
     pub fn touch_heartbeat(&self, now: i64) -> i64 {
         self.silence_alerted.store(false, Ordering::Relaxed);
         self.last_hb.swap(now, Ordering::Relaxed)

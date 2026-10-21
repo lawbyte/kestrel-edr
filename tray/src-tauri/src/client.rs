@@ -170,6 +170,19 @@ pub async fn send(conn: &mut Conn, req: &TrayRequest) -> Result<(), ClientError>
 
 /// Read one response line. `Ok(None)` on clean EOF. Blank lines are skipped.
 pub async fn read_response(conn: &mut Conn) -> Result<Option<TrayResponse>, ClientError> {
+    match read_response_lenient(conn).await? {
+        None => Ok(None),
+        Some(r) => r.map(Some).map_err(ClientError::Protocol),
+    }
+}
+
+/// Like [`read_response`], but a line that is valid framing yet can't be parsed
+/// (e.g. an unknown response `type` from a newer agent) comes back as
+/// `Ok(Some(Err(reason)))` so a long-lived reader can log it and keep going.
+/// Transport errors and over-long lines are still fatal (`Err`).
+pub async fn read_response_lenient(
+    conn: &mut Conn,
+) -> Result<Option<Result<TrayResponse, String>>, ClientError> {
     loop {
         let mut line = String::new();
         let n = (&mut *conn)
@@ -187,9 +200,64 @@ pub async fn read_response(conn: &mut Conn) -> Result<Option<TrayResponse>, Clie
         if trimmed.is_empty() {
             continue;
         }
-        return serde_json::from_str(trimmed)
-            .map(Some)
-            .map_err(|e| ClientError::Protocol(e.to_string()));
+        return Ok(Some(
+            serde_json::from_str(trimmed).map_err(|e| e.to_string()),
+        ));
+    }
+}
+
+/// An open push subscription.
+pub struct Subscription {
+    pub conn: Conn,
+    /// Opt-in features the agent accepted (empty after the plain fallback).
+    pub features: Vec<String>,
+}
+
+/// Open the long-lived push connection. Sends `SubscribeWith { features }`
+/// first; an older agent answers `Error` (unknown op), in which case a fresh
+/// connection is opened with plain `Subscribe`. Expects `Ack { ok: true }`.
+pub async fn open_subscription(
+    client: &Client,
+    features: &[&str],
+    timeout: Duration,
+) -> Result<Subscription, ClientError> {
+    let features: Vec<String> = features.iter().map(|f| f.to_string()).collect();
+    if !features.is_empty() {
+        let mut conn = client.connect().await?;
+        let req = TrayRequest::SubscribeWith {
+            features: features.clone(),
+        };
+        match subscribe_ack(&mut conn, &req, timeout).await {
+            Ok(()) => return Ok(Subscription { conn, features }),
+            Err(ClientError::Agent(m)) => {
+                log::info!("agent rejected subscribe_with ({m}); falling back to subscribe");
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    let mut conn = client.connect().await?;
+    subscribe_ack(&mut conn, &TrayRequest::Subscribe, timeout).await?;
+    Ok(Subscription {
+        conn,
+        features: Vec::new(),
+    })
+}
+
+async fn subscribe_ack(
+    conn: &mut Conn,
+    req: &TrayRequest,
+    timeout: Duration,
+) -> Result<(), ClientError> {
+    send(conn, req).await?;
+    match tokio::time::timeout(timeout, read_response(conn)).await {
+        Ok(Ok(Some(TrayResponse::Ack { ok: true, .. }))) => Ok(()),
+        Ok(Ok(Some(TrayResponse::Error { message }))) => Err(ClientError::Agent(message)),
+        Ok(Ok(Some(other))) => Err(ClientError::Protocol(format!(
+            "expected ack, got {other:?}"
+        ))),
+        Ok(Ok(None)) => Err(ClientError::Unavailable("closed during subscribe".into())),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(ClientError::Timeout("subscribe".into())),
     }
 }
 
@@ -319,6 +387,154 @@ mod tests {
             )
             .await;
         assert!(matches!(r, Err(ClientError::Agent(_))));
+    }
+
+    #[tokio::test]
+    async fn subscribe_with_gets_remote_session_pushes() {
+        let mock = Arc::new(crate::mock::MockAgent::new());
+        let c = Client::new(Backend::Mock(mock.clone()));
+        let mut sub = open_subscription(&c, &[FEATURE_REMOTE_SESSION], Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(sub.features, vec![FEATURE_REMOTE_SESSION.to_string()]);
+        // A plain subscriber on the same agent must never see RemoteSession.
+        let mut plain = open_subscription(&c, &[], Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(plain.features.is_empty());
+
+        let notice = crate::mock::sample_remote_session(false);
+        mock.start_remote_session(notice.clone());
+        let push = read_response(&mut sub.conn).await.unwrap().unwrap();
+        assert_eq!(push, TrayResponse::RemoteSession(notice.clone()));
+        let TrayResponse::Notification(item) = read_response(&mut sub.conn).await.unwrap().unwrap()
+        else {
+            panic!("expected notification")
+        };
+        assert_eq!(item.action_taken, "Remote session started");
+        let TrayResponse::Notification(item) =
+            read_response(&mut plain.conn).await.unwrap().unwrap()
+        else {
+            panic!("plain subscriber must get the notification first")
+        };
+        assert_eq!(item.action_taken, "Remote session started");
+
+        // Status carries the active session.
+        let TrayResponse::Status(s) = c
+            .request(&TrayRequest::Status, Duration::from_secs(2))
+            .await
+            .unwrap()
+        else {
+            panic!("status")
+        };
+        assert_eq!(s.remote_session, Some(notice));
+
+        mock.end_remote_session();
+        let TrayResponse::RemoteSession(n) = read_response(&mut sub.conn).await.unwrap().unwrap()
+        else {
+            panic!("expected remote_session end")
+        };
+        assert!(!n.active && n.ended_at.is_some());
+        let TrayResponse::Notification(item) =
+            read_response(&mut plain.conn).await.unwrap().unwrap()
+        else {
+            panic!("plain subscriber must skip remote_session and see the end notification")
+        };
+        assert_eq!(item.action_taken, "Remote session ended");
+    }
+
+    #[tokio::test]
+    async fn consent_request_push_and_answer() {
+        let mock = Arc::new(crate::mock::MockAgent::new());
+        let c = Client::new(Backend::Mock(mock.clone()));
+        let mut sub = open_subscription(
+            &c,
+            &[FEATURE_REMOTE_SESSION, FEATURE_REMOTE_CONSENT],
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        // A subscriber without remote_consent never sees the prompt.
+        let mut no_consent =
+            open_subscription(&c, &[FEATURE_REMOTE_SESSION], Duration::from_secs(2))
+                .await
+                .unwrap();
+
+        let req = mock.request_consent(RemoteKind::Files, false, 60);
+        assert_eq!(
+            read_response(&mut sub.conn).await.unwrap().unwrap(),
+            TrayResponse::ConsentRequest(req.clone())
+        );
+
+        // Deny is acknowledged; the same id can't be answered twice.
+        let deny = TrayRequest::ConsentResponse {
+            request_id: req.request_id,
+            allow: false,
+        };
+        let r = c.request(&deny, Duration::from_secs(2)).await.unwrap();
+        assert!(matches!(r, TrayResponse::Ack { ok: true, .. }));
+        assert!(matches!(
+            c.request(&deny, Duration::from_secs(2)).await,
+            Err(ClientError::Agent(_))
+        ));
+
+        // Allow starts a matching session.
+        let req = mock.request_consent(RemoteKind::Desktop, true, 60);
+        let _ = read_response(&mut sub.conn).await.unwrap().unwrap();
+        let r = c
+            .request(
+                &TrayRequest::ConsentResponse {
+                    request_id: req.request_id,
+                    allow: true,
+                },
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(r, TrayResponse::Ack { ok: true, .. }));
+        let TrayResponse::RemoteSession(n) = read_response(&mut sub.conn).await.unwrap().unwrap()
+        else {
+            panic!("expected remote_session")
+        };
+        assert!(n.active && n.view_only && n.kind == RemoteKind::Desktop);
+        // The no-consent subscriber's first push is the session, not a prompt.
+        assert!(matches!(
+            read_response(&mut no_consent.conn).await.unwrap().unwrap(),
+            TrayResponse::RemoteSession(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn subscribe_falls_back_on_older_agent() {
+        let mock = Arc::new(crate::mock::MockAgent::legacy());
+        let c = Client::new(Backend::Mock(mock.clone()));
+        let mut sub = open_subscription(&c, &[FEATURE_REMOTE_SESSION], Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(sub.features.is_empty(), "fell back to plain subscribe");
+        mock.start_remote_session(crate::mock::sample_remote_session(true));
+        // Only the regular notification arrives on a plain subscription.
+        let TrayResponse::Notification(item) = read_response(&mut sub.conn).await.unwrap().unwrap()
+        else {
+            panic!("expected notification")
+        };
+        assert_eq!(item.action_taken, "Remote session started");
+    }
+
+    #[tokio::test]
+    async fn lenient_reader_skips_unknown_types() {
+        let (client_side, mut server_side) = tokio::io::duplex(4096);
+        let mut conn: Conn = BufReader::new(Box::new(client_side));
+        server_side
+            .write_all(b"{\"type\":\"from_the_future\",\"x\":1}\n\n{\"type\":\"ack\",\"ok\":true,\"message\":\"m\"}\n")
+            .await
+            .unwrap();
+        drop(server_side);
+        let first = read_response_lenient(&mut conn).await.unwrap().unwrap();
+        assert!(first.is_err());
+        let second = read_response_lenient(&mut conn).await.unwrap().unwrap();
+        assert!(matches!(second, Ok(TrayResponse::Ack { ok: true, .. })));
+        assert!(read_response_lenient(&mut conn).await.unwrap().is_none());
     }
 
     #[test]

@@ -34,9 +34,32 @@ The tray uses `\\.\pipe\kestrel-tray` with one JSON object per line, as defined 
 | Activity tab | `{"op":"activity","limit":50}` | |
 | Quick check | `{"op":"quick_check"}` | 180 s timeout; the result is the `Ack.message` |
 | Request review | `{"op":"request_review","alert_id":…,"justification":…}` | justification is trimmed and capped at 2000 chars |
-| Pushes | `{"op":"subscribe"}` on a long-lived connection | expects `Ack`, then `Notification`s; reconnects with backoff from 1 s to 30 s with jitter |
+| Answer an IT consent request | `{"op":"consent_response","request_id":…,"allow":true\|false}` | sent on its own connection; the agent's `Ack`/`Error` is shown |
+| Pushes | `{"op":"subscribe_with","features":["remote_session","remote_consent"]}` on a long-lived connection | expects `Ack`, then `Notification`, `RemoteSession` and `ConsentRequest` pushes. If the agent answers `Error` (an agent older than `subscribe_with`), the tray reconnects with plain `{"op":"subscribe"}` and only sees the remote session via `status.remote_session` (no consent prompts). Reconnects with backoff from 1 s to 30 s with jitter |
 
-Each request uses its own short connection. The subscription keeps one connection open.
+Each request uses its own short connection. The subscription keeps one connection open. A push line the tray can't parse (for example a response type from a newer agent) is logged and skipped. It doesn't drop the subscription.
+
+### IT remote sessions
+
+Admins can open a remote-desktop session on the PC without a consent prompt (owner decision), so the tray must always tell the employee. While `status.remote_session` is active, or after a `remote_session` push with `active: true`:
+
+- A **non-dismissable banner** sits at the top of the window above the tabs, on every tab: "{admin} from IT is viewing your screen" (view only), "…can see and control your screen", or, for a file-manager session (`kind: "files"`), "…can open and copy files on this PC". It also shows the mode in words, "Since HH:MM", the reason if one was given, and "Didn't expect this? Contact {IT contact} ({phone or email}) now." with a **Contact IT** link to the Help tab. It uses `role="status"` with `aria-live`, and a different icon for view-only, control and file access, so colour is never the only signal.
+- The Status tab shows an **IT remote access** row.
+- The banner covers file sessions too: "{admin} from IT is accessing files on this PC".
+- The tray tooltip starts with **"Kestrel: IT is connected"** followed by "{admin} is viewing/controlling your screen".
+
+### IT consent requests
+
+When the admin's guardrails require consent, the agent pushes a `consent_request`. The tray:
+
+- queues it (arrival order, de-duplicated by id, at most 16), brings the flyout to the front and focuses it, and raises a toast ("IT wants to connect … Open Kestrel to allow or deny");
+- shows a modal Allow / Deny prompt (`role="alertdialog"`): "{admin} from IT wants to see and control your screen", "…wants to see your screen (view only)" or "…wants to access files on this PC", the reason, what allowing means, a countdown to `expires_at`, and how many more requests are waiting;
+- **Deny is the safe default.** Escape or the Deny button answers Deny at once. When the countdown ends, the prompt closes **without sending anything** (the agent treats no answer as deny) and says so;
+- Enter = Allow, but only once the prompt has been visible for 1 s. The window takes focus when a request arrives, so a stray Enter typed into another app must not grant access. The Allow button is disabled for that second too. Enter while the Deny button has focus means Deny;
+- sends the answer as `consent_response` on a fresh connection and shows the agent's `Ack` message. If the agent returns `Error` (expired/unknown request), the prompt closes and says IT can't connect. If the service is unreachable, the prompt stays so the answer can be retried before it expires;
+- doesn't hide the flyout on blur, and Escape doesn't close the window, while a request is pending.
+
+`remote_session` pushes only change UI state. The agent also sends a high-severity `Notification` ("Remote session started" / "Remote session ended"), and that notification raises the toast through the normal toast rules.
 
 **Pipe trust (Windows):** the client opens the pipe with `SECURITY_IDENTIFICATION` QoS, so the server cannot impersonate the user. It then calls `GetNamedPipeServerSessionId` and only trusts a server in **session 0** (a service). If an unprivileged process squats the pipe name, the tray treats it as "service not running" and never shows its status or toasts. For local debugging against a user-mode simulator, a debug build accepts `KESTREL_TRAY_ALLOW_USER_SERVER=1`.
 
@@ -46,7 +69,7 @@ Each request uses its own short connection. The subscription keeps one connectio
 |---|---|
 | Windows | named pipe (above) |
 | Linux/macOS dev | Unix socket at `$KESTREL_TRAY_SOCK` (the agent simulator serves the same protocol) |
-| Anywhere | `KESTREL_TRAY_MOCK=1` uses the built-in mock agent (`KESTREL_TRAY_MOCK_STATE=protected\|attention\|isolated\|degraded\|offline`). After subscribing, it pushes one demo critical notification about 15 s later. |
+| Anywhere | `KESTREL_TRAY_MOCK=1` uses the built-in mock agent (`KESTREL_TRAY_MOCK_STATE=protected\|attention\|isolated\|degraded\|offline`). After subscribing, it pushes one demo critical notification about 15 s later. `KESTREL_TRAY_MOCK_CONSENT=desktop\|view\|files` sends an IT consent request about 5 s after subscribing (allowing it starts a matching session). `KESTREL_TRAY_MOCK_REMOTE=view\|control\|files` starts with an active IT remote session. `cycle` starts one about 5 s after subscribing, ends it after 40 s, and repeats. |
 
 If nothing answers, the UI shows **"Kestrel isn't running"** with steps and the IT contact, and the tray shows the red hollow shield.
 
@@ -62,6 +85,7 @@ Each state uses a different shape and fill style as well as a different colour. 
 | `degraded` | half-filled orange shield, wave | Kestrel: Protection partly working |
 | `offline` | solid grey shield, crossed-out cloud | Kestrel: Protected, not connected to IT |
 | pipe unavailable | hollow red shield, ✕ | Kestrel: service isn't running. Contact IT. |
+| any state + IT remote session | unchanged icon | Kestrel: IT is connected / {admin} is viewing (or controlling) your screen |
 
 `screenshots/tray-icons.png` shows all states at 16, 24 and 32 px on light and dark taskbars.
 
@@ -89,7 +113,9 @@ npm install
 npm run dev:mock          # browser-only UI with sample data at http://localhost:1430
                           #   ?state=protected|attention|isolated|degraded|offline|unavailable
                           #   &tab=status|activity|help &theme=light|dark &empty=1 &push=3 &notice=0
-npm test                  # Vitest: protocol parsing + markdown sanitising
+                          #   &remote=view|control|files|cycle   (IT remote session banner)
+                          #   &consent=desktop|view|files|queue &consent_in=1 &consent_timeout=60
+npm test                  # Vitest: protocol parsing, markdown sanitising, remote-session banner, consent queue + prompt
 npm run build             # tsc (strict) + vite build → dist/
 npm run icons             # regenerate src-tauri/icons/** from scripts/gen-icons.mjs
 

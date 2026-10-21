@@ -10,6 +10,7 @@
 pub mod alert;
 pub mod event;
 pub mod policy;
+pub mod remote;
 pub mod response;
 pub mod rules;
 pub mod tray;

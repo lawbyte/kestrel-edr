@@ -44,7 +44,9 @@ impl Priority {
             AgentPayload::Heartbeat(_)
             | AgentPayload::Hello(_)
             | AgentPayload::Ack { .. }
-            | AgentPayload::RenewCertificate { .. } => Priority::Heartbeat,
+            | AgentPayload::RenewCertificate { .. }
+            // Never stored (refused by `Store::enqueue`); listed for exhaustiveness.
+            | AgentPayload::Live { .. } => Priority::Heartbeat,
             AgentPayload::Alert(_)
             | AgentPayload::ActionResult { .. }
             | AgentPayload::ReviewRequest(_)
@@ -65,6 +67,7 @@ pub fn payload_kind(p: &AgentPayload) -> &'static str {
         AgentPayload::Ack { .. } => "ack",
         AgentPayload::RenewCertificate { .. } => "renew_certificate",
         AgentPayload::UpdateResult { .. } => "update_result",
+        AgentPayload::Live { .. } => "live",
     }
 }
 
@@ -180,6 +183,11 @@ impl Store {
 
     /// Append a payload; returns its seq. Event batches are always compressed.
     pub fn enqueue(&self, payload: &AgentPayload) -> Result<u64> {
+        // Live remote-access traffic is ephemeral: sent on the current
+        // stream only, never written to disk.
+        if matches!(payload, AgentPayload::Live { .. }) {
+            anyhow::bail!("live messages are never queued in the outbox");
+        }
         let force = matches!(payload, AgentPayload::Events { .. });
         let (bytes, compressed) = codec::encode(payload, force)?;
         let prio = Priority::of(payload) as i64;

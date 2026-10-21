@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Download, Plus, Trash2 } from 'lucide-react'
+import { Download, MonitorOff, MonitorSmartphone, Plus, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { api, qk } from '@/api/endpoints'
-import type { CreatedEnrollmentToken, Group, GroupUpdateRing } from '@/api/types'
+import type { Group, GroupUpdateRing } from '@/api/types'
+import { InstallAgentWizard } from '@/components/install-wizard'
 import { GROUP_UPDATE_RINGS } from '@/api/types'
 import { RingBadge } from '@/components/badges'
 import { RING_HINT, RING_LABEL } from '@/lib/updates'
@@ -62,8 +63,8 @@ export default function EnrollmentTab() {
 
       <SettingsSection
         title="Enrollment tokens"
-        description="A token decides which group (and so which policy) a new device joins. Each token is shown once."
-        footer={can('devices.write') ? <Button size="sm" variant="primary" onClick={() => setCreating(true)}><Plus /> Create token</Button> : null}
+        description="A token decides which group (and so which policy) a new device joins, and its remote-access ceiling, which only a reinstall can change. Each token is shown once."
+        footer={can('devices.write') ? <Button size="sm" variant="primary" onClick={() => setCreating(true)}><Plus /> Install agent…</Button> : null}
       >
         <ul className="-my-2 divide-y divide-border">
           {tokens.data.map((t) => {
@@ -74,6 +75,10 @@ export default function EnrollmentTab() {
               <li key={t.id} className={cn('flex flex-wrap items-center gap-3 py-2.5', state !== 'Active' && 'opacity-60')}>
                 <code className="font-mono text-sm">{t.token_prefix}…</code>
                 <span className="text-sm">{t.group_name}</span>
+                <span className="inline-flex min-w-0 items-center gap-1 text-xs text-fg-muted" title={t.remote_summary ?? 'No remote access'}>
+                  {t.remote_preset && t.remote_preset !== 'none' ? <MonitorSmartphone className="size-3.5 shrink-0 text-accent-text" aria-hidden /> : <MonitorOff className="size-3.5 shrink-0 text-fg-subtle" aria-hidden />}
+                  <span className="truncate">{t.remote_summary ?? 'No remote access'}</span>
+                </span>
                 <span className="text-xs text-fg-muted">
                   {t.uses}/{t.max_uses} used · {expired ? 'expired' : 'expires'} {formatDate(t.expires_at)} · created {timeAgo(t.created_at)}
                 </span>
@@ -113,92 +118,9 @@ export default function EnrollmentTab() {
         </ul>
       </SettingsSection>
 
-      {creating ? <CreateToken groups={groups.data} onClose={() => setCreating(false)} /> : null}
+      {creating ? <InstallAgentWizard groups={groups.data} onClose={() => setCreating(false)} /> : null}
       {groupDlg ? <GroupDialog group={groupDlg === 'new' ? null : groupDlg} onClose={() => setGroupDlg(null)} /> : null}
     </div>
-  )
-}
-
-function CreateToken({ groups, onClose }: { groups: Group[]; onClose: () => void }) {
-  const qc = useQueryClient()
-  const [group, setGroup] = useState(groups[0]?.id ?? '')
-  const [days, setDays] = useState(7)
-  const [uses, setUses] = useState(50)
-  const [created, setCreated] = useState<CreatedEnrollmentToken | null>(null)
-  const m = useMutation({
-    mutationFn: () => api.createEnrollmentToken({ group_id: group, expires_in_days: days, max_uses: uses }),
-    onSuccess: (t) => {
-      setCreated(t)
-      void qc.invalidateQueries({ queryKey: qk.enrollmentTokens })
-    },
-    onError: (e) => toast.error('Token not created', { description: (e as Error).message }),
-  })
-  return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent
-        size="lg"
-        title={created ? 'Install command' : 'Create enrollment token'}
-        description={created ? `Run this in an elevated PowerShell on each device. Devices join ${created.group_name}. This is the only time the token is shown.` : undefined}
-        footer={
-          created ? (
-            <Button variant="primary" onClick={onClose}>
-              Done
-            </Button>
-          ) : (
-            <>
-              <Button variant="ghost" onClick={onClose}>
-                Cancel
-              </Button>
-              <Button variant="primary" disabled={!group || m.isPending} onClick={() => m.mutate()}>
-                Create token
-              </Button>
-            </>
-          )
-        }
-      >
-        {created ? (
-          <div className="space-y-4">
-            <div>
-              <div className="mb-1 flex items-center justify-between">
-                <span className="text-xs font-medium text-fg-subtle">PowerShell (run as administrator)</span>
-                <CopyButton text={created.install_command} label="Copy command" />
-              </div>
-              <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-md border border-border bg-surface-2 p-3 font-mono text-[12px] leading-relaxed">{created.install_command}</pre>
-            </div>
-            <div>
-              <div className="mb-1 flex items-center justify-between">
-                <span className="text-xs font-medium text-fg-subtle">Token only (for Intune or GPO MSI properties)</span>
-                <CopyButton text={created.token} label="Copy token" />
-              </div>
-              <code className="block break-all rounded-md border border-border bg-surface-2 p-2 font-mono text-[12px]">{created.token}</code>
-            </div>
-            <p className="text-xs text-fg-muted">
-              Valid until {formatDate(created.expires_at)} for up to {created.max_uses} devices.
-            </p>
-          </div>
-        ) : (
-          <div className="space-y-4">
-            <Field label="Group" htmlFor="et-group" hint="New devices get this group’s policy.">
-              <select id="et-group" value={group} onChange={(e) => setGroup(e.target.value)} className={cn(inputClass, 'h-8')}>
-                {groups.map((g) => (
-                  <option key={g.id} value={g.id}>
-                    {g.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <div className="grid grid-cols-2 gap-4">
-              <Field label="Expires after (days)" htmlFor="et-days">
-                <Input id="et-days" type="number" min={1} max={365} value={days} onChange={(e) => setDays(Number(e.target.value))} />
-              </Field>
-              <Field label="Maximum devices" htmlFor="et-uses">
-                <Input id="et-uses" type="number" min={1} max={10000} value={uses} onChange={(e) => setUses(Number(e.target.value))} />
-              </Field>
-            </div>
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
   )
 }
 

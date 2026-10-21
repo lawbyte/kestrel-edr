@@ -442,6 +442,8 @@ export interface Policy {
   ioc_block_host_wide: boolean
   /** Optional sensor groups; absent on servers older than v1.1 (treat as all on). */
   sensors?: SensorSettings
+  /** Remote-access profile of the policy (capped by each device's install ceiling); absent = none. */
+  remote_access?: RemoteAccessProfile
 }
 
 export interface PolicySummary {
@@ -472,6 +474,10 @@ export interface AgentHealth {
   logged_on_user?: string | null
   ip_addresses?: string[]
   av_product?: string | null
+  /** Remote-access ceiling pinned on the agent at enrollment. */
+  remote_ceiling?: RemoteAccessProfile | null
+  /** ceiling ∩ policy as enforced by the agent. */
+  remote_effective?: RemoteAccessProfile | null
 }
 
 export interface Software {
@@ -585,6 +591,8 @@ export interface DeviceDetail {
   recent_alerts: AlertRow[]
   effective_policy: Policy
   hardening: HardeningState[]
+  /** Remote access availability (servers with remote access only; absent on older servers). */
+  remote_access?: RemoteAccessInfo
 }
 
 export interface Group {
@@ -609,8 +617,18 @@ export interface EnrollmentToken {
   max_uses: number
   uses: number
   revoked: boolean
+  /** Remote-access ceiling devices enrolled with this token get (absent on older servers = none). */
+  remote_profile?: RemoteAccessProfile
+  remote_summary?: string
+  remote_preset?: RemoteProfilePreset
 }
-export type CreatedEnrollmentToken = EnrollmentToken & { token: string; install_command: string }
+export type CreatedEnrollmentToken = EnrollmentToken & {
+  token: string
+  install_command: string
+  /** Text of `Install-Kestrel-<preset>.cmd` (CRLF); only in the create response. */
+  installer_cmd?: string
+  installer_filename?: string
+}
 
 export interface InstallerMeta {
   version: string
@@ -888,7 +906,15 @@ export interface AuditVerify {
 }
 
 export interface ApiErrorBody {
-  error: { code: string; message: string }
+  error: {
+    code: string
+    message: string
+    /** Remote-access failures: the agent's / server's machine-readable reason. */
+    remote_code?: RemoteErrorCode
+    /** Extra details; the server flattens them into this object (e.g. `reason: "reauth_required"`). */
+    reason?: string
+    extra?: Record<string, unknown>
+  }
 }
 
 export type LiveEventType = 'incident' | 'alert' | 'device' | 'action' | 'group' | 'update_release'
@@ -983,4 +1009,181 @@ export interface UpdateStatus {
   server_version: string
   /** canary, early, broad, pinned. */
   rings: UpdateRingSummary[]
+}
+
+// ---------------------------------------------------------------- remote.rs (remote access)
+
+export const REMOTE_ERROR_CODES = [
+  'disabled_by_policy',
+  'not_permitted',
+  'consent_denied',
+  'consent_timeout',
+  'outside_allowed_hours',
+  'reason_required',
+  'blocked_path',
+  'invalid_path',
+  'protected_path',
+  'not_found',
+  'already_exists',
+  'access_denied',
+  'invalid_operation',
+  'integrity_error',
+  'too_large',
+  'busy',
+  'unavailable',
+  'timeout',
+  'io',
+  'other',
+] as const
+/** `RemoteErrorCode`; unknown future codes deserialize as `other` on the Rust side. */
+export type RemoteErrorCode = (typeof REMOTE_ERROR_CODES)[number]
+
+export type RemoteUnavailableReason = 'not_permitted' | 'disabled_by_policy' | 'offline' | 'agent_too_old' | 'decommissioned'
+export interface RemoteAvailability {
+  available: boolean
+  reason: RemoteUnavailableReason | null
+}
+/** `GET /devices/:id` → `remote_access`. */
+export interface RemoteAccessInfo {
+  desktop: RemoteAvailability
+  files: RemoteAvailability
+  /** Install-time ceiling (server record ∩ what the agent reports). */
+  ceiling?: RemoteAccessProfile
+  ceiling_summary?: string
+  policy?: RemoteAccessProfile
+  /** ceiling ∩ policy: what the agent enforces. */
+  effective?: RemoteAccessProfile
+  effective_summary?: string
+  agent_reported_ceiling?: RemoteAccessProfile | null
+}
+
+// ---------------------------------------------------------------- remote-access profiles & ceiling
+
+export const DESKTOP_MODES = ['off', 'view_only', 'control'] as const
+/** Ordered off < view_only < control. */
+export type DesktopMode = (typeof DESKTOP_MODES)[number]
+export const FILE_MODES = ['off', 'read_only', 'full'] as const
+/** Ordered off < read_only < full. `read_only` = list / stat / download. */
+export type FileMode = (typeof FILE_MODES)[number]
+
+/** Weekly window in the device's local time; days 0 = Monday … 6 = Sunday; start_minute < end_minute ≤ 1440. */
+export interface AllowedHours {
+  days: number[]
+  start_minute: number
+  end_minute: number
+}
+
+export interface RemoteGuardrails {
+  require_consent: boolean
+  /** 0 = 60. */
+  consent_timeout_secs: number
+  require_reason: boolean
+  require_mfa_reauth: boolean
+  /** Uploads and new folders (files = full only). */
+  allow_upload: boolean
+  /** Delete and rename / move (files = full only). */
+  allow_delete: boolean
+  /** 0 = no limit. */
+  max_session_minutes: number
+  /** 0 = no limit. */
+  idle_timeout_minutes: number
+  allowed_hours: AllowedHours | null
+  blocked_paths: string[]
+}
+
+export interface RemoteAccessProfile {
+  desktop: DesktopMode
+  files: FileMode
+  guardrails: RemoteGuardrails
+}
+
+export type RemoteProfilePreset = 'none' | 'unrestricted' | 'guarded' | 'custom'
+
+export type FileKind = 'file' | 'dir' | 'drive' | 'link'
+export interface FileEntry {
+  name: string
+  /** Full path (drives: `C:\`). */
+  path: string
+  kind: FileKind
+  size: number
+  /** Last write time (ms). */
+  modified: TimestampMs | null
+  /** Win32 FILE_ATTRIBUTE_* bits. */
+  attributes: number
+  hidden: boolean
+  readonly: boolean
+  /** Junction / symlink / other reparse point (never followed on delete). */
+  reparse: boolean
+  free_bytes: number | null
+  total_bytes: number | null
+  label: string | null
+}
+export interface FileListResponse {
+  path: string
+  parent: string | null
+  entries: FileEntry[]
+  truncated: boolean
+}
+export interface FileUploadResult {
+  path: string
+  size: number
+  sha256: string
+}
+
+export type MouseButton = 'left' | 'right' | 'middle' | 'x1' | 'x2'
+/** `InputEvent` (tag `kind`); x, y normalised 0..1 over the captured virtual screen. */
+export type InputEvent =
+  | { kind: 'mouse_move'; x: number; y: number }
+  | { kind: 'mouse_button'; x: number; y: number; button: MouseButton; down: boolean }
+  | { kind: 'mouse_wheel'; x: number; y: number; delta_y: number; delta_x: number }
+  | { kind: 'key'; code: string; down: boolean }
+  | { kind: 'text'; text: string }
+  | { kind: 'ctrl_alt_del' }
+  | { kind: 'release_all' }
+
+export interface DesktopSettings {
+  /** JPEG quality 30..=90. */
+  quality: number
+  /** Downscale 25..=100 %. */
+  scale_pct: number
+  /** Frame-rate cap 1..=15. */
+  max_fps: number
+  /** Switch control mode mid-session; omitted = unchanged. */
+  view_only?: boolean | null
+}
+
+export interface DesktopInfo {
+  width: number
+  height: number
+  monitors?: number
+  session_id?: number | null
+  /** Lock screen / UAC secure desktop: cannot be captured. */
+  secure_desktop?: boolean
+  view_only?: boolean
+}
+
+/** Browser → server text messages on the remote-desktop WebSocket. */
+export type DesktopClientMsg =
+  | { type: 'input'; event: InputEvent }
+  | ({ type: 'settings' } & DesktopSettings)
+  | { type: 'activity' }
+  | { type: 'ping' }
+  | { type: 'stop' }
+
+/** Server → browser text messages on the remote-desktop WebSocket. */
+export type DesktopServerMsg =
+  | { type: 'starting'; session_id: string; view_only: boolean }
+  | { type: 'consent_pending'; timeout_secs: number }
+  /** Outcome of a consent prompt (session start, or a later switch to control). */
+  | { type: 'consent_result'; allowed: boolean; code?: RemoteErrorCode | null }
+  | ({ type: 'started' } & DesktopInfo)
+  | ({ type: 'info' } & DesktopInfo)
+  | { type: 'ended'; reason: string; code?: RemoteErrorCode | null }
+  | { type: 'error'; message: string }
+  | { type: 'pong' }
+
+/** `GET /devices/:id/remote-desktop/status`. */
+export interface RemoteDesktopStatus {
+  active: boolean
+  session: { session_id: string; admin_email: string; admin_name: string; view_only: boolean; started_at: TimestampMs } | null
 }

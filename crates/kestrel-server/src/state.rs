@@ -58,6 +58,8 @@ pub struct Inner {
     pub setup_code: String,
     /// Outbound HTTP guard (webhooks, chat, OIDC).
     pub outbound: crate::netguard::Policy,
+    /// Remote-access live sessions (remote desktop, file manager).
+    pub remote: crate::remote::Hub,
 }
 
 #[derive(Clone)]

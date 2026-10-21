@@ -2,17 +2,20 @@
 
 pub(crate) mod autorun_resp;
 pub(crate) mod com;
+pub(crate) mod desktop;
 pub(crate) mod devmap;
 pub(crate) mod enrich;
 pub(crate) mod etw;
 pub(crate) mod evtsub;
 pub(crate) mod hardening;
+pub(crate) mod hardfs;
 pub(crate) mod host;
 pub(crate) mod persist;
 pub(crate) mod platform;
 pub(crate) mod quarantine;
 pub(crate) mod rcanary;
 pub(crate) mod regwatch;
+pub(crate) mod remote_fs;
 pub(crate) mod respond;
 pub(crate) mod safefs;
 pub(crate) mod scan;

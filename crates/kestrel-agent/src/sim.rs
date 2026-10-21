@@ -9,6 +9,11 @@
 //! * Canary files are written under `<state>/sim-fs/` (Windows paths mapped).
 //! * The tray protocol is served on `<state>/tray.sock` (Unix) or a localhost
 //!   TCP port written to `<state>/tray.port` (Windows).
+//! * Remote access: file manager over `<state>/sim-fs`, a synthetic desktop
+//!   (see `sim_remote`), console session id 1, local time = UTC (or
+//!   `KESTREL_SIM_LOCAL_TIME=<weekday 0=Mon>,<minute>` / [`SimPlatform::set_local_time`]),
+//!   and a consent auto-responder answering `ConsentRequest` pushes as the
+//!   simulated user in session 1 ([`SimConsent`], default allow).
 
 use anyhow::{Context, Result};
 use kestrel_common::{
@@ -56,8 +61,41 @@ struct Shared {
     started: AtomicBool,
 }
 
+/// How the simulated employee answers remote-access consent prompts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SimConsent {
+    #[default]
+    Allow,
+    Deny,
+    /// Never answer (the agent's timeout applies).
+    Ignore,
+}
+
+impl std::str::FromStr for SimConsent {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.to_ascii_lowercase().as_str() {
+            "allow" => Ok(SimConsent::Allow),
+            "deny" => Ok(SimConsent::Deny),
+            "ignore" => Ok(SimConsent::Ignore),
+            _ => Err("expected allow, deny or ignore".into()),
+        }
+    }
+}
+
+/// Parse `<weekday>,<minute>` (weekday 0 = Monday).
+fn parse_local_time(s: &str) -> Option<(u8, u16)> {
+    let (d, m) = s.trim().split_once(',')?;
+    let d: u8 = d.trim().parse().ok()?;
+    let m: u16 = m.trim().parse().ok()?;
+    (d <= 6 && m < 1440).then_some((d, m))
+}
+
 pub struct SimPlatform {
     opts: SimOptions,
+    consent: Arc<Mutex<SimConsent>>,
+    local_time: Mutex<Option<(u8, u16)>>,
+    remote_fs: std::sync::OnceLock<Arc<crate::sim_remote::SimRemoteFs>>,
     isolated: AtomicBool,
     isolated_at: Mutex<Option<i64>>,
     shared: Arc<Shared>,
@@ -80,6 +118,9 @@ impl SimPlatform {
     pub fn new(opts: SimOptions) -> SimPlatform {
         SimPlatform {
             opts,
+            consent: Arc::default(),
+            local_time: Mutex::new(None),
+            remote_fs: std::sync::OnceLock::new(),
             isolated: AtomicBool::new(false),
             isolated_at: Mutex::new(None),
             shared: Arc::default(),
@@ -88,6 +129,16 @@ impl SimPlatform {
             blocks: Mutex::default(),
             quarantined: Mutex::default(),
         }
+    }
+
+    /// How the simulated employee answers consent prompts.
+    pub fn set_consent(&self, c: SimConsent) {
+        *self.consent.lock().unwrap_or_else(|e| e.into_inner()) = c;
+    }
+
+    /// Override the device local time (weekday 0 = Monday, minute).
+    pub fn set_local_time(&self, t: Option<(u8, u16)>) {
+        *self.local_time.lock().unwrap_or_else(|e| e.into_inner()) = t;
     }
 
     /// True once the replay file has been fully delivered.
@@ -633,7 +684,80 @@ impl Platform for SimPlatform {
         ok
     }
 
+    fn remote_fs(&self) -> Option<Arc<dyn kestrel_platform::RemoteFs>> {
+        let fs = self.remote_fs.get_or_init(|| {
+            Arc::new(crate::sim_remote::SimRemoteFs::new(
+                self.opts.state_dir.join("sim-fs"),
+                &self.opts.user,
+            ))
+        });
+        Some(fs.clone())
+    }
+
+    fn remote_desktop(&self) -> Option<Arc<dyn kestrel_platform::RemoteDesktop>> {
+        Some(Arc::new(crate::sim_remote::SimDesktop::new(
+            self.opts.state_dir.clone(),
+        )))
+    }
+
+    /// The simulated host has one interactive session (id 1).
+    fn console_session_id(&self) -> Option<u32> {
+        Some(1)
+    }
+
+    fn local_weekday_minute(&self) -> Option<(u8, u16)> {
+        if let Some(t) = *self.local_time.lock().unwrap_or_else(|e| e.into_inner()) {
+            return Some(t);
+        }
+        if let Some(t) = std::env::var("KESTREL_SIM_LOCAL_TIME")
+            .ok()
+            .and_then(|v| parse_local_time(&v))
+        {
+            return Some(t);
+        }
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        // 1970-01-01 was a Thursday (3 with Monday = 0).
+        let day = secs / 86_400;
+        Some((((day + 3) % 7) as u8, ((secs % 86_400) / 60) as u16))
+    }
+
     async fn serve_tray(&self, handler: Arc<dyn TrayHandler>) -> Result<()> {
+        // Consent auto-responder: the simulated employee in session 1.
+        {
+            let mut rx = handler.subscribe();
+            let h = handler.clone();
+            let client = self.sim_client();
+            let mode = self.consent.clone();
+            tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(p) => {
+                            let kestrel_common::tray::TrayResponse::ConsentRequest(c) = &p.resp
+                            else {
+                                continue;
+                            };
+                            if !p.visible_to(&client) {
+                                continue;
+                            }
+                            let m = *mode.lock().unwrap_or_else(|e| e.into_inner());
+                            if m == SimConsent::Ignore {
+                                continue;
+                            }
+                            let req = kestrel_common::tray::TrayRequest::ConsentResponse {
+                                request_id: c.request_id,
+                                allow: m == SimConsent::Allow,
+                            };
+                            let _ = h.handle(req, &client).await;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
         #[cfg(unix)]
         {
             let path = self.opts.state_dir.join(TRAY_SOCK);

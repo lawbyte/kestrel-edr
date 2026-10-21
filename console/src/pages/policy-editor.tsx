@@ -16,6 +16,8 @@ import { useAuth } from '@/lib/auth'
 import { diffJson, type Change } from '@/lib/diff'
 import { HARDENING_CONTROLS, HARDENING_INFO, RULE_CATEGORY_ORDER } from '@/lib/labels'
 import { cn } from '@/lib/utils'
+import { normaliseProfile, validateProfile } from '@/lib/remote-profile'
+import { RemoteProfileEditor } from '@/components/remote/profile-editor'
 
 const SECTIONS = [
   { id: 'rules', label: 'Detection rules' },
@@ -27,6 +29,7 @@ const SECTIONS = [
   { id: 'telemetry', label: 'Telemetry' },
   { id: 'canaries', label: 'Canaries & exfil domains' },
   { id: 'branding', label: 'Branding & notice' },
+  { id: 'remote', label: 'Remote access' },
 ]
 
 export default function PolicyEditor() {
@@ -58,7 +61,11 @@ function Editor({ original, catalog }: { original: Policy; catalog: RuleRow[] })
   }, [dirty])
 
   const save = useMutation({
-    mutationFn: () => api.savePolicy(p),
+    mutationFn: () => {
+      const bad = p.remote_access ? validateProfile(normaliseProfile(p.remote_access)) : null
+      if (bad) throw new Error(`Remote access: ${bad}`)
+      return api.savePolicy(p)
+    },
     onSuccess: (np) => {
       toast.success(`Saved “${np.name}” as version ${np.version}`, { description: 'Agents pick up the new version on their next check-in (usually under a minute).' })
       qc.setQueryData(qk.policy(np.id), np)
@@ -231,6 +238,14 @@ function Editor({ original, catalog }: { original: Policy; catalog: RuleRow[] })
                 <NoticeEditor value={p.branding.privacy_notice_md} onChange={(v) => set('branding', { ...p.branding, privacy_notice_md: v })} disabled={readOnly} />
               </div>
             </div>
+          </Section>
+
+          <Section
+            id="remote"
+            title="Remote access"
+            description="Remote desktop and the remote file manager for administrators. Devices are capped by their install profile: a device only gets what both its install profile and this policy allow. The employee always sees a banner and a notification during desktop sessions, and every file operation is recorded in the audit log."
+          >
+            <RemoteProfileEditor value={normaliseProfile(p.remote_access)} onChange={(v) => set('remote_access', v)} disabled={readOnly} idPrefix="pol-remote" />
           </Section>
         </div>
       </div>

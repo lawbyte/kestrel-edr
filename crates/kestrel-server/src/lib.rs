@@ -15,6 +15,7 @@ pub mod error;
 pub mod grpc;
 pub mod incidents;
 pub mod ingest;
+pub mod installer_script;
 pub mod jobs;
 pub mod mdsafe;
 pub mod models;
@@ -23,6 +24,7 @@ pub mod notify;
 pub mod pki;
 pub mod policy_svc;
 pub mod registry;
+pub mod remote;
 pub mod scrub;
 pub mod settings;
 pub mod sigmapack;
@@ -111,6 +113,7 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<AppState> {
         oidc_discovery: Default::default(),
         setup_code,
         outbound,
+        remote: remote::Hub::default(),
     })))
 }
 
@@ -145,12 +148,16 @@ const PLACEHOLDER: &str = "<!doctype html><html><head><meta charset=utf-8><title
 pub fn http_router(state: AppState) -> Router {
     let console = state.cfg.console_dir.clone();
     let index = console.join("index.html");
+    let no_store = SetResponseHeaderLayer::overriding(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    // The remote file-manager upload streams up to 4 GiB, so it is merged in
+    // after the 8 MiB body limit (which only wraps the routes added before it).
     let api = api::router()
-        .layer(SetResponseHeaderLayer::overriding(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("no-store"),
-        ))
-        .layer(RequestBodyLimitLayer::new(8 * 1024 * 1024));
+        .layer(no_store.clone())
+        .layer(RequestBodyLimitLayer::new(8 * 1024 * 1024))
+        .merge(api::upload_router().layer(no_store));
     let mut app = Router::new()
         .nest("/api", api)
         .nest_service("/downloads", ServeDir::new(&state.cfg.agent_dir));

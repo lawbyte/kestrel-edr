@@ -87,6 +87,6 @@ The owner gives one prompt and expects the whole job done end to end without fur
 * Windows code behind `#[cfg(windows)]`; keep pure logic platform-independent with Linux-runnable unit tests.
 * Detection rules: behaviour-first (family names age in months), Audit by default unless `protect_day_one` is justified, every rule ships with fixtures (positive and benign) under `crates/kestrel-detect/tests/fixtures/` and false-positive notes.
 * Response safety: never act on protected/critical processes (shared list in `kestrel_detect::protect`), never block the Kestrel server, re-check process start time before acting on a PID, quarantine never follows reparse points.
-* Privacy: anything uploaded goes through the privacy filters; never add keystroke/screenshot/URL capture.
+* Privacy: anything uploaded goes through the privacy filters; never add background keystroke/screenshot/URL capture into telemetry. Exception (owner decision 2026-10-21): the admin-initiated **remote desktop** and **remote file manager** — interactive sessions only, admin role, audited, frames/files never stored in telemetry, and the employee always sees an on-screen banner while a session is active.
 * Licences: no GPL/AGPL/SSPL/ELv2 code or rules (`deny.toml`; Elastic detection rules are ELv2 — don't copy them). SigmaHQ rules are DRL 1.1 — keep author attribution visible in alert views.
 * UI: the console's design language is in `console/src` (dark default, IBM Plex, severity = icon + label, never colour alone). Keep it consistent; check light and dark.

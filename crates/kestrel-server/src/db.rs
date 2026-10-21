@@ -25,6 +25,10 @@ pub const ALL_PRIVILEGES: &[&str] = &[
     "audit.read",
     "tokens.write",
     "updates.write",
+    // Remote desktop / remote file manager: admin only (via `*`), and only
+    // from an interactive console session (never API tokens).
+    "remote.desktop",
+    "remote.files",
 ];
 
 pub const DEFAULT_POLICY_ID: &str = "default";

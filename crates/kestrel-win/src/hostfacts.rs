@@ -128,8 +128,27 @@ pub fn cpu_pct(prev_cpu: u64, prev_wall: u64, cur_cpu: u64, cur_wall: u64, ncpu:
     ((cpu as f64 / wall as f64) * 100.0 / ncpu as f64).clamp(0.0, 100.0) as f32
 }
 
+/// `SYSTEMTIME` fields → (weekday 0 = Monday … 6 = Sunday, minute of the
+/// day). `wDayOfWeek` is 0 = Sunday; out-of-range values → `None`.
+pub fn weekday_minute(day_of_week: u16, hour: u16, minute: u16) -> Option<(u8, u16)> {
+    if day_of_week > 6 || hour > 23 || minute > 59 {
+        return None;
+    }
+    Some((((day_of_week + 6) % 7) as u8, hour * 60 + minute))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn weekday_minute_mapping() {
+        use super::weekday_minute;
+        assert_eq!(weekday_minute(0, 23, 59), Some((6, 1439))); // Sunday
+        assert_eq!(weekday_minute(1, 0, 0), Some((0, 0))); // Monday
+        assert_eq!(weekday_minute(6, 12, 30), Some((5, 750))); // Saturday
+        assert_eq!(weekday_minute(7, 0, 0), None);
+        assert_eq!(weekday_minute(1, 24, 0), None);
+    }
+
     use super::*;
 
     fn smbios_with_uuid(major: u8, minor: u8, uuid: [u8; 16]) -> Vec<u8> {

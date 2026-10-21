@@ -22,7 +22,7 @@ tokio.workspace = true
 tonic = { workspace = true, features = ["tls"] }
 prost.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.7", features = ["macros", "ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs", "trace", "set-header", "limit"] }
@@ -62,5 +62,7 @@ time = "0.3"
 tonic-build = "0.12"
 
 [dev-dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies", "stream"] }
 tempfile = "3"
+# Remote-desktop WebSocket tests (same version axum's `ws` feature already pulls in).
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }

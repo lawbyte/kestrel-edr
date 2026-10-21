@@ -95,6 +95,20 @@ enum Cmd {
         /// Heartbeat interval in seconds (default 30).
         #[arg(long)]
         heartbeat_secs: Option<u64>,
+        /// How the simulated employee answers remote-access consent prompts:
+        /// allow, deny or ignore (let them time out).
+        #[arg(long, default_value = "allow")]
+        sim_consent: kestrel_agent::sim::SimConsent,
+    },
+    /// Remote desktop capture helper (Windows): started by the agent service
+    /// in the interactive session; talks to it over the named pipe `--pipe`
+    /// and exits with the parent `--parent`. Not for manual use.
+    #[command(hide = true)]
+    DesktopHelper {
+        #[arg(long)]
+        pipe: String,
+        #[arg(long)]
+        parent: u32,
     },
     /// CI smoke test (Windows): start only the sensors for N seconds and print
     /// observed event counts as JSON. No server connection, no detection or response.
@@ -210,6 +224,7 @@ fn real_main() -> Result<()> {
         .unwrap_or_else(config::default_state_dir);
     match cli.cmd {
         Cmd::Run { console } => run(state_dir, console),
+        Cmd::DesktopHelper { pipe, parent } => desktop_helper(&pipe, parent),
         Cmd::UpdateKeygen { out } => {
             let g = kestrel_agent::update::keygen(&out)?;
             eprintln!(
@@ -240,6 +255,19 @@ fn real_main() -> Result<()> {
                 .build()?;
             rt.block_on(dispatch(state_dir, other))
         }
+    }
+}
+
+/// Remote desktop helper (runs in the user's session, spawned by the service).
+fn desktop_helper(pipe: &str, parent: u32) -> Result<()> {
+    #[cfg(all(windows, feature = "win-platform"))]
+    {
+        kestrel_win::run_desktop_helper(pipe, parent)
+    }
+    #[cfg(not(all(windows, feature = "win-platform")))]
+    {
+        let _ = (pipe, parent);
+        bail!("the remote desktop helper is only available in the Windows build of the agent")
     }
 }
 
@@ -275,7 +303,10 @@ fn run(state_dir: PathBuf, console: bool) -> Result<()> {
 
 async fn dispatch(state_dir: PathBuf, cmd: Cmd) -> Result<()> {
     match cmd {
-        Cmd::Run { .. } | Cmd::UpdateKeygen { .. } | Cmd::UpdateSign { .. } => unreachable!(),
+        Cmd::Run { .. }
+        | Cmd::UpdateKeygen { .. }
+        | Cmd::UpdateSign { .. }
+        | Cmd::DesktopHelper { .. } => unreachable!(),
         Cmd::Install {
             server,
             group_tag,
@@ -387,6 +418,7 @@ async fn dispatch(state_dir: PathBuf, cmd: Cmd) -> Result<()> {
             hostname,
             exit_after_replay,
             heartbeat_secs,
+            sim_consent,
         } => {
             if !(speed > 0.0 && speed.is_finite()) {
                 bail!("--speed must be > 0");
@@ -404,6 +436,7 @@ async fn dispatch(state_dir: PathBuf, cmd: Cmd) -> Result<()> {
                 speed,
                 hostname,
                 exit_after_replay: exit_after_replay.map(Duration::from_secs),
+                consent: sim_consent,
             };
             commands::simulate(&state_dir, o, tuning).await
         }

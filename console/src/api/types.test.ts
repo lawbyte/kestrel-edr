@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { Alert, Group, KEvent, Policy, ResponseAction, UpdateRelease } from './types'
-import { DATA_CATEGORIES, EVENT_KINDS, GROUP_UPDATE_RINGS, SEVERITIES } from './types'
+import { DATA_CATEGORIES, EVENT_KINDS, GROUP_UPDATE_RINGS, REMOTE_ERROR_CODES, SEVERITIES } from './types'
+import type { DesktopServerMsg, EnrollmentToken, FileEntry, FileListResponse, RemoteAccessInfo } from './types'
+import { REMOTE_ERROR_TEXT } from './remote'
+import { normaliseProfile, presetOf, profileGuarded } from '@/lib/remote-profile'
 import { DATA_CATEGORY_LABEL, DATA_CATEGORY_REMEDIATION, EVENT_KIND_LABEL, actionPrivilege, describeAction, unblockFor } from '@/lib/labels'
 import { pathClassOf } from '@/lib/pathclass'
 import { describeEvent } from '@/lib/events'
@@ -160,5 +163,39 @@ describe('agent update contract', () => {
     // An unscoped destination block without a block id cannot be targeted.
     expect(unblockFor({ type: 'block_destination', ip: '1.2.3.4' }, 'not a valid id!')).toBeNull()
     expect(unblockFor({ type: 'isolate_host' }, 'x')).toBeNull()
+  })
+})
+
+describe('remote access shapes (kestrel_common::remote)', () => {
+  it('parses FileEntry / FileListResponse as serde writes them', () => {
+    const j = `{"path":"C:\\\\","parent":"","entries":[{"name":"C:\\\\","path":"C:\\\\","kind":"drive","size":0,"modified":null,"attributes":16,"hidden":false,"readonly":false,"reparse":false,"free_bytes":10,"total_bytes":20,"label":"Local Disk"},{"name":"Docs","path":"C:\\\\Docs","kind":"dir","size":0,"modified":1760000000000,"attributes":1040,"hidden":false,"readonly":false,"reparse":true,"free_bytes":null,"total_bytes":null,"label":null}],"truncated":false}`
+    const r = JSON.parse(j) as FileListResponse
+    expect(r.entries.map((e: FileEntry) => e.kind)).toEqual(['drive', 'dir'])
+    expect(r.entries[1].reparse).toBe(true)
+  })
+  it('parses every DesktopServerMsg variant and the error codes', () => {
+    const msgs = [
+      '{"type":"starting","session_id":"s","view_only":true}',
+      '{"type":"consent_pending","timeout_secs":60}',
+      '{"type":"started","width":1920,"height":1080,"monitors":2,"session_id":1,"secure_desktop":false,"view_only":false}',
+      '{"type":"info","width":1280,"height":720}',
+      '{"type":"ended","reason":"idle","code":null}',
+      '{"type":"error","message":"x"}',
+      '{"type":"pong"}',
+    ].map((s) => JSON.parse(s) as DesktopServerMsg)
+    expect(msgs.map((m) => m.type)).toEqual(['starting', 'consent_pending', 'started', 'info', 'ended', 'error', 'pong'])
+    expect(REMOTE_ERROR_CODES).toHaveLength(20)
+    for (const c of REMOTE_ERROR_CODES) expect(REMOTE_ERROR_TEXT[c]).toBeTruthy()
+  })
+  it('round-trips profiles, device remote_access and enrollment tokens', () => {
+    const g = profileGuarded()
+    expect(JSON.parse(JSON.stringify(g))).toEqual(g)
+    const ra = JSON.parse(
+      `{"desktop":{"available":false,"reason":"not_permitted"},"files":{"available":true,"reason":null},"ceiling":${JSON.stringify(g)},"ceiling_summary":"x","policy":${JSON.stringify(g)},"effective":${JSON.stringify(g)},"effective_summary":"y","agent_reported_ceiling":null}`,
+    ) as RemoteAccessInfo
+    expect(ra.desktop.reason).toBe('not_permitted')
+    expect(normaliseProfile(ra.effective)).toEqual(g)
+    const t = JSON.parse('{"id":"t","group_id":"g","group_name":"G","token_prefix":"kse_","created_at":1,"expires_at":2,"max_uses":1,"uses":0,"revoked":false,"remote_profile":{"desktop":"off","files":"off"},"remote_summary":"No remote access","remote_preset":"none"}') as EnrollmentToken
+    expect(presetOf(normaliseProfile(t.remote_profile))).toBe('none')
   })
 })

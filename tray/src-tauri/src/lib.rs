@@ -6,10 +6,11 @@
 //! the tray protocol only; it has no ability to change protection.
 
 pub mod client;
+pub mod consent;
 pub mod mock;
 pub mod protocol;
 
-use client::{backoff, read_response, send, Client, ClientError};
+use client::{backoff, open_subscription, read_response_lenient, Client, ClientError};
 use protocol::*;
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
@@ -35,6 +36,8 @@ const EV_CONNECTION: &str = "kestrel://connection";
 const EV_STATUS: &str = "kestrel://status";
 const EV_NAVIGATE: &str = "kestrel://navigate";
 const EV_QUICK_CHECK: &str = "kestrel://quick-check";
+const EV_REMOTE_SESSION: &str = "kestrel://remote-session";
+const EV_CONSENT_REQUEST: &str = "kestrel://consent-request";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,6 +59,8 @@ struct AppState {
     tray_anchor: Mutex<Option<(f64, f64, f64, f64)>>,
     /// Mica backdrop applied (Windows 11). The UI uses translucent surfaces only then.
     mica: Mutex<bool>,
+    /// IT consent requests waiting for the employee's answer.
+    consents: Mutex<consent::ConsentQueue>,
 }
 
 #[derive(Clone, Serialize)]
@@ -88,9 +93,24 @@ fn tray_png(s: Option<ProtectionState>) -> &'static [u8] {
 }
 
 /// Tooltip text; the state is always spelled out (not conveyed by colour alone).
+/// An active IT remote session is named first so it's never hidden by truncation.
 fn tray_tooltip(s: Option<&TrayStatus>) -> String {
     match s {
         None => "Kestrel: service isn't running. Contact IT.".into(),
+        Some(st) if st.remote_session.as_ref().is_some_and(|r| r.active) => {
+            let r = st.remote_session.as_ref().expect("checked above");
+            let who = r.admin_name.trim();
+            let who = if who.is_empty() { "IT" } else { who };
+            let what = match (r.kind, r.view_only) {
+                (RemoteKind::Files, _) => "accessing your files",
+                (RemoteKind::Desktop, true) => "viewing your screen",
+                (RemoteKind::Desktop, false) => "controlling your screen",
+            };
+            format!("Kestrel: IT is connected\n{who} is {what}")
+                .chars()
+                .take(127)
+                .collect()
+        }
         Some(st) => {
             let label = match st.state {
                 ProtectionState::Protected => "Protected",
@@ -436,30 +456,137 @@ async fn run_subscriber(app: AppHandle) {
 }
 
 async fn subscribe_once(app: &AppHandle, client: &Client) -> Result<(), ClientError> {
-    let mut conn = client.connect().await?;
-    send(&mut conn, &TrayRequest::Subscribe).await?;
-    match tokio::time::timeout(REQ_TIMEOUT, read_response(&mut conn)).await {
-        Ok(Ok(Some(TrayResponse::Ack { ok: true, .. }))) => {}
-        Ok(Ok(Some(TrayResponse::Error { message }))) => return Err(ClientError::Agent(message)),
-        Ok(Ok(Some(other))) => {
-            return Err(ClientError::Protocol(format!(
-                "expected ack, got {other:?}"
-            )))
-        }
-        Ok(Ok(None)) => return Err(ClientError::Unavailable("closed during subscribe".into())),
-        Ok(Err(e)) => return Err(e),
-        Err(_) => return Err(ClientError::Timeout("subscribe".into())),
+    // Ask for remote-session + consent pushes; older agents get a plain `Subscribe`.
+    let sub = open_subscription(
+        client,
+        &[FEATURE_REMOTE_SESSION, FEATURE_REMOTE_CONSENT],
+        REQ_TIMEOUT,
+    )
+    .await?;
+    if sub.features.is_empty() {
+        log::info!(
+            "agent doesn't support subscribe_with; remote-session state comes from status polling"
+        );
     }
+    let mut conn = sub.conn;
     // Connected: refresh status so the tray icon is right immediately.
     let _ = get_status(app.clone()).await;
     loop {
-        match read_response(&mut conn).await? {
+        match read_response_lenient(&mut conn).await? {
             None => return Ok(()),
-            Some(TrayResponse::Notification(item)) => on_push(app, item),
-            Some(TrayResponse::Status(s)) => record_status(app, &s),
-            Some(other) => log::debug!("ignoring push {other:?}"),
+            Some(Ok(TrayResponse::Notification(item))) => on_push(app, item),
+            Some(Ok(TrayResponse::Status(s))) => record_status(app, &s),
+            Some(Ok(TrayResponse::RemoteSession(n))) => on_remote_session(app, n),
+            Some(Ok(TrayResponse::ConsentRequest(r))) => on_consent_request(app, r),
+            Some(Ok(other)) => log::debug!("ignoring push {other:?}"),
+            // A newer agent may push kinds this tray doesn't know: skip the line.
+            Some(Err(e)) => log::warn!("ignoring unparseable push: {e}"),
         }
     }
+}
+
+/// IT asks to connect: queue it, bring the flyout to the front with the
+/// Allow / Deny prompt, and raise a toast pointing to it. No answer = deny.
+fn on_consent_request(app: &AppHandle, req: ConsentRequest) {
+    let fresh = state(app)
+        .consents
+        .lock()
+        .unwrap()
+        .push(req.clone(), now_ms());
+    let _ = app.emit(EV_CONSENT_REQUEST, req.clone());
+    if !fresh {
+        return; // expired, duplicate or queue full: no second toast
+    }
+    show_main(app);
+    let org = state(app)
+        .last_status
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| s.org_name.clone())
+        .unwrap_or_default();
+    let title = if org.is_empty() {
+        "Kestrel: IT wants to connect".to_string()
+    } else {
+        format!("Kestrel for {org}: IT wants to connect")
+    };
+    if let Err(e) = app
+        .notification()
+        .builder()
+        .title(title)
+        .body(consent::consent_toast_body(&req))
+        .show()
+    {
+        log::warn!("toast failed: {e}");
+    }
+}
+
+/// Requests still waiting for an answer (the UI loads these when it starts).
+#[tauri::command]
+fn get_pending_consents(app: AppHandle) -> Vec<ConsentRequest> {
+    state(&app).consents.lock().unwrap().pending(now_ms())
+}
+
+/// Send the employee's answer on a fresh request connection.
+#[tauri::command]
+async fn respond_consent(
+    app: AppHandle,
+    request_id: String,
+    allow: bool,
+) -> Result<Ack, ClientError> {
+    let request_id =
+        uuid::Uuid::parse_str(&request_id).map_err(|e| ClientError::Protocol(e.to_string()))?;
+    let client = state(&app).client.clone();
+    let res = client
+        .request(
+            &TrayRequest::ConsentResponse { request_id, allow },
+            REQ_TIMEOUT,
+        )
+        .await;
+    match res {
+        Ok(TrayResponse::Ack { ok, message }) => {
+            state(&app).consents.lock().unwrap().remove(&request_id);
+            Ok(Ack { ok, message })
+        }
+        Ok(other) => Err(ClientError::Protocol(format!(
+            "unexpected response: {other:?}"
+        ))),
+        Err(e) => {
+            // The agent rejected it (expired / unknown): it can't be answered again.
+            if matches!(e, ClientError::Agent(_)) {
+                state(&app).consents.lock().unwrap().remove(&request_id);
+            }
+            note_err(&app, &e);
+            Err(e)
+        }
+    }
+}
+
+/// Patch the cached status with a remote-session push (`None` once it ends).
+fn apply_remote_session(status: &mut TrayStatus, n: &RemoteSessionNotice) {
+    status.remote_session = n.active.then(|| n.clone());
+}
+
+/// Remote-session pushes drive UI state only: the agent also sends a regular
+/// `Notification` for start/end, which produces the toast.
+fn on_remote_session(app: &AppHandle, n: RemoteSessionNotice) {
+    let patched = {
+        let st = state(app);
+        let mut g = st.last_status.lock().unwrap();
+        g.as_mut().map(|s| {
+            apply_remote_session(s, &n);
+            s.clone()
+        })
+    };
+    if let Some(s) = &patched {
+        update_tray(app, Some(s));
+        let _ = app.emit(EV_STATUS, s.clone());
+    }
+    let _ = app.emit(EV_REMOTE_SESSION, n);
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = get_status(app2).await;
+    });
 }
 
 fn on_push(app: &AppHandle, item: ActivityItem) {
@@ -591,6 +718,7 @@ pub fn run() {
             blur_hidden_at: Mutex::new(None),
             tray_anchor: Mutex::new(None),
             mica: Mutex::new(false),
+            consents: Mutex::new(consent::ConsentQueue::default()),
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
@@ -601,7 +729,9 @@ pub fn run() {
             get_window_mode,
             set_window_mode,
             mica_enabled,
-            hide_window
+            hide_window,
+            get_pending_consents,
+            respond_consent
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -625,9 +755,11 @@ pub fn run() {
                     api.prevent_close();
                     let _ = window.hide();
                 }
+                // A pending IT consent prompt keeps the flyout open until answered or expired.
                 WindowEvent::Focused(false)
                     if *state(app).mode.lock().unwrap() == WindowMode::Flyout
-                        && window.is_visible().unwrap_or(false) =>
+                        && window.is_visible().unwrap_or(false)
+                        && state(app).consents.lock().unwrap().is_empty(now_ms()) =>
                 {
                     *state(app).blur_hidden_at.lock().unwrap() = Some(Instant::now());
                     let _ = window.hide();
@@ -662,6 +794,38 @@ mod tests {
         s.org_name = "x".repeat(400);
         assert!(tray_tooltip(Some(&s)).chars().count() <= 127);
         assert!(tray_tooltip(None).contains("isn't running"));
+    }
+
+    #[test]
+    fn tooltip_names_remote_session_first() {
+        let mut s = mock::sample_status(ProtectionState::Protected);
+        s.remote_session = Some(mock::sample_remote_session(false));
+        let t = tray_tooltip(Some(&s));
+        assert!(t.starts_with("Kestrel: IT is connected"));
+        assert!(t.contains("Rina Wijaya is controlling your screen"));
+        s.remote_session = Some(mock::sample_remote_session(true));
+        assert!(tray_tooltip(Some(&s)).contains("viewing your screen"));
+        s.remote_session.as_mut().unwrap().kind = RemoteKind::Files;
+        assert!(tray_tooltip(Some(&s)).contains("accessing your files"));
+        s.remote_session.as_mut().unwrap().admin_name = "x".repeat(400);
+        assert!(tray_tooltip(Some(&s)).chars().count() <= 127);
+        s.remote_session.as_mut().unwrap().active = false;
+        assert_eq!(
+            tray_tooltip(Some(&s)),
+            "Kestrel: Protected\nNusantara Logistik"
+        );
+    }
+
+    #[test]
+    fn remote_push_patches_status() {
+        let mut s = mock::sample_status(ProtectionState::Protected);
+        let mut n = mock::sample_remote_session(true);
+        apply_remote_session(&mut s, &n);
+        assert_eq!(s.remote_session.as_ref(), Some(&n));
+        n.active = false;
+        n.ended_at = Some(n.started_at + 1);
+        apply_remote_session(&mut s, &n);
+        assert_eq!(s.remote_session, None);
     }
 
     #[test]

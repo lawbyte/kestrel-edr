@@ -584,3 +584,77 @@ pub async fn mfa_disable(
     .await;
     Ok(StatusCode::NO_CONTENT)
 }
+
+/// `POST /me/reauth {totp}` — MFA step-up for remote access guardrails
+/// (`require_mfa_reauth`): valid for 10 minutes on this console session.
+/// Session only (CSRF checked by the extractor); failures are throttled like
+/// login (exponential backoff per account) and audited as `auth.reauth`.
+pub async fn reauth(
+    State(st): State<AppState>,
+    p: Principal,
+    ApiJson(b): ApiJson<TotpBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    p.require_session()?;
+    let Via::Session { token_hash, .. } = &p.via else {
+        return Err(ApiError::forbidden("sign in to the console"));
+    };
+    if !p.user.mfa_enabled {
+        return Err(ApiError::forbidden(
+            "multi-factor authentication is not enabled for this account",
+        )
+        .with_extra(json!({"reason": "mfa_not_enabled"})));
+    }
+    let key = format!("reauth:{}", p.user.id);
+    let now = now_ms();
+    if let Some(wait) = st.login_throttle.wait_ms(&key, BACKOFF_EMAIL_IP, now) {
+        return Err(ApiError::rate_limited(format!(
+            "too many wrong codes, try again in {} s",
+            (wait + 999) / 1000
+        ))
+        .with_extra(json!({"retry_after_ms": wait})));
+    }
+    let secret = p
+        .user
+        .totp_secret_enc
+        .as_deref()
+        .map(|e| st.mk.open_str(e))
+        .transpose()?
+        .unwrap_or_default();
+    let step = crypto::totp_for(&secret, &p.user.email).ok().and_then(|t| {
+        crypto::totp_verify_step(
+            &t,
+            b.totp.trim(),
+            (now / 1000) as u64,
+            p.user.totp_last_step,
+        )
+    });
+    let ok = match step {
+        Some(step) => consume_totp_step(&st, p.user.id, step).await?,
+        None => false,
+    };
+    audit::log(
+        &st.db,
+        &p.actor(),
+        "auth.reauth",
+        p.user.id.to_string(),
+        json!({"ok": ok, "ip": p.ip}),
+    )
+    .await;
+    if !ok {
+        st.login_throttle.fail(&key, now_ms());
+        // 400, not 401: the console treats 401 as "signed out".
+        return Err(
+            ApiError::bad_request("invalid code").with_extra(json!({"reason": "invalid_totp"}))
+        );
+    }
+    st.login_throttle.clear(&key);
+    let at = now_ms();
+    sqlx::query("UPDATE sessions SET reauth_at = $2 WHERE token_hash = $1")
+        .bind(token_hash)
+        .bind(at)
+        .execute(&st.db)
+        .await?;
+    Ok(Json(
+        json!({"reauth_until": at + crate::remote::REAUTH_VALID_MS}),
+    ))
+}

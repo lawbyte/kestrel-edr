@@ -79,6 +79,9 @@ pub async fn create(
     pol.version = version as u64;
     pol.exclusions.clear();
     pol.iocs.clear();
+    pol.remote_access
+        .validate()
+        .map_err(|e| ApiError::bad_request(format!("invalid remote_access: {e}")))?;
     let now = now_ms();
     sqlx::query("INSERT INTO policies (id, name, version, body, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$5)")
         .bind(&id)
@@ -154,6 +157,9 @@ pub async fn replace(
             "ioc_block_ttl_secs must be between 60 and 2592000 (30 days)",
         ));
     }
+    pol.remote_access
+        .validate()
+        .map_err(|e| ApiError::bad_request(format!("invalid remote_access: {e}")))?;
     // Exclusions and IOCs are managed through /exclusions and /iocs.
     pol.exclusions.clear();
     pol.iocs.clear();
