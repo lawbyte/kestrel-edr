@@ -10,3 +10,7 @@ tray/src-tauri/target/
 # local-only agent context (secrets)
 CLAUDE.local.md
 .claude/settings.local.json
+
+# Built agent installer served by the server (not source)
+deploy/installers/KestrelAgent.msi
+deploy/installers/VERSION

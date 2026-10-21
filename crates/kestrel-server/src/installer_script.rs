@@ -95,7 +95,10 @@ try {
     # The console may use a self-signed certificate. The package is pinned by
     # the SHA-256 below, so download it without certificate validation.
     Write-Host 'The server certificate is not trusted by Windows; relying on the SHA-256 check.'
-    [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+    # A compiled callback: .NET invokes it on a worker thread, where a
+    # PowerShell scriptblock fails with "There is no Runspace available".
+    Add-Type -TypeDefinition 'public static class KestrelSetupTrust { public static bool AcceptAll(object s, System.Security.Cryptography.X509Certificates.X509Certificate c, System.Security.Cryptography.X509Certificates.X509Chain ch, System.Net.Security.SslPolicyErrors e) { return true; } }'
+    [Net.ServicePointManager]::ServerCertificateValidationCallback = [System.Delegate]::CreateDelegate([System.Net.Security.RemoteCertificateValidationCallback], [KestrelSetupTrust].GetMethod('AcceptAll'))
     Invoke-WebRequest -UseBasicParsing -Uri $env:KESTREL_MSI_URL -OutFile $msi
     [Net.ServicePointManager]::ServerCertificateValidationCallback = $null
   }
@@ -166,6 +169,8 @@ pub fn render(p: &ScriptParams) -> Result<String, String> {
         "rem  the only secret in this file: treat the file like a password.".into(),
         "rem  The banner and notification shown during remote sessions cannot be".into(),
         "rem  turned off by any profile.".into(),
+        "rem  Silent deployment (GPO, Intune, RMM, run as SYSTEM or admin):".into(),
+        "rem    Install-Kestrel.cmd /quiet".into(),
         "rem ======================================================================".into(),
         "setlocal".into(),
         "set \"KESTREL_SELF=%~f0\"".into(),
@@ -183,7 +188,8 @@ pub fn render(p: &ScriptParams) -> Result<String, String> {
         ),
         "set \"KESTREL_RC=%ERRORLEVEL%\"".into(),
         "echo Installer finished with exit code %KESTREL_RC%.".into(),
-        "pause".into(),
+        // Silent deployment (GPO, Intune, RMM): `/quiet` never waits for a key.
+        "if /i not \"%~1\"==\"/quiet\" pause".into(),
         "exit /b %KESTREL_RC%".into(),
         ":elevate".into(),
         "echo Administrator rights are required. Asking Windows to elevate...".into(),
@@ -194,7 +200,7 @@ pub fn render(p: &ScriptParams) -> Result<String, String> {
         "exit /b 0".into(),
         ":noadmin".into(),
         "echo Could not get administrator rights. Right-click this file and choose Run as administrator.".into(),
-        "pause".into(),
+        "if /i not \"%~1\"==\"/quiet\" pause".into(),
         "exit /b 1".into(),
     ];
     let mut out = lines.join("\r\n");

@@ -403,6 +403,13 @@ async fn dispatch(state_dir: PathBuf, cmd: Cmd) -> Result<()> {
                 std::fs::remove_dir_all(&state_dir)
                     .with_context(|| format!("removing {}", state_dir.display()))?;
                 println!("Removed {}", state_dir.display());
+            } else {
+                // A reinstall must enroll afresh (new device, the new token's
+                // remote-access ceiling); quarantine and logs are kept.
+                let removed = commands::retire_identity(&state_dir)?;
+                if !removed.is_empty() {
+                    println!("Device identity removed ({})", removed.join(", "));
+                }
             }
             Ok(())
         }

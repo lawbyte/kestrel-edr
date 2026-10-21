@@ -340,6 +340,38 @@ pub fn verify_uninstall(state_dir: &Path, token: &str) -> Result<AgentConfig> {
     Ok(cfg)
 }
 
+/// After a real uninstall (never a verified major upgrade, which does not run
+/// `uninstall`): forget the enrolled identity, so a later install with a new
+/// enrollment token enrolls as a new device and pins that token's
+/// remote-access ceiling. Removes the client key and certificate, the config
+/// (device id, pinned ceiling, uninstall-token hash) and the outbox of the
+/// old device. Keeps evidence and restore state: `quarantine/`, `logs/`,
+/// `triage/`, and the hardening/WFP/canary state files the next agent needs
+/// to undo what this one changed. Returns the names removed.
+pub fn retire_identity(state_dir: &Path) -> Result<Vec<String>> {
+    let mut removed = Vec::new();
+    let keys = state_dir.join(config::KEYS_DIR);
+    if keys.is_dir() {
+        std::fs::remove_dir_all(&keys).with_context(|| format!("removing {}", keys.display()))?;
+        removed.push(config::KEYS_DIR.to_string());
+    }
+    let wal = format!("{}-wal", store::DB_FILE);
+    let shm = format!("{}-shm", store::DB_FILE);
+    for name in [
+        config::CONFIG_FILE,
+        store::DB_FILE,
+        wal.as_str(),
+        shm.as_str(),
+    ] {
+        let p = state_dir.join(name);
+        if p.is_file() {
+            std::fs::remove_file(&p).with_context(|| format!("removing {}", p.display()))?;
+            removed.push(name.to_string());
+        }
+    }
+    Ok(removed)
+}
+
 /// Upper bound on events written by `sensors-test --events-out`.
 pub const SENSORS_TEST_MAX_EVENTS: u64 = 500_000;
 
@@ -527,4 +559,48 @@ pub async fn sensors_test(
             "amsi_ok": s.amsi_ok,
         },
     }))
+}
+
+#[cfg(test)]
+mod retire_tests {
+    use super::*;
+
+    #[test]
+    fn retire_identity_forgets_enrollment_but_keeps_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for sub in [config::KEYS_DIR, "quarantine", "logs", "triage"] {
+            std::fs::create_dir_all(d.join(sub)).unwrap();
+        }
+        std::fs::write(d.join(config::KEYS_DIR).join("client.key"), "k").unwrap();
+        std::fs::write(d.join("quarantine").join("item.bin"), "q").unwrap();
+        for f in [
+            config::CONFIG_FILE,
+            store::DB_FILE,
+            "agent.db-wal",
+            "agent.db-shm",
+            "hardening_state.json",
+            "wfp_state.json",
+        ] {
+            std::fs::write(d.join(f), "x").unwrap();
+        }
+        let removed = retire_identity(d).unwrap();
+        assert_eq!(
+            removed,
+            vec![
+                "keys",
+                "agent.toml",
+                "agent.db",
+                "agent.db-wal",
+                "agent.db-shm"
+            ]
+        );
+        assert!(!d.join(config::KEYS_DIR).exists());
+        assert!(!d.join(config::CONFIG_FILE).exists());
+        assert!(d.join("quarantine").join("item.bin").is_file());
+        assert!(d.join("logs").is_dir() && d.join("triage").is_dir());
+        assert!(d.join("hardening_state.json").is_file() && d.join("wfp_state.json").is_file());
+        // Idempotent.
+        assert!(retire_identity(d).unwrap().is_empty());
+    }
 }
