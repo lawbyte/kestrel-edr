@@ -104,7 +104,7 @@ $ST = [ordered]@{
     'ST-11' = { Invoke-AsUser 'st11' "Start-Process cmd.exe '/c nslookup example.com 8.8.8.8'; Start-Sleep 5" }
     'ST-12' = { Invoke-AsUser 'st12' "& `"`$env:USERPROFILE\Downloads\kestrel-unsigned.exe`" | Out-Null" }
     'ST-14' = { Invoke-Labsim 'st14' "Resolve-DnsName api.telegram.org -ErrorAction SilentlyContinue | Out-Null; try { Invoke-WebRequest https://api.telegram.org -Method Head -UseBasicParsing -TimeoutSec 10 | Out-Null } catch {}" }
-    'ST-16' = { Invoke-Labsim 'st16' "`$d = Get-ChildItem '$EdgeUD' -Directory | ? Name -match '^Profile (5[1-9]|[6-8]\d|9[0-8])$' | Select -First 1; if (`$d) { Get-Content -Encoding Byte -TotalCount 16 (Join-Path `$d.FullName 'Login Data') | Out-Null }" }
+    'ST-16' = { Invoke-Labsim 'st16' "`$d = Get-ChildItem '$EmpProfile\AppData\Local\Google\Chrome\User Data' -Directory | ? Name -match '^Profile (5[1-9]|[6-8]\d|9[0-8])$' | Select -First 1; if (`$d) { Get-Content -Encoding Byte -TotalCount 16 (Join-Path `$d.FullName 'Login Data') | Out-Null }" }
     'TP-01' = { & cmd.exe /c "$Root\emulate-cmd.cmd" TP-01 }
     'TP-03' = { & cmd.exe /c "$Root\emulate-cmd.cmd" TP-03 }
     'TP-04' = { & cmd.exe /c "$Root\emulate-cmd.cmd" TP-04 }
