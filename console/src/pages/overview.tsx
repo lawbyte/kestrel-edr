@@ -263,7 +263,7 @@ function TrendChart({ data }: { data: Dashboard['alert_trend'] }) {
       ) : (
         <div className="h-56" role="img" aria-label="Stacked bar chart of daily alerts by severity over the last 14 days">
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={rows} margin={{ top: 4, right: 4, bottom: 0, left: -24 }} barCategoryGap="28%">
+            <BarChart data={rows} margin={{ top: 4, right: 4, bottom: 0, left: -8 }} barCategoryGap="28%">
               <CartesianGrid vertical={false} stroke="var(--chart-grid)" />
               <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: 'var(--fg-subtle)' }} interval="preserveStartEnd" minTickGap={16} />
               <YAxis allowDecimals={false} tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: 'var(--fg-subtle)' }} width={44} />

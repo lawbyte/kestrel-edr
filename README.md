@@ -2,6 +2,8 @@
 
 Kestrel is a self-hosted endpoint detection and response (EDR) product for Windows, built to catch **infostealers** (Lumma, Vidar, StealC, Rhadamanthys and similar malware) while they work. These programs read browser passwords, cookies, crypto wallets and messenger sessions, then upload them. Kestrel watches for exactly that behaviour, contains the process, and gives IT one incident that says what was taken and what to rotate.
 
+Since v1.1 it also covers the steps around a hands-on intrusion: **ransomware** preparation and encryption, **credential dumping** (LSASS, hives, NTDS) and **persistence** (Run keys, Startup, tasks, services, WMI, IFEO, Winlogon, COM), plus a curated **SigmaHQ** pack in Audit.
+
 It has four parts:
 
 * **Agent** (`kestrel-agent`): a Windows service written in Rust. It reads ETW sensors, runs the detection engine on the device, and contains threats.
@@ -9,11 +11,11 @@ It has four parts:
 * **Admin console**: a React app served by the server.
 * **Tray app**: a small Tauri app for employees. It shows status, explains blocks in plain language and lets the employee request a review.
 
-> **Status: v1, user-mode only.** Read the limits section before you rely on it.
+> **Status: v1.1.0-rc1, user-mode only.** Validated on Windows 11 (26100) in a disposable lab VM. Read the limits section before you rely on it.
 
 ## What it does
 
-* **Stealer detection on the device.** There are 16 behavioural rules (`ST-01`…`ST-16`) and 5 tamper rules (`TP-01`…`TP-05`). They run in the agent, so detection and containment still work while the device is offline.
+* **Detection on the device.** 54 built-in behavioural rules: stealer (`ST-01`…`ST-16`), ransomware (`RW-xx`), credential dumping (`CD-xx`), persistence (`PS-xx`) and tamper (`TP-01`…`TP-05`), plus 70 SigmaHQ rules in Audit. They run in the agent, so detection and containment still work while the device is offline.
 * **Suspend on suspicion.** When an untrusted process opens a credential store or decrypts browser secrets with DPAPI, the agent freezes it for a short window (3 s by default). It kills the process if a stronger rule confirms the theft, and resumes it otherwise.
 * **Response actions.** These can be automatic (rules in Protect mode) or issued by an analyst from the console:
   * kill or suspend/resume a process or process tree
@@ -61,7 +63,10 @@ It has four parts:
 
 * **User mode only. There is no kernel driver.** Telemetry comes from ETW and the event log, so it arrives asynchronously, typically within about 1 s on the core session and up to about 5 s for file and network events. A fast stealer can read and send some data before the agent reacts. Kestrel aims to **detect fast and contain fast**, and it does not guarantee prevention. The incident checklist assumes the data may have left the device, and says so.
 * An attacker with administrator or SYSTEM rights can blind ETW, stop sessions or remove WFP filters. The `TP-*` rules and the agent's watchdog detect and repair much of this, but a user-mode agent cannot fully defend itself against an admin.
-* The Windows sensor layer has been unit-tested, cross-compiled and smoke-tested in CI. It still needs validation on real Windows 11 hardware: see [docs/TESTING-ON-WINDOWS.md](docs/TESTING-ON-WINDOWS.md) for the known-risk list.
+* The Windows sensor layer has been validated on Windows 11 Enterprise 26100 in a disposable QEMU/KVM lab: install, all sensors, a benign emulation per rule, Protect actions, isolation and break-glass, upgrade and uninstall. It has not yet run on a fleet of physical machines or with Office/OneDrive-heavy workloads: see [docs/TESTING-ON-WINDOWS.md](docs/TESTING-ON-WINDOWS.md) and [docs/HANDOFF.md](docs/HANDOFF.md).
+* Registry writes are attributed to a process by joining ETW with a registry watcher, because Windows 11 omits the key name in the ETW event. When more than one process could have written a value, Kestrel removes the autorun but does not act on any process, and the alert says the writer was inferred.
+* Ransomware encrypting your files from **another** computer over SMB shows up as the System process: Kestrel alerts but cannot kill the remote encryptor.
+* The binaries are not code-signed yet. Microsoft Defender currently flags the unsigned agent (a heuristic on its credential-store path tables); sign it before deployment (see [docs/BUILDING.md](docs/BUILDING.md)).
 * Only Windows endpoints. The agent core and simulator also run on Linux and macOS for development, but there is no real sensor layer for them.
 * Alert grouping and the hunt language are deliberately simple (see [docs/contracts.md](docs/contracts.md)).
 
@@ -91,7 +96,47 @@ It has four parts:
 | TP-04 | Agent service or file tampering | Audit |
 | TP-05 | Telemetry loss | Audit |
 
-The four **Protect** rules are the "safe on day one" set. Run everything else in Audit for about two weeks first. The console's Rules page shows each rule's logic, its ATT&CK mapping, its Protect action and known false positives.
+Ransomware, credential dumping and persistence (v1.1):
+
+| Id | Rule | Default |
+|---|---|---|
+| RW-01 | Shadow copy / backup catalog deletion | **Protect** |
+| RW-02 | Boot recovery disabled | **Protect** |
+| RW-03 | Safe-mode boot staging | **Protect** |
+| RW-04 | Event log cleared or shrunk | Audit |
+| RW-05 | Service / process kill spree | **Protect** |
+| RW-06 | Mass file encryption behaviour | **Protect** |
+| RW-07 | Ransomware canary tampered | **Protect** |
+| RW-08 | Ransom-note fan-out | **Protect** |
+| RW-12 | Ransomware kill-chain correlation | **Protect** |
+| CD-01 | LSASS memory dump via comsvcs MiniDump | **Protect** |
+| CD-02 | Known LSASS dumping tool | **Protect** |
+| CD-03 | Suspicious LSASS handle request | Audit |
+| CD-04 | LSASS handle followed by a dump file | **Protect** |
+| CD-05 | Debug library dump helper reading LSASS | **Protect** |
+| CD-06 | Blocked LSASS access attempt | Audit |
+| CD-07 | LSASS dump preparation via SilentProcessExit / IFEO | **Protect** |
+| CD-08 | LSASS dump via Windows Error Reporting | **Protect** |
+| CD-09 | Malicious LSA security package | Audit |
+| CD-10 | Credential hive save or copy | **Protect** |
+| CD-11 | NTDS.dit extraction | Audit |
+| CD-12 | WDigest cleartext credential downgrade | **Protect** |
+| CD-13 | LSA protection / Credential Guard tamper | Audit |
+| PS-01 | Run key to untrusted payload | Audit |
+| PS-02 | Autorun via script host or LOLBin | **Protect** |
+| PS-03 | Startup-folder drop | **Protect** |
+| PS-04 | Startup folder redirection | Audit |
+| PS-05 | Scheduled task with untrusted action | Audit |
+| PS-07 | Suspicious service install | **Protect** |
+| PS-08 | WMI permanent event subscription | **Protect** |
+| PS-09 | IFEO / SilentProcessExit hijack | **Protect** |
+| PS-10 | Winlogon / AppInit / AppCert / BootExecute change | **Protect** |
+| PS-11 | COM hijack in user hive | Audit |
+| PS-15 | Persistence rollback | **Protect** |
+
+Persistence rules in Protect remove the autorun, after backing up the original in the quarantine vault. They act on the writing process only when Kestrel knows exactly which process wrote it. The 70-rule **SigmaHQ pack** (`SIG-<uuid8>`) is seeded in Audit; the console shows each rule's authors and the DRL 1.1 licence.
+
+The **Protect** rules are the "safe on day one" set. Run everything else in Audit for about two weeks first. The console's Rules page shows each rule's logic, its ATT&CK mapping, its Protect action and known false positives.
 
 ## Architecture
 
@@ -177,7 +222,7 @@ These are the main screens:
 * **Review requests**
 * **Settings**: users, SSO, MFA, notifications, retention, API tokens and the audit log
 
-Screenshots taken against a real server are in [docs/screenshots/](docs/screenshots/), and mock-mode screenshots are in `console/screenshots/`.
+Screenshots taken against a real server are in [docs/screenshots/](docs/screenshots/) (`lab-*` show data from the Windows lab VM), and mock-mode screenshots are in `console/screenshots/`.
 
 ## Development workflow
 
@@ -198,39 +243,56 @@ To work on the console, the tray and Windows builds:
 * Tray UI, mock data: `cd tray && npm run dev:mock`
 * Windows cross-check from Linux: `cargo wincheck -p kestrel-agent` (see [docs/BUILDING.md](docs/BUILDING.md))
 * On a Windows host: `scripts/windows-smoke.ps1` checks that the ETW sensors produce events
+* Disposable Windows lab: `scripts/vm/` builds a QEMU/KVM Windows 11 guest inside WSL2 and runs the benign emulations (`scripts/vm/emulate.ps1`); see [docs/TESTING-ON-WINDOWS.md](docs/TESTING-ON-WINDOWS.md). Never run the agent's response actions on your own PC.
 
-CI runs these checks: `cargo fmt --check`, `clippy -D warnings`, `cargo test --workspace`, the console and tray builds and tests, `scripts/e2e.sh`, the server image, the Windows agent/tray/MSI builds, the ETW smoke test, the licence policy (`cargo deny`, no copyleft) and optional Azure Artifact Signing.
+`.github/workflows/ci.yml` defines these checks:
+* `cargo fmt --check`, `clippy -D warnings` and `cargo test --workspace`
+* the console and tray builds and tests
+* `scripts/e2e.sh` and the server image
+* the Windows agent, scanner, tray and MSI builds, and the ETW smoke test on a Windows runner
+* the licence policy (`cargo deny`, no copyleft)
+* optional Azure Artifact Signing
+
+The workflow has not run on GitHub yet because no remote is configured. The same checks were run locally for v1.1.0-rc1 (see [docs/HANDOFF.md](docs/HANDOFF.md)).
 
 ## Repository layout
 
 ```
 crates/
   kestrel-common     shared types: events, alerts, policy, response actions, wire + tray protocols
-  kestrel-detect     detection engine: rules ST/TP, process table, IOCs, exclusions, Sigma, canaries
+  kestrel-detect     detection engine: rules ST/RW/CD/PS/TP, process table, IOCs, exclusions, Sigma, canaries
   kestrel-platform   Platform trait (sensors, response, hardening, canaries, tray) the agent runs on
   kestrel-win        Windows implementation: ETW, enrichment, WFP, quarantine vault, AppLocker, service, tray pipe
   kestrel-agent      agent binary: enrollment, mTLS transport, SQLite outbox, engine loop, privacy filter,
                      simulator (SimPlatform) + replays/, signed updates
-  kestrel-server     axum REST + tonic gRPC, internal CA, Postgres/ClickHouse, incidents, RBAC, audit, notifications
+  kestrel-scan       on-demand YARA-X scanner (separate process, kept out of the always-running agent)
+  kestrel-msica      MSI custom actions (tokens go to the agent on stdin, never on a command line)
+  kestrel-server     axum REST + tonic gRPC, internal CA, Postgres/ClickHouse, incidents, RBAC, audit, notifications, agent updates
 console/             React admin console (Vite); `npm run build` → console/dist (served by the server)
 tray/                Tauri 2 employee tray app (own Cargo workspace in tray/src-tauri)
 proto/               kestrel.proto (agent ↔ server gRPC)
 deploy/              Dockerfile, docker-compose.yml, .env.example, operations README
 installer/           Kestrel.wxs (WiX v6 MSI)
-scripts/             e2e.sh (Linux end-to-end), windows-smoke.ps1 (Windows ETW smoke test)
-docs/                contracts.md, ARCHITECTURE.md, BUILDING.md, TESTING-ON-WINDOWS.md, screenshots/
+scripts/             e2e.sh (Linux end-to-end), windows-smoke.ps1 (Windows ETW smoke test), vm/ (disposable Windows lab)
+docs/                contracts.md, ARCHITECTURE.md, BUILDING.md, TESTING-ON-WINDOWS.md, HANDOFF.md, DECISIONS.md, research/, screenshots/
 ```
 
 ## Known gaps
 
 * Server-side detections only cover agent health and identity: `TP-SRV-HEARTBEAT` (missed heartbeats), `TP-SRV-SEQ-RESET` (outbox sequence reset), `TP-SRV-OUTBOX-RESET` (outbox database recreated), `TP-SRV-EVENTS-LOST`, `TP-SRV-ETW` and `TP-SRV-DUP-ENROLL` (hardware UUID reused by a new enrollment). Cross-device correlation is not implemented.
-* The server cannot push agent updates yet (`ServerPayload::Update` is implemented and signature-checked on the agent, but never sent).
+* Agent updates are pushed by ring (canary, early, broad) from the console's Agent updates page. Releases must be signed with the owner's offline Ed25519 key (`kestrel-agent update-keygen` / `update-sign`); none is configured out of the box.
 * The open items of the security review are listed below.
 * For anything beyond about 5,000 endpoints, add a message bus and multiple ingest replicas (see deploy/README sizing).
 
 ## Security review status
 
-An independent review on 2026-10-21 ([docs/security-review-2026-10-21.md](docs/security-review-2026-10-21.md)) found 0 critical, 10 high, 12 medium and 12 low issues. The fixes are covered by unit and integration tests and by `scripts/e2e.sh`. Windows-only behaviour (sensors, WFP, quarantine, AppLocker, the MSI) is cross-compiled and unit-tested but still needs a run on real Windows; [docs/TESTING-ON-WINDOWS.md](docs/TESTING-ON-WINDOWS.md) has a regression check per finding.
+**v1.1 review.** A second independent review of the v1.1 code ([docs/security-review-v1.1-2026-10-21.md](docs/security-review-v1.1-2026-10-21.md)) found 0 critical, 10 high, 12 medium and 18 low issues. They included:
+* a server ingest stall that a NUL character could trigger;
+* ways to frame a legitimate process as a registry writer.
+
+Two fix rounds followed, and a fresh re-review confirmed the fixes. The residual risks are listed in [docs/HANDOFF.md](docs/HANDOFF.md).
+
+**v1.0 review.** An independent review on 2026-10-21 ([docs/security-review-2026-10-21.md](docs/security-review-2026-10-21.md)) found 0 critical, 10 high, 12 medium and 12 low issues. Unit and integration tests and `scripts/e2e.sh` cover the fixes. The Windows-only parts were also run in the lab VM.
 
 | Finding | Status | Notes |
 |---|---|---|
@@ -243,17 +305,17 @@ An independent review on 2026-10-21 ([docs/security-review-2026-10-21.md](docs/s
 | H7 First run unhashed / unsigned | Fixed | First-run images held ≤ 750 ms for hash + signature; late facts re-run IOCs and rules; `Unknown` never trusted |
 | H8 Quarantine / restore follow junctions | Fixed | No reparse points or extra hard links, final-path check, hash before ACL changes, handle-relative restore |
 | H9 AppLocker allow-all over GPO policy | Fixed | Effective policy inspected; GPO/MDM-managed policies never touched |
-| H10 Isolation can strand a host | **Partial** | Permits re-planned every minute, server permit agent-only, auto-release (`isolation_auto_release_hours`) and `release-isolation` break-glass. DNS to the configured resolvers is still allowed for every process while isolated |
+| H10 Isolation can strand a host | Fixed | Permits re-planned every minute, server permit agent-only, auto-release (`isolation_auto_release_hours`) and `release-isolation` break-glass (lab-verified). While isolated, DNS is allowed only for the agent (image + service SID) |
 | M1 Exclusions ignore the drive / `*` spans folders | Fixed | Drive kept; `*` within a segment, `**` across |
 | M2 Review approval creates path exclusions | Fixed | sha256 or valid-signer exclusions only, for the alerted rule, 90-day expiry |
 | M3 Tray pipe abuse | Fixed | Requests attributed to the pipe client's token; per-user activity; rate limits |
 | M4 Login lockout / spoofable IP key | Fixed | Backoff counted on failures only; `X-Forwarded-For` only from `KESTREL_TRUSTED_PROXIES` |
 | M5 Uninstall token never escrowed | Fixed | Server-issued at enrollment, audited reveal, rotation over the wire (`SetUninstallToken`), hidden from MSI logs |
-| M6 Enrollment tokens leak via command lines | **Partial** | Tokens and `--token` arguments redacted on agent and server; defaults 7 days / 50 uses. The MSI still passes the token on the custom action's command line |
+| M6 Enrollment tokens leak via command lines | Fixed (residual) | The MSI custom action (`kestrel-msica`) passes tokens to the agent on stdin, and none appear in the verbose MSI log (lab-verified). Local process monitors can still see the admin's own `msiexec … TOKEN=` command line |
 | M7 Future heartbeat disables processing | Fixed | Dedup by seq, timestamps clamped to server time |
 | M8 Outbox reset discards messages | Fixed | `Hello.outbox_epoch`; a new epoch resets the high-water mark and raises `TP-SRV-OUTBOX-RESET` |
 | M9 Incomplete privacy minimisation | Fixed | Health, review and alert users hashed; alert process, ancestry and summaries scrubbed like events |
-| M10 Permanent host-wide IOC blocks, any CIDR | **Partial** | Wide / private ranges need confirmation, ≤ /8 refused; blocks per offending image with a TTL (`ioc_block_ttl_secs`). Deleting an IOC does not lift blocks already in place (they expire) |
+| M10 Permanent host-wide IOC blocks, any CIDR | Fixed | Wide / private ranges need confirmation, ≤ /8 refused; blocks per offending image with a TTL (`ioc_block_ttl_secs`); deleting an IOC lifts the blocks it caused |
 | M11 ST-16 auto-isolates on any reader | Fixed | Signed backup / AV / indexer readers ignored; isolation only for unsigned readers in user-writable paths |
 | M12 No revocation checks | Fixed | Revocation checked in the background (cache, then online); revoked signers become `Invalid` |
 | L1 TOTP replay, password oracle | Fixed | |
@@ -269,7 +331,7 @@ An independent review on 2026-10-21 ([docs/security-review-2026-10-21.md](docs/s
 | L11 Different kill-safety lists | Fixed | |
 | L12 Canary planting follows junctions | Fixed | |
 | Info: update manifest signs only the hash | Fixed | Signature over `kestrel-update-v1\n{version}\n{url}\n{sha256}` |
-| Info: monotonic `policy.version` after a DB restore | Open | Agents ignore policies with a lower version than they hold |
+| Info: monotonic `policy.version` after a DB restore | Fixed | The server raises its policy versions to the highest version agents report (bounded) and raises `TP-SRV-VERSION` |
 
 ## Licence
 
@@ -278,5 +340,5 @@ Apache-2.0. See `Cargo.toml` (`license = "Apache-2.0"`). The dependency licence 
 ## Credits
 
 * Rule logic draws on public research by SigmaHQ, Elastic Security Labs, Google (Chrome DPAPI event-log detection), Microsoft Threat Intelligence (ClickFix, Lumma), SpecterOps, Unit 42, Kaspersky and Intrinsec. Each rule's references are listed in `crates/kestrel-detect/src/catalog.rs` and on the console's Rules page.
-* **SigmaHQ rules are licensed under the [Detection Rule License (DRL) 1.1](https://github.com/SigmaHQ/Detection-Rule-License).** Kestrel's built-in rules are original Rust implementations and do not ship SigmaHQ rule files. If you import SigmaHQ rules as custom Sigma rules, the DRL requires you to keep the author attribution. Kestrel keeps the rule's `author` as `rule_author` on every alert and shows it in the console. The server recognises DRL/SigmaHQ rules by their `license` and `references` fields.
-* Sigma evaluation uses `rsigma-parser`/`rsigma-eval` (MIT). ETW uses `ferrisetw`. On-demand scanning uses YARA-X (BSD-3-Clause).
+* **SigmaHQ rules are licensed under the [Detection Rule License (DRL) 1.1](https://github.com/SigmaHQ/Detection-Rule-License).** Kestrel's built-in rules are original Rust implementations. If you import SigmaHQ rules as custom Sigma rules, the DRL requires you to keep the author attribution. Kestrel keeps the rule's `author` as `rule_author` on every alert and shows it in the console. The server recognises DRL/SigmaHQ rules by their `license` and `references` fields.
+* Kestrel ships a curated pack of 70 SigmaHQ rules from a pinned upstream commit, Audit by default, under the DRL 1.1; the console shows each rule's authors, licence and upstream link. Sigma evaluation uses `rsigma-parser`/`rsigma-eval` (MIT). ETW uses `ferrisetw`. On-demand scanning uses YARA-X (BSD-3-Clause).

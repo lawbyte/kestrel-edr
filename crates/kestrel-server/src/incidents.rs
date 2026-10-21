@@ -315,6 +315,12 @@ pub fn summarize(
     let image_name = title_proc
         .map(|p| plain(&file_name_lower(&p.image), 120))
         .unwrap_or_else(|| "unknown process".into());
+    // Unattributed changes (synthetic subject, no image): no "by <actor>".
+    let by = if image_name.is_empty() {
+        String::new()
+    } else {
+        format!(" by {image_name}")
+    };
     let host_title = plain(hostname, 255);
     let host = md_text(hostname, 255);
     let user = sorted
@@ -325,22 +331,26 @@ pub fn summarize(
     let title = if tamper {
         format!("Agent tampering on {host_title}")
     } else if fam.ransomware {
-        format!("Ransomware activity by {image_name} on {host_title}")
+        format!("Ransomware activity{by} on {host_title}")
     } else if !cats.is_empty() {
-        format!("Credential theft by {image_name} on {host_title}")
+        format!("Credential theft{by} on {host_title}")
     } else if fam.credential_dumping {
-        format!("Credential dumping by {image_name} on {host_title}")
+        format!("Credential dumping{by} on {host_title}")
     } else if exfil {
-        format!("Possible data exfiltration by {image_name} on {host_title}")
+        format!("Possible data exfiltration{by} on {host_title}")
     } else if fam.persistence {
-        format!("Persistence planted by {image_name} on {host_title}")
+        format!("Persistence planted{by} on {host_title}")
     } else {
         let top = sorted
             .iter()
             .max_by_key(|a| severity_rank(a.severity))
             .map(|a| plain(&a.rule_name, 160))
             .unwrap_or_default();
-        format!("{top}: {image_name} on {host_title}")
+        if image_name.is_empty() {
+            format!("{top} on {host_title}")
+        } else {
+            format!("{top}: {image_name} on {host_title}")
+        }
     };
 
     // ---- storyline (markdown)
