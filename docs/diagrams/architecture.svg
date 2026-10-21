@@ -1,0 +1,183 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="560" viewBox="0 0 960 560" role="img" aria-labelledby="architecture-title architecture-desc" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif">
+  <title id="architecture-title">Kestrel EDR architecture</title>
+  <desc id="architecture-desc">The Windows agent turns ETW events into detections and containment on the device, queues alerts and telemetry in a SQLite outbox and streams them over mutual TLS to the self-hosted server, which builds incidents in PostgreSQL, stores telemetry in optional ClickHouse and serves the admin console over HTTPS.</desc>
+  <defs>
+    <marker id="architecture-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto-start-reverse"><polygon points="0 0, 8 3, 0 6" fill="#555c6b"/></marker>
+    <marker id="architecture-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto-start-reverse"><polygon points="0 0, 8 3, 0 6" fill="#4357c9"/></marker>
+    <marker id="architecture-arrow-ink" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto-start-reverse"><polygon points="0 0, 8 3, 0 6" fill="#171a21"/></marker>
+  </defs>
+  <rect width="960" height="560" fill="#f7f8fa"/>
+  <!-- zones -->
+  <rect x="40" y="40" width="512" height="296" rx="8" fill="rgba(23,26,33,0.02)" stroke="rgba(23,26,33,0.12)" stroke-width="0.8"/>
+  <rect x="52" y="44" width="96" height="12" rx="2" fill="#f7f8fa"/>
+  <text x="100" y="53" fill="#646b78" font-size="7" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle" letter-spacing="0.14em">WINDOWS ENDPOINT</text>
+  <rect x="600" y="40" width="320" height="296" rx="8" fill="rgba(23,26,33,0.02)" stroke="rgba(23,26,33,0.12)" stroke-width="0.8"/>
+  <rect x="612" y="44" width="176" height="12" rx="2" fill="#f7f8fa"/>
+  <text x="700" y="53" fill="#646b78" font-size="7" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle" letter-spacing="0.14em">KESTREL SERVER · DOCKER COMPOSE</text>
+  <rect x="600" y="368" width="320" height="104" rx="8" fill="rgba(23,26,33,0.02)" stroke="rgba(23,26,33,0.12)" stroke-width="0.8"/>
+  <rect x="612" y="372" width="80" height="12" rx="2" fill="#f7f8fa"/>
+  <text x="652" y="381" fill="#646b78" font-size="7" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle" letter-spacing="0.14em">ADMIN BROWSER</text>
+  <!-- connectors (before nodes) -->
+  <path d="M184,100 H224" fill="none" stroke="#555c6b" stroke-width="1.2" marker-end="url(#architecture-arrow)"/>
+  <path d="M352,100 H392" fill="none" stroke="#555c6b" stroke-width="1.2" marker-end="url(#architecture-arrow)"/>
+  <path d="M392,116 H380 Q372,116 372,124 V188 Q372,196 364,196 H352" fill="none" stroke="#555c6b" stroke-width="1.2" marker-end="url(#architecture-arrow)"/>
+  <path d="M464,128 V168" fill="none" stroke="#555c6b" stroke-width="1.2" marker-end="url(#architecture-arrow)"/>
+  <path d="M224,196 H184" fill="none" stroke="#555c6b" stroke-width="1.2" marker-end="url(#architecture-arrow)" marker-start="url(#architecture-arrow)"/>
+  <path d="M464,224 V264" fill="none" stroke="#555c6b" stroke-width="1.2" marker-end="url(#architecture-arrow)"/>
+  <path d="M352,292 H392" fill="none" stroke="#555c6b" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#architecture-arrow)"/>
+  <path d="M536,292 H568 Q576,292 576,284 V108 Q576,100 584,100 H616" fill="none" stroke="#4357c9" stroke-width="1.4" marker-end="url(#architecture-arrow-accent)" marker-start="url(#architecture-arrow-accent)"/>
+  <path d="M656,128 V168" fill="none" stroke="#555c6b" stroke-width="1.2" marker-end="url(#architecture-arrow)"/>
+  <path d="M704,168 V156 Q704,148 712,148 H832 Q840,148 840,140 V128" fill="none" stroke="#555c6b" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#architecture-arrow)"/>
+  <path d="M744,196 H776" fill="none" stroke="#555c6b" stroke-width="1.2" marker-end="url(#architecture-arrow)"/>
+  <path d="M680,224 V264" fill="none" stroke="#555c6b" stroke-width="1.2" marker-end="url(#architecture-arrow)"/>
+  <path d="M776,292 H744" fill="none" stroke="#555c6b" stroke-width="1.2" marker-end="url(#architecture-arrow)"/>
+  <path d="M840,320 V400" fill="none" stroke="#555c6b" stroke-width="1.2" marker-end="url(#architecture-arrow)" marker-start="url(#architecture-arrow)"/>
+  <!-- connector labels -->
+  <g data-mask="316 142 48 12">
+  <rect x="316" y="142" width="48" height="12" rx="2" fill="#f7f8fa"/>
+  <text x="340" y="151" fill="#646b78" font-size="8" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle" letter-spacing="0.06em">PROTECT</text>
+  </g>
+  <g data-mask="472 142 44 12">
+  <rect x="472" y="142" width="44" height="12" rx="2" fill="#f7f8fa"/>
+  <text x="494" y="151" fill="#646b78" font-size="8" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ALERTS</text>
+  </g>
+  <g data-mask="188 178 32 12">
+  <rect x="188" y="178" width="32" height="12" rx="2" fill="#f7f8fa"/>
+  <text x="204" y="187" fill="#646b78" font-size="8" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle" letter-spacing="0.06em">PIPE</text>
+  </g>
+  <g data-mask="356 274 32 12">
+  <rect x="356" y="274" width="32" height="12" rx="2" fill="#f7f8fa"/>
+  <text x="372" y="283" fill="#646b78" font-size="8" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle" letter-spacing="0.06em">LIVE</text>
+  </g>
+  <g data-mask="504 238 64 12">
+  <rect x="504" y="238" width="64" height="12" rx="2" fill="#f7f8fa"/>
+  <text x="536" y="247" fill="#4357c9" font-size="8" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle" letter-spacing="0.06em">MTLS :8443</text>
+  </g>
+  <g data-mask="750 130 44 12">
+  <rect x="750" y="130" width="44" height="12" rx="2" fill="#f7f8fa"/>
+  <text x="772" y="139" fill="#646b78" font-size="8" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle" letter-spacing="0.06em">EVENTS</text>
+  </g>
+  <g data-mask="768 344 64 12">
+  <rect x="768" y="344" width="64" height="12" rx="2" fill="#f7f8fa"/>
+  <text x="800" y="353" fill="#646b78" font-size="8" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle" letter-spacing="0.06em">HTTPS :443</text>
+  </g>
+  <!-- endpoint nodes -->
+  <g data-box="56 72 128 56">
+  <rect x="56" y="72" width="128" height="56" rx="6" fill="#f7f8fa"/>
+  <rect x="56" y="72" width="128" height="56" rx="6" fill="#ffffff" stroke="#171a21" stroke-width="1"/>
+  <text x="120" y="97" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">ETW sensors</text>
+  <text x="120" y="112" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">kernel · dns · dpapi</text>
+  </g>
+  <g data-box="224 72 128 56">
+  <rect x="224" y="72" width="128" height="56" rx="6" fill="#f7f8fa"/>
+  <rect x="224" y="72" width="128" height="56" rx="6" fill="#ffffff" stroke="#171a21" stroke-width="1"/>
+  <text x="288" y="97" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Translator</text>
+  <text x="288" y="112" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">hash · signer · MOTW</text>
+  </g>
+  <g data-box="392 72 144 56">
+  <rect x="392" y="72" width="144" height="56" rx="6" fill="#f7f8fa"/>
+  <rect x="392" y="72" width="144" height="56" rx="6" fill="rgba(67,87,201,0.08)" stroke="#4357c9" stroke-width="1"/>
+  <text x="464" y="97" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Detection engine</text>
+  <text x="464" y="112" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">ST RW CD PS TP · Sigma</text>
+  </g>
+  <g data-box="56 168 128 56">
+  <rect x="56" y="168" width="128" height="56" rx="6" fill="#f7f8fa"/>
+  <rect x="56" y="168" width="128" height="56" rx="6" fill="#ffffff" stroke="#171a21" stroke-width="1"/>
+  <text x="120" y="193" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Tray app</text>
+  <text x="120" y="208" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">per user · Tauri</text>
+  </g>
+  <g data-box="224 168 128 56">
+  <rect x="224" y="168" width="128" height="56" rx="6" fill="#f7f8fa"/>
+  <rect x="224" y="168" width="128" height="56" rx="6" fill="#ffffff" stroke="#171a21" stroke-width="1"/>
+  <text x="288" y="193" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Response</text>
+  <text x="288" y="208" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">suspend · kill · WFP</text>
+  </g>
+  <g data-box="392 168 144 56">
+  <rect x="392" y="168" width="144" height="56" rx="6" fill="#f7f8fa"/>
+  <rect x="392" y="168" width="144" height="56" rx="6" fill="rgba(23,26,33,0.05)" stroke="#555c6b" stroke-width="1"/>
+  <text x="464" y="193" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">SQLite outbox</text>
+  <text x="464" y="208" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">zstd · seq · acks</text>
+  </g>
+  <g data-box="56 264 128 56">
+  <rect x="56" y="264" width="128" height="56" rx="6" fill="#f7f8fa"/>
+  <rect x="56" y="264" width="128" height="56" rx="6" fill="#ffffff" stroke="#171a21" stroke-width="1"/>
+  <text x="120" y="289" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Hardening</text>
+  <text x="120" y="304" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">canaries · YARA-X</text>
+  </g>
+  <g data-box="224 264 128 56">
+  <rect x="224" y="264" width="128" height="56" rx="6" fill="#f7f8fa"/>
+  <rect x="224" y="264" width="128" height="56" rx="6" fill="rgba(23,26,33,0.02)" stroke="#555c6b" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="288" y="289" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Desktop helper</text>
+  <text x="288" y="304" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">user session · GDI</text>
+  </g>
+  <g data-box="392 264 144 56">
+  <rect x="392" y="264" width="144" height="56" rx="6" fill="#f7f8fa"/>
+  <rect x="392" y="264" width="144" height="56" rx="6" fill="#ffffff" stroke="#171a21" stroke-width="1"/>
+  <text x="464" y="289" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Transport</text>
+  <text x="464" y="304" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">gRPC · pinned CA</text>
+  </g>
+  <!-- server nodes -->
+  <g data-box="616 72 128 56">
+  <rect x="616" y="72" width="128" height="56" rx="6" fill="#f7f8fa"/>
+  <rect x="616" y="72" width="128" height="56" rx="6" fill="#ffffff" stroke="#171a21" stroke-width="1"/>
+  <text x="680" y="97" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Agent service</text>
+  <text x="680" y="112" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">gRPC :8443 · mTLS</text>
+  </g>
+  <g data-box="776 72 128 56">
+  <rect x="776" y="72" width="128" height="56" rx="6" fill="#f7f8fa"/>
+  <rect x="776" y="72" width="128" height="56" rx="6" fill="rgba(23,26,33,0.05)" stroke="#555c6b" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="840" y="97" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">ClickHouse</text>
+  <text x="840" y="112" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">telemetry · optional</text>
+  </g>
+  <g data-box="616 168 128 56">
+  <rect x="616" y="168" width="128" height="56" rx="6" fill="#f7f8fa"/>
+  <rect x="616" y="168" width="128" height="56" rx="6" fill="#ffffff" stroke="#171a21" stroke-width="1"/>
+  <text x="680" y="193" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Ingest</text>
+  <text x="680" y="208" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">alerts · incidents</text>
+  </g>
+  <g data-box="776 168 128 56">
+  <rect x="776" y="168" width="128" height="56" rx="6" fill="#f7f8fa"/>
+  <rect x="776" y="168" width="128" height="56" rx="6" fill="#ffffff" stroke="#171a21" stroke-width="1"/>
+  <text x="840" y="193" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Notifications</text>
+  <text x="840" y="208" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">jobs · audit chain</text>
+  </g>
+  <g data-box="616 264 128 56">
+  <rect x="616" y="264" width="128" height="56" rx="6" fill="#f7f8fa"/>
+  <rect x="616" y="264" width="128" height="56" rx="6" fill="rgba(23,26,33,0.05)" stroke="#555c6b" stroke-width="1"/>
+  <text x="680" y="289" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">PostgreSQL 16</text>
+  <text x="680" y="304" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">control plane</text>
+  </g>
+  <g data-box="776 264 128 56">
+  <rect x="776" y="264" width="128" height="56" rx="6" fill="#f7f8fa"/>
+  <rect x="776" y="264" width="128" height="56" rx="6" fill="#ffffff" stroke="#171a21" stroke-width="1"/>
+  <text x="840" y="289" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">REST API</text>
+  <text x="840" y="304" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">/api · console :443</text>
+  </g>
+  <g data-box="776 400 128 56">
+  <rect x="776" y="400" width="128" height="56" rx="6" fill="#f7f8fa"/>
+  <rect x="776" y="400" width="128" height="56" rx="6" fill="rgba(85,92,107,0.1)" stroke="#646b78" stroke-width="1"/>
+  <text x="840" y="425" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Admin console</text>
+  <text x="840" y="440" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">React · SSE</text>
+  </g>
+  <g data-callout="1">
+  <text x="56" y="404" fill="#171a21" font-size="14" font-style="italic" font-family="'Instrument Serif', 'Noto Serif', Georgia, 'Times New Roman', serif">Detection and containment run on the device,</text>
+  <text x="56" y="422" fill="#171a21" font-size="14" font-style="italic" font-family="'Instrument Serif', 'Noto Serif', Georgia, 'Times New Roman', serif">so they keep working while it is offline.</text>
+  <path d="M 120 386 Q 116 364 120 340" fill="none" stroke="rgba(23,26,33,0.4)" stroke-width="1" stroke-dasharray="4,3"/>
+  <circle cx="120" cy="338" r="2" fill="#171a21"/>
+  </g>
+  <line x1="40" y1="504" x2="920" y2="504" stroke="rgba(23,26,33,0.1)" stroke-width="0.8"/>
+  <text x="40" y="522" fill="#555c6b" font-size="8" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" letter-spacing="0.18em">LEGEND</text>
+  <rect x="112" y="516" width="16" height="10" rx="2" fill="rgba(67,87,201,0.08)" stroke="#4357c9" stroke-width="1"/>
+  <text x="144" y="525" fill="#555c6b" font-size="9" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif">Focal: on-device detection</text>
+  <rect x="280" y="516" width="16" height="10" rx="2" fill="#ffffff" stroke="#171a21" stroke-width="1"/>
+  <text x="312" y="525" fill="#555c6b" font-size="9" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif">Component</text>
+  <rect x="384" y="516" width="16" height="10" rx="2" fill="rgba(23,26,33,0.05)" stroke="#555c6b" stroke-width="1"/>
+  <text x="416" y="525" fill="#555c6b" font-size="9" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif">Store</text>
+  <rect x="464" y="516" width="16" height="10" rx="2" fill="rgba(23,26,33,0.02)" stroke="#555c6b" stroke-width="1" stroke-dasharray="3,2"/>
+  <text x="496" y="525" fill="#555c6b" font-size="9" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif">Optional / on demand</text>
+  <line x1="616" y1="521" x2="640" y2="521" stroke="#4357c9" stroke-width="1.2" marker-end="url(#architecture-arrow-accent)"/>
+  <text x="648" y="525" fill="#555c6b" font-size="9" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif">Agent stream, mTLS</text>
+  <line x1="764" y1="521" x2="788" y2="521" stroke="#555c6b" stroke-width="1.2" marker-end="url(#architecture-arrow)"/>
+  <text x="796" y="525" fill="#555c6b" font-size="9" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif">Data / control</text>
+</svg>

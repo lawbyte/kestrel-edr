@@ -46,7 +46,10 @@ Other privileges: `policies.write`, `rules.write`, `devices.write`, `users.write
 | GET | `/auth/oidc/start` | — | 302 to IdP |
 | GET | `/auth/oidc/callback` | `code, state` | 302 to `/` with cookie |
 | POST | `/auth/logout` | — | 204 |
-| GET | `/me` | — | `{user: User, csrf_token, privileges: [string]}` |
+| GET | `/me` | — | `{user: User, csrf_token, privileges: [string], mfa_setup_required?: true}`. `mfa_setup_required` (as built): `require_mfa` is on and this password session has no authenticator yet; `privileges` is empty and other endpoints answer 403 with `mfa_setup_required: true` until `/me/mfa/enable` succeeds (the console then keeps the user on `/account`) |
+| POST | `/me/mfa/setup` | — | `{secret, otpauth_url}` (as built): new TOTP secret, stored but inactive; 409 when MFA is already on |
+| POST | `/me/mfa/enable` | `{totp}` | `{user: User}` (as built); wrong code 400 `bad_request` ("invalid TOTP code"), 400 "call /api/me/mfa/setup first" without a pending secret; upgrades a setup-only session. No recovery codes are issued |
+| POST | `/me/mfa/disable` | `{password}` | 204 (as built); 403 when `require_mfa` is on or the password is wrong (SSO-only accounts cannot disable) |
 
 `User = {id, email, name, role, last_login: ms|null, created_at: ms, disabled: bool, mfa_enabled: bool, sso_linked: bool, local_password: bool}`
 

@@ -304,7 +304,8 @@ impl DecoyFs for StdFs<'_> {
 /// Removed on upgrade only when they are empty real directories (Chrome is
 /// then not installed: an empty `Google\Chrome\User Data` is what made the
 /// decoy look like an installed Chrome to Edge's importer).
-const LEGACY_IMPLICIT_PARENTS: &[&str] = &[r"google\chrome\user data", r"google\chrome", r"google"];
+// On-disk casing (NTFS ignores case; Linux test runs do not).
+const LEGACY_IMPLICIT_PARENTS: &[&str] = &[r"Google\Chrome\User Data", r"Google\Chrome", r"Google"];
 
 /// Upgrade / migration: remove every decoy recorded in `reg` that is not
 /// part of the current `specs` (e.g. the legacy `Google\Chrome\User
@@ -331,7 +332,8 @@ pub fn retire_stale(
         return vec![];
     }
     // Deepest first: files and sub-folders before their parents.
-    stale.sort_by_key(|(k, _)| std::cmp::Reverse(k.matches('\\').count()));
+    // Deepest first (children before their folders); either separator.
+    stale.sort_by_key(|(k, _)| std::cmp::Reverse(k.matches(['\\', '/']).count()));
     let mut removed = Vec::new();
     let mut legacy_bases: Vec<std::path::PathBuf> = Vec::new();
     for (k, rec) in stale {

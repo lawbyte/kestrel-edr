@@ -60,7 +60,7 @@
     <!-- WIX_UPGRADE_DETECTED (set by FindRelatedProducts): an upgrade of an
          installed Kestrel keeps the existing enrollment and needs no token (V-M3). -->
     <Launch Condition="Installed OR WIX_UPGRADE_DETECTED OR (SERVER AND TOKEN AND CA_B64)"
-            Message="SERVER, TOKEN and CA_B64 are required. Copy the install command from the Kestrel console (Devices > Enrollment tokens)." />
+            Message="SERVER, TOKEN and CA_B64 are required. Copy the install command from the Kestrel console (Devices > Install agent, or Settings > Enrollment)." />
     <Launch Condition="VersionNT64 &gt;= 603"
             Message="Kestrel requires 64-bit Windows 10, Windows 11 or Windows Server 2019 or later." />
 

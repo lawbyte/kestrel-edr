@@ -57,6 +57,8 @@ export function reauthFresh(now = Date.now()): boolean {
 export const needsReauth = (e: unknown) => e instanceof ApiError && e.status === 403 && e.extra?.reason === 'reauth_required'
 /** Wrong TOTP on `POST /me/reauth`: 400 `reason: "invalid_totp"` (a 401 there is also a wrong code, never a logout). */
 export const invalidTotp = (e: unknown) => e instanceof ApiError && ((e.status === 400 && e.extra?.reason === 'invalid_totp') || e.status === 401)
+/** Shown for 403 `mfa_not_enabled`; the UI adds a link to the account page next to it. */
+export const MFA_NOT_ENABLED_TEXT = 'This device requires an MFA re-check, but your account has no authenticator app. Turn on two-factor authentication for your account first.'
 export const mfaNotEnabled = (e: unknown) => e instanceof ApiError && e.status === 403 && e.extra?.reason === 'mfa_not_enabled'
 
 export const remoteKeys = {
@@ -167,7 +169,7 @@ export function remoteErrorText(e: unknown): string {
     const r = e.extra?.reason
     if (r === 'disabled_by_policy' || r === 'not_permitted' || r === 'reason_required') return REMOTE_ERROR_TEXT[r]
     if (r === 'reauth_required') return 'Confirm your authenticator code to continue (required every 10 minutes for this device).'
-    if (r === 'mfa_not_enabled') return 'This device requires an MFA re-check, but your account has no authenticator app. Turn on two-factor authentication for your account first.'
+    if (r === 'mfa_not_enabled') return MFA_NOT_ENABLED_TEXT
     if (e.status === 408) return REMOTE_ERROR_TEXT.consent_timeout
     if (e.status === 409 && /offline/i.test(e.message)) return 'The device is offline. Remote access needs the agent to be connected.'
     if (e.status === 403) return e.message || 'You don’t have permission for remote access. It needs the admin role and an interactive console sign-in.'

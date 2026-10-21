@@ -144,7 +144,7 @@ function Editor({ original, catalog }: { original: Policy; catalog: RuleRow[] })
               <NumberRow
                 id="n-ioc-ttl"
                 label="Indicator block lifetime"
-                hint="Firewall blocks created when a program connects to or looks up one of your indicators expire after this long. Deleting an indicator does not lift blocks that are already in place."
+                hint="Firewall blocks created when a program connects to or looks up one of your indicators expire after this long. If you delete a Block indicator, switch it to Audit or Allow, or a device leaves its scope, the agent lifts the blocks that indicator created as soon as it receives the updated policy (offline devices do so when they reconnect). Blocks from other rules or from analyst commands are not lifted this way."
                 value={Math.max(1, Math.round(p.ioc_block_ttl_secs / 3600))}
                 min={1}
                 max={720}

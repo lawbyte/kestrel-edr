@@ -23,7 +23,8 @@ import {
   Hourglass,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react'
-import { downloadFile, remoteApi, remoteErrorText, remoteKeys, uploadFile, type FmContext, type UploadHandle } from '@/api/remote'
+import { downloadFile, MFA_NOT_ENABLED_TEXT, mfaNotEnabled, remoteApi, remoteErrorText, remoteKeys, uploadFile, type FmContext, type UploadHandle } from '@/api/remote'
+import { MfaSetupLink } from '@/components/mfa-link'
 import type { FileEntry, RemoteAccessProfile, RemoteAvailability } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent } from '@/components/ui/dialog'
@@ -367,7 +368,10 @@ export function FileManager({ deviceId, hostname, availability, policyId, effect
         {notice ? (
           <div role={notice.kind === 'error' ? 'alert' : 'status'} className={cn('flex items-start gap-2 border-b border-border px-3 py-2 text-sm', notice.kind === 'error' ? 'bg-danger-soft' : 'bg-ok-soft')}>
             {notice.kind === 'error' ? <AlertCircle className="mt-0.5 size-4 shrink-0 text-danger" aria-hidden /> : <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-ok" aria-hidden />}
-            <span className="min-w-0 flex-1">{notice.text}</span>
+            <span className="min-w-0 flex-1">
+              {notice.text}
+              {notice.kind === 'error' && notice.text.includes(MFA_NOT_ENABLED_TEXT) ? <MfaSetupLink className="ml-1.5" /> : null}
+            </span>
             <Button size="icon-sm" variant="ghost" aria-label="Dismiss" onClick={() => setNotice(null)}>
               <X />
             </Button>
@@ -399,6 +403,7 @@ export function FileManager({ deviceId, hostname, availability, policyId, effect
               <AlertCircle className="size-6 text-danger" aria-hidden />
               <p className="text-sm font-medium">Couldn’t open {path || 'the drive list'}</p>
               <p className="max-w-md text-sm text-fg-muted">{remoteErrorText(list.error)}</p>
+              {mfaNotEnabled(list.error) ? <MfaSetupLink className="text-sm" /> : null}
               <div className="mt-1 flex gap-2">
                 <Button size="sm" onClick={() => list.refetch()}>
                   <RefreshCw /> Try again

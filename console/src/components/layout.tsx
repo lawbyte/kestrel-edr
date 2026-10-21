@@ -17,12 +17,13 @@ import {
   Siren,
   SlidersHorizontal,
   Sun,
+  UserRound,
   Laptop,
   MessageSquareMore,
   Zap,
 } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router'
+import { Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
 import { api, qk } from '@/api/endpoints'
 import { IS_MOCK } from '@/api/client'
 import { useLiveInvalidation } from '@/api/live'
@@ -43,9 +44,9 @@ interface NavItem {
   hint?: string
 }
 
-function useNavBadges() {
-  const inc = useQuery({ queryKey: qk.incidents({ status: 'open,in_progress' }), queryFn: () => api.incidents({ status: 'open,in_progress', limit: 1 }), staleTime: 30_000 })
-  const rev = useQuery({ queryKey: qk.reviews('requested'), queryFn: () => api.reviewRequests('requested'), staleTime: 60_000 })
+function useNavBadges(enabled: boolean) {
+  const inc = useQuery({ queryKey: qk.incidents({ status: 'open,in_progress' }), queryFn: () => api.incidents({ status: 'open,in_progress', limit: 1 }), staleTime: 30_000, enabled })
+  const rev = useQuery({ queryKey: qk.reviews('requested'), queryFn: () => api.reviewRequests('requested'), staleTime: 60_000, enabled })
   return { incidents: inc.data?.total, reviews: rev.data?.length }
 }
 
@@ -58,7 +59,9 @@ export function AppLayout() {
   const [mobileNav, setMobileNav] = useState(false)
   const nav = useNavigate()
   const loc = useLocation()
-  const badges = useNavBadges()
+  // require_mfa without an authenticator yet: the server only allows /me/mfa/*, so keep the user on /account.
+  const setupOnly = !!me.mfa_setup_required
+  const badges = useNavBadges(!setupOnly)
   const org = useQuery({ queryKey: qk.setup, queryFn: api.setupStatus, staleTime: Infinity })
 
   useEffect(() => setMobileNav(false), [loc.pathname])
@@ -94,7 +97,7 @@ export function AppLayout() {
     return () => window.removeEventListener('keydown', onKey)
   }, [nav])
 
-  const sections: { label: string; items: NavItem[] }[] = [
+  const allSections: { label: string; items: NavItem[] }[] = [
     {
       label: 'Respond',
       items: [
@@ -119,6 +122,9 @@ export function AppLayout() {
       ],
     },
   ]
+
+  // A setup-only session can open nothing but its account page.
+  const sections = setupOnly ? [] : allSections
 
   const sidebar = (
     <nav aria-label="Main" className="flex h-full flex-col">
@@ -185,6 +191,9 @@ export function AppLayout() {
           <DropdownContent align="start" side="top" className="w-60">
             <DropdownLabel>{me.user.email}</DropdownLabel>
             <DropdownSeparator />
+            <DropdownItem onSelect={() => nav('/account')}>
+              <UserRound /> Account & security
+            </DropdownItem>
             <DropdownItem onSelect={toggleTheme}>
               {theme === 'dark' ? <Sun /> : <Moon />} {theme === 'dark' ? 'Light theme' : 'Dark theme'}
             </DropdownItem>
@@ -234,7 +243,7 @@ export function AppLayout() {
         </div>
         {IS_MOCK ? <DemoBanner /> : null}
         <main id="main" className="min-h-0 flex-1 overflow-y-auto" tabIndex={-1}>
-          <Outlet />
+          {setupOnly && loc.pathname !== '/account' ? <Navigate to="/account" replace /> : <Outlet />}
         </main>
       </div>
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} onShowShortcuts={() => setHelpOpen(true)} />

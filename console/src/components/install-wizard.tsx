@@ -12,6 +12,7 @@ import { formatDate } from '@/lib/format'
 import { PRESET_LABEL, presetOf, presetProfile, profileSummary, validateProfile } from '@/lib/remote-profile'
 import { cn } from '@/lib/utils'
 import { RemoteProfileEditor } from './remote/profile-editor'
+import { ReauthProvider, useReauth } from './remote/reauth'
 
 export type WizardChoice = Exclude<RemoteProfilePreset, 'custom'>
 export type WizardStep = 1 | 2 | 3
@@ -65,8 +66,18 @@ const CARDS: { choice: WizardChoice; icon: typeof ShieldCheck; title: string; bo
   },
 ]
 
-export function InstallAgentWizard({ onClose, groups: groupsProp }: { onClose: () => void; groups?: Group[] }) {
+export function InstallAgentWizard(props: { onClose: () => void; groups?: Group[] }) {
+  // A remote-access profile needs a fresh MFA check when the admin has MFA (403 reauth_required).
+  return (
+    <ReauthProvider>
+      <WizardInner {...props} />
+    </ReauthProvider>
+  )
+}
+
+function WizardInner({ onClose, groups: groupsProp }: { onClose: () => void; groups?: Group[] }) {
   const qc = useQueryClient()
+  const { withReauth } = useReauth()
   const { can } = useAuth()
   const remoteAllowed = canChooseRemote(can)
   const groupsQ = useQuery({ queryKey: qk.groups, queryFn: api.groups, enabled: !groupsProp })
@@ -87,7 +98,7 @@ export function InstallAgentWizard({ onClose, groups: groupsProp }: { onClose: (
     setProfile(presetProfile(c))
   }
   const create = useMutation({
-    mutationFn: () => api.createEnrollmentToken({ group_id: groupId, expires_in_days: days, max_uses: uses, remote_profile: profile }),
+    mutationFn: () => withReauth(() => api.createEnrollmentToken({ group_id: groupId, expires_in_days: days, max_uses: uses, remote_profile: profile })),
     onSuccess: (t) => {
       setCreated(t)
       void qc.invalidateQueries({ queryKey: qk.enrollmentTokens })

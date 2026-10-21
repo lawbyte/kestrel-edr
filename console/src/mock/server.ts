@@ -148,16 +148,64 @@ route('POST', '/auth/login', ({ body }) => {
   if (u.mfa_enabled && !/^\d{6}$/.test(b.totp ?? '')) throw new HttpError(401, 'unauthorized', 'That code is not valid. Codes are 6 digits.')
   u.last_login = Date.now()
   db.session = u
-  db.log(u, 'auth.login', u.email, { method: 'password' })
+  // Mirrors the server: require_mfa without an enrolled authenticator gives a setup-only session.
+  mfa.setupOnly = db.settings.require_mfa && !u.mfa_enabled
+  db.log(u, 'auth.login', u.email, { method: mfa.setupOnly ? 'password_mfa_setup' : 'password' })
   return { user: u, csrf_token: hexId(32) }
 })
 route('POST', '/auth/logout', () => {
   db.session = null
+  mfa.setupOnly = false
   return undefined
 })
 route('GET', '/me', () => {
   const u = me()
+  if (mfa.setupOnly) return { user: u, csrf_token: hexId(32), privileges: [], mfa_setup_required: true }
   return { user: u, csrf_token: hexId(32), privileges: ROLE_PRIVILEGES[u.role] ?? ['read'] }
+})
+
+// ------------------------------------------------------------------ MFA self-service (/me/mfa/*)
+
+/** Mock MFA state: pending (not yet active) secrets per user, wrong-code throttle, setup-only session. */
+export const mfa = { pending: new Map<string, string>(), wrong: 0, lockedUntil: 0, setupOnly: false }
+const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+route('POST', '/me/mfa/setup', () => {
+  const u = me()
+  if (u.mfa_enabled) throw new HttpError(409, 'conflict', 'MFA already enabled')
+  const bytes = crypto.getRandomValues(new Uint8Array(32))
+  const secret = [...bytes].map((b) => B32[b % 32]).join('')
+  mfa.pending.set(u.id, secret)
+  return { secret, otpauth_url: `otpauth://totp/Kestrel:${encodeURIComponent(u.email)}?secret=${secret}&algorithm=SHA1&digits=6&period=30&issuer=Kestrel` }
+})
+route('POST', '/me/mfa/enable', ({ body }) => {
+  const u = me()
+  const totp = String((body as { totp?: unknown })?.totp ?? '')
+  if (!mfa.pending.has(u.id)) throw bad('call /api/me/mfa/setup first')
+  // The real server does not throttle enrolment codes; the mock does so the 429 path can be seen.
+  if (mfa.lockedUntil > Date.now()) throw new HttpError(429, 'rate_limited', 'too many wrong codes', undefined, { retry_after_ms: mfa.lockedUntil - Date.now() })
+  // Mock: any 6 digits except 000000 (to show the wrong-code path).
+  if (!/^\d{6}$/.test(totp) || totp === '000000') {
+    if (++mfa.wrong >= 5) {
+      mfa.wrong = 0
+      mfa.lockedUntil = Date.now() + 30_000
+    }
+    throw new HttpError(400, 'bad_request', 'invalid TOTP code', undefined, { reason: 'invalid_totp' })
+  }
+  mfa.wrong = 0
+  mfa.pending.delete(u.id)
+  u.mfa_enabled = true
+  mfa.setupOnly = false
+  db.log(u, 'user.mfa_enabled', u.id)
+  return { user: u }
+})
+route('POST', '/me/mfa/disable', ({ body }) => {
+  const u = me()
+  const password = String((body as { password?: unknown })?.password ?? '')
+  if (db.settings.require_mfa) throw new HttpError(403, 'forbidden', 'MFA is required by policy')
+  if (u.local_password === false || !password || password === 'wrong') throw new HttpError(403, 'forbidden', 'password is wrong')
+  u.mfa_enabled = false
+  db.log(u, 'user.mfa_disabled', u.id)
+  return undefined
 })
 
 // ------------------------------------------------------------------ dashboard
@@ -276,6 +324,7 @@ route('PATCH', '/devices/:id', ({ params, body }) => {
 })
 route('DELETE', '/devices/:id', ({ params }) => {
   const u = me()
+  requirePriv(u, 'devices.write')
   const d = findDevice(params.id)
   db.devices = db.devices.filter((x) => x.id !== d.id)
   db.log(u, 'device.decommission', d.hostname)
@@ -1360,6 +1409,9 @@ export const mockOptions = { latency: true }
 
 export async function handleMock(method: string, path: string, query: URLSearchParams, body: unknown): Promise<{ status: number; body: unknown; headers?: Record<string, string> }> {
   if (mockOptions.latency) await new Promise((r) => setTimeout(r, 90 + Math.random() * 160))
+  // A setup-only session (require_mfa, no authenticator yet) can only reach /me and /me/mfa/*.
+  if (mfa.setupOnly && db.session && !(path.startsWith('/auth/') || path === '/me' || path.startsWith('/me/mfa/')))
+    return { status: 403, body: { error: { code: 'forbidden', message: 'set up multi-factor authentication first', mfa_setup_required: true } } }
   for (const r of routes) {
     if (r.method !== method) continue
     const m = r.re.exec(path)

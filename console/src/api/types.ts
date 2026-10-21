@@ -522,6 +522,18 @@ export interface MeResponse {
   user: User
   csrf_token: string
   privileges: string[]
+  /**
+   * The organisation requires MFA (`Settings.require_mfa`) and this password
+   * session has not enrolled yet: `privileges` is empty and every other
+   * endpoint answers 403 until `POST /me/mfa/enable` succeeds.
+   */
+  mfa_setup_required?: boolean
+}
+/** `POST /me/mfa/setup`: a new TOTP secret (stored, not active until `/me/mfa/enable`). */
+export interface MfaSetup {
+  secret: string
+  /** `otpauth://totp/...` URI for authenticator apps (rendered as a QR code). */
+  otpauth_url: string
 }
 export interface SetupStatus {
   needs_setup: boolean

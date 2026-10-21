@@ -29,29 +29,29 @@ export default function Response() {
         id: 'action',
         accessorFn: (r) => ACTION_LABEL[r.action.type],
         cell: ({ row }) => (
-          <div className="min-w-0 max-w-[480px]">
+          <div className="min-w-0 max-w-[300px]">
             <p className="font-medium">{ACTION_LABEL[row.original.action.type]}</p>
             <p className="truncate font-mono text-[11.5px] text-fg-muted">{describeAction(row.original.action)}</p>
           </div>
         ),
       },
-      { header: 'Device', accessorKey: 'hostname', cell: ({ row }) => <Link to={`/devices/${row.original.device_id}`} className="font-mono text-[13px] hover:underline">{row.original.hostname}</Link> },
+      { header: 'Device', accessorKey: 'hostname', cell: ({ row }) => <Link to={`/devices/${row.original.device_id}`} className="whitespace-nowrap font-mono text-[13px] hover:underline">{row.original.hostname}</Link> },
       {
         header: 'Requested by',
         id: 'by',
         accessorFn: (r) => r.requested_by?.name ?? 'Automatic',
         cell: ({ row }) =>
           row.original.requested_by ? (
-            <span className="inline-flex items-center gap-2 text-sm">
+            <span className="inline-flex items-center gap-2 whitespace-nowrap text-sm">
               <Avatar user={row.original.requested_by} size="xs" /> {row.original.requested_by.name}
             </span>
           ) : (
-            <span className="inline-flex items-center gap-1.5 text-sm text-fg-muted">
+            <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-sm text-fg-muted">
               <Bot className="size-4" /> Automatic
             </span>
           ),
       },
-      { header: 'Reason / result', id: 'detail', enableSorting: false, cell: ({ row }) => <div className="max-w-[340px] text-xs"><p className="truncate text-fg-muted">{row.original.comment || '—'}</p><p className="truncate text-fg-subtle">{row.original.result_detail}</p></div> },
+      { header: 'Reason / result', id: 'detail', enableSorting: false, cell: ({ row }) => <div className="max-w-[260px] text-xs"><p className="truncate text-fg-muted">{row.original.comment || '—'}</p><p className="truncate text-fg-subtle">{row.original.result_detail}</p></div> },
       { header: 'Incident', id: 'inc', enableSorting: false, size: 80, cell: ({ row }) => (row.original.incident_id ? <Link to={`/incidents/${row.original.incident_id}`} className="text-xs text-accent-text hover:underline">View</Link> : <span className="text-xs text-fg-subtle">—</span>) },
       {
         header: 'Requested',
@@ -59,7 +59,7 @@ export default function Response() {
         size: 120,
         cell: ({ row }) => (
           <Tooltip content={`${formatDateTime(row.original.created_at)}${row.original.completed_at ? ` · took ${formatDuration(row.original.completed_at - row.original.created_at)}` : ''}`}>
-            <span className="text-xs text-fg-muted">{timeAgo(row.original.created_at)}</span>
+            <span className="whitespace-nowrap text-xs text-fg-muted">{timeAgo(row.original.created_at)}</span>
           </Tooltip>
         ),
       },

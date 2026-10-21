@@ -1,4 +1,8 @@
+<p align="center"><img src="docs/diagrams/banner.svg" alt="Kestrel EDR: self-hosted Windows EDR for infostealers, ransomware and credential theft" width="100%"></p>
+
 # Kestrel EDR
+
+**Documentation:** [Kestrel EDR docs site](https://lawbyte.github.io/kestrel-edr/) (source in [`website/`](website/))
 
 Kestrel is a self-hosted endpoint detection and response (EDR) product for Windows, built to catch **infostealers** (Lumma, Vidar, StealC, Rhadamanthys and similar malware) while they work. These programs read browser passwords, cookies, crypto wallets and messenger sessions, then upload them. Kestrel watches for exactly that behaviour, contains the process, and gives IT one incident that says what was taken and what to rotate.
 
@@ -11,7 +15,38 @@ It has four parts:
 * **Admin console**: a React app served by the server.
 * **Tray app**: a small Tauri app for employees. It shows status, explains blocks in plain language and lets the employee request a review.
 
-> **Status: v1.1.0-rc1, user-mode only.** Validated on Windows 11 (26100) in a disposable lab VM. Read the limits section before you rely on it.
+> **Status: v1.1.2 (release candidate), user-mode only.** Validated on Windows 11 (26100) in a disposable lab VM. Read the limits section before you rely on it.
+
+## Screenshots
+
+Console screenshots use the built-in demo data (`npm run dev:mock`). The tray and remote-desktop images marked "real" come from a Windows 11 lab VM. Every console page, in light and dark, is in the [console tour](https://lawbyte.github.io/kestrel-edr/console/tour).
+
+<table>
+  <tr>
+    <td width="50%"><img src="website/public/img/console/overview-hero-dark.png" alt="Overview dashboard"><br><sub>Overview: open incidents, alerts by severity, data at risk</sub></td>
+    <td width="50%"><img src="website/public/img/console/incident-dark.png" alt="Incident with storyline and checklist"><br><sub>Incident: storyline, process tree, remediation checklist</sub></td>
+  </tr>
+  <tr>
+    <td><img src="website/public/img/console/devices-dark.png" alt="Devices list"><br><sub>Devices: health, policy, agent version</sub></td>
+    <td><img src="website/public/img/console/rules-dark.png" alt="Rules catalog"><br><sub>Rules: built-in families and the SigmaHQ pack, Audit or Protect per policy</sub></td>
+  </tr>
+  <tr>
+    <td><img src="website/public/img/console/device-remote-desktop-dark.png" alt="Remote desktop tab"><br><sub>Remote desktop in the console</sub></td>
+    <td><img src="website/public/img/console/device-files-dark.png" alt="Remote file manager"><br><sub>Remote file manager</sub></td>
+  </tr>
+  <tr>
+    <td><img src="website/public/img/console/install-wizard-1-dark.png" alt="Install agent wizard"><br><sub>Install wizard: choose the remote-access profile for new devices</sub></td>
+    <td><img src="website/public/img/console/hunt-dark.png" alt="Hunting"><br><sub>Hunting over endpoint telemetry</sub></td>
+  </tr>
+  <tr>
+    <td><img src="website/public/img/tray/real-desktop.png" alt="Tray app on Windows 11 (real)"><br><sub>Employee tray app on Windows 11 (real lab VM)</sub></td>
+    <td><img src="website/public/img/tray/real-remote-banner.png" alt="Remote session banner (real)"><br><sub>The banner the employee sees during a remote session (real lab VM)</sub></td>
+  </tr>
+  <tr>
+    <td><img src="website/public/img/tray/blocked.png" alt="Tray: Kestrel stopped an app" width="320"><br><sub>Tray: what was stopped and why, with "Request review"</sub></td>
+    <td><img src="website/public/img/tray/consent.png" alt="Tray: consent prompt" width="320"><br><sub>Tray: consent prompt for a guarded remote session</sub></td>
+  </tr>
+</table>
 
 ## What it does
 
@@ -28,7 +63,7 @@ It has four parts:
 
   Actions issued while a device is offline are queued and delivered when it reconnects. They expire after 7 days.
 * **Canary credential stores.** The agent plants decoy browser profiles of defunct Chromium forks that stealers enumerate (Kometa, 7Star: `Local State`, `Login Data`, a fake MetaMask vault) and decoy `.aws\credentials`. It never plants under a mainstream browser, so it does not make Chrome look installed to other browsers' import wizards. `ST-16` fires only when secret material in a decoy is read (not directory listings or incidental files such as profile pictures) by anything other than the agent or an allow-listed, validly signed security/search/backup tool. In Protect mode it kills the reader, blocks its network and quarantines it; the host is isolated only when the reader is unsigned and runs from a user-writable folder. A genuine browser or password manager installed under Program Files (valid signature by its vendor, no remote-debugging / headless / extension-loading switches, never injected into) may be importing data and gets an Audit alert only; per-user installs and every other reader get the full response. There is no general "never kill this app" list: false positives are fixed per rule.
-* **Hardening pack.** Each control can be set to Audit or Enforce:
+* **Hardening pack.** A policy sets the pack's mode (Off, Audit or Enforce) and switches each control on or off:
   * AppLocker deny rules for `mshta` and for executables in Temp/Downloads
   * removing the Win+R Run dialog
   * the Windows Terminal multi-line paste warning
@@ -37,7 +72,7 @@ It has four parts:
   * Defender ASR rules
   * Chrome/Edge `RemoteDebuggingAllowed=false`
 * **Incidents, not alert floods.** The server groups alerts by device and process tree into incidents. Each incident gets:
-  * a priority (0–100)
+  * a priority (0 to 100)
   * a plain-language storyline
   * the process tree and network evidence
   * the categories of data at risk
@@ -89,7 +124,7 @@ It has four parts:
 * Only Windows endpoints. The agent core and simulator also run on Linux and macOS for development, but there is no real sensor layer for them.
 * Alert grouping and the hunt language are deliberately simple (see [docs/contracts.md](docs/contracts.md)).
 * Remote desktop limits:
-  * **Screen capture is GDI-based JPEG at 5–10 fps.** This is fine for support work but not for video, and a 4K screen at high quality costs bandwidth and CPU.
+  * **Screen capture is GDI-based JPEG at 5 to 10 fps.** This is fine for support work but not for video, and a 4K screen at high quality costs bandwidth and CPU.
   * **No audio and no clipboard sync**; the console can type text instead.
   * **The mouse pointer is not drawn** into frames.
   * **UAC prompts and the lock screen** are captured and controllable because the helper runs as SYSTEM, but the on-screen banner cannot appear on that secure desktop; the tray notification still does.
@@ -169,26 +204,9 @@ The **Protect** rules are the "safe on day one" set. Run everything else in Audi
 
 ## Architecture
 
-```
- Windows endpoint                                         Kestrel server (docker compose)
-┌──────────────────────────────────────────────┐        ┌───────────────────────────────────────┐
-│ kestrel-agent (service, LocalSystem)         │        │ kestrel-server                        │
-│                                              │  gRPC  │  ├ agent service :8443 (mTLS, pinned) │
-│  ETW sessions ─► translator ─► engine ──┐    │ mTLS   │  │   enroll · stream · acks           │
-│  (Kernel-Process/File/Network/Registry, │    │◄──────►│  ├ ingest ─► incidents/grouping       │
-│   Audit-API, DNS-Client, DPAPI, PS4104) │    │ :8443  │  ├ REST /api + console SPA  :443      │
-│  event log (Security WFP, Sysmon opt.)  ▼    │        │  ├ notifications, jobs, audit chain   │
-│        response (kill/suspend/quarantine/WFP)│        │  └ SSE /api/events/stream             │
-│        hardening · canaries · YARA-X scan    │        │        │                    │         │
-│        SQLite outbox (zstd) ─► transport ────┤        │   PostgreSQL 16        ClickHouse     │
-│        tray pipe \\.\pipe\kestrel-tray       │        │   (control plane,      (telemetry;    │
-└──────────────────┬───────────────────────────┘        │    or events fallback)  optional)     │
-                   │ JSON lines (session-0 check)        └───────────────▲───────────────────────┘
-          ┌────────▼─────────┐                                          │ HTTPS (cookie + CSRF)
-          │ kestrel-tray     │                              ┌───────────┴──────────┐
-          │ (per user, Tauri)│                              │ Admin console (React)│
-          └──────────────────┘                              └──────────────────────┘
-```
+![Kestrel architecture](docs/diagrams/architecture.svg)
+
+More diagrams: [detection flow](docs/diagrams/detection-flow.svg), [remote-access ceiling](docs/diagrams/enrollment.svg) and [deployment](docs/diagrams/deployment.svg) (HTML sources next to them in `docs/diagrams/`).
 
 For data flow, the detection pipeline and the security model, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -372,3 +390,4 @@ Apache-2.0. See `Cargo.toml` (`license = "Apache-2.0"`). The dependency licence 
 * **SigmaHQ rules are licensed under the [Detection Rule License (DRL) 1.1](https://github.com/SigmaHQ/Detection-Rule-License).** Kestrel's built-in rules are original Rust implementations. If you import SigmaHQ rules as custom Sigma rules, the DRL requires you to keep the author attribution. Kestrel keeps the rule's `author` as `rule_author` on every alert and shows it in the console. The server recognises DRL/SigmaHQ rules by their `license` and `references` fields.
 * Kestrel ships a curated pack of 70 SigmaHQ rules from a pinned upstream commit, Audit by default, under the DRL 1.1; the console shows each rule's authors, licence and upstream link. Sigma evaluation uses `rsigma-parser`/`rsigma-eval` (MIT). ETW uses `ferrisetw`. On-demand scanning uses YARA-X (BSD-3-Clause).
 * Remote-desktop frames are encoded with `jpeg-encoder` (MIT OR Apache-2.0). This software is based in part on the work of the Independent JPEG Group.
+* Diagrams drawn with the [diagram-design](https://github.com/cathrynlavery/diagram-design) skill by Cathryn Lavery (MIT licence), skinned with the Kestrel console palette.

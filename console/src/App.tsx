@@ -27,6 +27,7 @@ const Quarantine = lazy(() => import('./pages/quarantine'))
 const Updates = lazy(() => import('./pages/updates'))
 const Reviews = lazy(() => import('./pages/reviews'))
 const SettingsPage = lazy(() => import('./pages/settings'))
+const AccountPage = lazy(() => import('./pages/account'))
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -62,6 +63,7 @@ const routes = [
       { path: 'updates', element: <Page><Updates /></Page> },
       { path: 'reviews', element: <Page><Reviews /></Page> },
       { path: 'settings/:tab?', element: <Page><SettingsPage /></Page> },
+      { path: 'account', element: <Page><AccountPage /></Page> },
       { path: '*', element: <Navigate to="/" replace /> },
     ],
   },

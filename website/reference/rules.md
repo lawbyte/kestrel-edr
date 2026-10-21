@@ -1,0 +1,125 @@
+# Detection rules
+
+Kestrel ships 54 built-in behavioural rules and a 70-rule SigmaHQ pack. This table is taken from the engine's catalog (`Engine::catalog()`, `crates/kestrel-detect/src/catalog.rs` and `families/`). **Protect** in the Default column marks the *safe on day one* set; everything else starts in Audit. The console's **Rules** page shows each rule's full logic, ATT&CK techniques, Protect action, references and known false positives.
+
+<Shot src="img/diagrams/detection-flow.svg" alt="Detection and response flow" />
+
+## How detection works
+
+* **Behaviour, not allow-lists.** Rules look at what a process does: which credential store it opened, whether it then connected out, whether it touched LSASS or wrote an autorun. There is no general "never kill this app" list; false positives are fixed per rule, with exclusions or by the rule's own checks of the owning application and signature.
+* **Per-process correlation.** The engine keeps short-lived state per process (secret categories touched, evidence events, DNS answers), which lets rules like ST-02 and ST-04 combine several events and lets the server explain what was at risk.
+* **One path for every hit.** The mode comes from the policy (Off drops the hit). The agent itself and PIDs 0 and 4 are never subjects. An Allow IOC on the file's SHA-256 or signer suppresses all rules. Exclusions are applied. Duplicates are dropped (one alert per rule per process per 10 minutes, except escalations). In Audit the alert carries no actions; in Protect it carries actions, filtered by the response safety rules.
+* **Unknown signatures are never trusted.** The first start of a new program is held up to 750 ms while it is hashed and its signature checked. Facts that arrive later re-run hash IOCs and the rules that depend on them.
+
+## Stealer rules (ST)
+
+| Id | Rule | Severity | Default |
+|---|---|---|---|
+| ST-01 | Credential-store read by untrusted process | Medium | Audit |
+| ST-02 | Smash-and-grab credential collection (3 or more secret categories in 60 s) | Critical | **Protect** |
+| ST-03 | Foreign DPAPI unprotect of browser secrets | High | Audit |
+| ST-04 | Steal-then-send (credential read, then external connection within 300 s) | Critical | **Protect** |
+| ST-05 | Browser debugging abuse (`--remote-debugging-*` with headless or alternate profile) | High | Audit |
+| ST-06 | Local CDP client (non-browser connects to the DevTools port) | High | Audit |
+| ST-07 | Browser process tampering (memory access, injection, debugger attach) | Critical | **Protect** |
+| ST-08 | Chrome elevation-service abuse | High | Audit |
+| ST-09 | Foreign crypto library load (`nss3.dll`) | Medium | Audit |
+| ST-10 | ClickFix Run/Address-bar artefact (RunMRU, TypedPaths) | High | Audit |
+| ST-11 | Paste-and-run process chain | High | Audit |
+| ST-12 | Untrusted execution from user paths | Low | Audit |
+| ST-13 | .NET LOLBin hollowing | High | Audit |
+| ST-14 | Dead-drop / exfil service from non-browser (Telegram, Steam, Discord webhooks and others) | High | Audit |
+| ST-15 | Trusted-binary sideload from user path | High | Audit |
+| ST-16 | Canary tripwire | Critical | **Protect** |
+
+ST-01, ST-03 and ST-12 use **suspend on suspicion** in Protect mode: the process is frozen for the policy's suspend window and killed only if a strong rule (ST-02, ST-04, ST-07, ST-16) confirms the theft, or if it is unsigned and runs from a user-writable folder. ST-16 kills the reader, blocks its network for 24 hours and quarantines it; it isolates the host only when the reader is unsigned and runs from a user-writable folder. A genuine browser or password manager installed under Program Files reading a decoy gets an Audit alert only.
+
+## Ransomware rules (RW)
+
+| Id | Rule | Severity | Default |
+|---|---|---|---|
+| RW-01 | Shadow copy / backup catalog deletion | Critical | **Protect** |
+| RW-02 | Boot recovery disabled | Critical | **Protect** |
+| RW-03 | Safe-mode boot staging | Critical | **Protect** |
+| RW-04 | Event log cleared or shrunk | Medium | Audit |
+| RW-05 | Service / process kill spree | High | **Protect** |
+| RW-06 | Mass file encryption behaviour | Critical | **Protect** |
+| RW-07 | Ransomware canary tampered | Critical | **Protect** |
+| RW-08 | Ransom-note fan-out | Critical | **Protect** |
+| RW-12 | Ransomware kill-chain correlation | Critical | **Protect** |
+
+## Credential dumping rules (CD)
+
+| Id | Rule | Severity | Default |
+|---|---|---|---|
+| CD-01 | LSASS memory dump via comsvcs MiniDump | Critical | **Protect** |
+| CD-02 | Known LSASS dumping tool | Critical | **Protect** |
+| CD-03 | Suspicious LSASS handle request | High | Audit |
+| CD-04 | LSASS handle followed by a dump file | Critical | **Protect** |
+| CD-05 | Debug library dump helper reading LSASS | Critical | **Protect** |
+| CD-06 | Blocked LSASS access attempt | High | Audit |
+| CD-07 | LSASS dump preparation via SilentProcessExit / IFEO | Critical | **Protect** |
+| CD-08 | LSASS dump via Windows Error Reporting | Critical | **Protect** |
+| CD-09 | Malicious LSA security package | High | Audit |
+| CD-10 | Credential hive save or copy | Critical | **Protect** |
+| CD-11 | NTDS.dit extraction | High | Audit |
+| CD-12 | WDigest cleartext credential downgrade | High | **Protect** |
+| CD-13 | LSA protection / Credential Guard tamper | High | Audit |
+
+## Persistence rules (PS)
+
+| Id | Rule | Severity | Default |
+|---|---|---|---|
+| PS-01 | Run key to untrusted payload | Medium | Audit |
+| PS-02 | Autorun via script host or LOLBin | High | **Protect** |
+| PS-03 | Startup-folder drop | Medium | **Protect** |
+| PS-04 | Startup folder redirection | High | Audit |
+| PS-05 | Scheduled task with untrusted action | Medium | Audit |
+| PS-07 | Suspicious service install | High | **Protect** |
+| PS-08 | WMI permanent event subscription | Critical | **Protect** |
+| PS-09 | IFEO / SilentProcessExit hijack | High | **Protect** |
+| PS-10 | Winlogon / AppInit / AppCert / BootExecute change | Critical | **Protect** |
+| PS-11 | COM hijack in user hive | Medium | Audit |
+| PS-15 | Persistence rollback | High | **Protect** |
+
+Persistence rules in Protect remove the autorun after backing up the original in the quarantine vault. They act on the writing process only when Kestrel knows exactly which process wrote it; when the writer is inferred, the alert says so and no process is touched.
+
+## Tamper rules (TP)
+
+| Id | Rule | Severity | Default |
+|---|---|---|---|
+| TP-01 | Telemetry session tampering | Critical | Audit |
+| TP-02 | WFP filter tampering | Critical | Audit |
+| TP-03 | AMSI tampering | Critical | Audit |
+| TP-04 | Agent service or file tampering | Critical | Audit |
+| TP-05 | Telemetry loss | High | Audit |
+
+Exclusions never apply to TP rules. The agent's watchdog restarts stopped ETW sessions.
+
+## Other rule ids
+
+| Id | Source |
+|---|---|
+| `IOC-*` | Indicator hits (hash, IP, domain, URL, certificate). |
+| `SIG-<uuid8>` | SigmaHQ pack rules (70, Audit by default, DRL 1.1 with authors shown) and your custom Sigma rules. |
+| `TP-SRV-HEARTBEAT` | Server: more than 3 missed heartbeats on a live stream. |
+| `TP-SRV-SEQ-RESET` | Server: outbox sequence went backwards (state wiped or cloned). |
+| `TP-SRV-OUTBOX-RESET` | Server: the agent started a new outbox. |
+| `TP-SRV-EVENTS-LOST` | Server: more than 500 ETW events lost between heartbeats. |
+| `TP-SRV-ETW` | Server: the agent reports its ETW session down. |
+| `TP-SRV-DUP-ENROLL` | Server: a new enrollment reuses the hardware UUID of a recently active device. |
+
+## False positives
+
+* Each rule lists known false positives on the Rules page.
+* Fix a false positive with the narrowest exclusion that works: SHA-256 or valid signer first, a path glob only when needed, scoped to the one rule. **Exclude...** on an alert previews what an exclusion would hide.
+* Approving an employee's review request creates a SHA-256 or signer exclusion for that rule only, expiring after 90 days.
+* A program blocked by mistake: **Lift network block**, and **Restore** it from quarantine.
+
+## Rollout advice
+
+1. Start with the defaults: the *safe on day one* rules in Protect, everything else in Audit.
+2. Leave Audit rules running for **about two weeks** on a pilot group. Review the Alerts page and add exclusions for false positives.
+3. Move rules to Protect one by one, per policy, starting with a small group.
+4. Turn hardening on in Audit first to see which devices drift, then Enforce. Test LSA protection and the AppLocker controls on a few devices before the fleet.
+5. Keep the SigmaHQ pack in Audit unless a rule has proven quiet in your environment.

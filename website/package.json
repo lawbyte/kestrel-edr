@@ -1,0 +1,17 @@
+{
+  "name": "kestrel-edr-docs",
+  "private": true,
+  "version": "1.1.2",
+  "description": "Documentation website for Kestrel EDR",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vitepress dev",
+    "check": "node scripts/check-style.mjs",
+    "build": "npm run check && vitepress build",
+    "preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "vitepress": "1.6.3"
+  }
+}

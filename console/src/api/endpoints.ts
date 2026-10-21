@@ -9,6 +9,12 @@ export const api = {
   login: (b: { email: string; password: string; totp?: string }) => http.post<T.LoginResponse>('/auth/login', b),
   logout: () => http.post<void>('/auth/logout'),
   me: () => http.get<T.MeResponse>('/me'),
+  /** Start TOTP enrolment (409 when MFA is already on). */
+  mfaSetup: () => http.post<T.MfaSetup>('/me/mfa/setup'),
+  /** Activate MFA with a code from the new secret (400 on a wrong code). */
+  mfaEnable: (totp: string) => http.post<{ user: T.User }>('/me/mfa/enable', { totp }),
+  /** Turn MFA off; needs the account password (403 when wrong or when `require_mfa` is on). */
+  mfaDisable: (password: string) => http.post<void>('/me/mfa/disable', { password }),
 
   dashboard: () => http.get<T.Dashboard>('/dashboard'),
 

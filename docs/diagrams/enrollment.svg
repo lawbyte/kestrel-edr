@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="432" viewBox="0 0 960 432" role="img" aria-labelledby="enrollment-title enrollment-desc" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif">
+  <title id="enrollment-title">Kestrel remote-access ceiling</title>
+  <desc id="enrollment-desc">The remote-access profile chosen for an enrollment token (none, unrestricted or guarded) is pinned on the agent as a ceiling the server can never raise; the effective profile is the ceiling AND the group policy, and a remote desktop or file manager request is either allowed, with a banner always shown, or refused with 403.</desc>
+  <defs>
+    <marker id="enrollment-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto-start-reverse"><polygon points="0 0, 8 3, 0 6" fill="#555c6b"/></marker>
+    <marker id="enrollment-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto-start-reverse"><polygon points="0 0, 8 3, 0 6" fill="#4357c9"/></marker>
+    <marker id="enrollment-arrow-ink" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto-start-reverse"><polygon points="0 0, 8 3, 0 6" fill="#171a21"/></marker>
+  </defs>
+  <rect width="960" height="432" fill="#f7f8fa"/>
+  <path d="M200,168 H248" fill="none" stroke="#555c6b" stroke-width="1.2" marker-end="url(#enrollment-arrow)"/>
+  <path d="M408,168 H440" fill="none" stroke="#555c6b" stroke-width="1.2" marker-end="url(#enrollment-arrow)"/>
+  <path d="M456,264 V184" fill="none" stroke="#555c6b" stroke-width="1.2" marker-end="url(#enrollment-arrow)"/>
+  <path d="M472,168 H504" fill="none" stroke="#555c6b" stroke-width="1.2" marker-end="url(#enrollment-arrow)"/>
+  <path d="M664,156 H680 Q688,156 688,148 V136 Q688,128 696,128 H712" fill="none" stroke="#4357c9" stroke-width="1.2" marker-end="url(#enrollment-arrow-accent)"/>
+  <path d="M664,180 H680 Q688,180 688,188 V208 Q688,216 696,216 H712" fill="none" stroke="#555c6b" stroke-width="1.2" marker-end="url(#enrollment-arrow)"/>
+  <path d="M376,296 H336 Q328,296 328,288 V212" fill="none" stroke="#171a21" stroke-width="1" stroke-dasharray="4,3"/>
+  <line x1="318" y1="210" x2="338" y2="210" stroke="#171a21" stroke-width="1.6"/>
+  <g data-mask="202 150 44 12">
+  <rect x="202" y="150" width="44" height="12" rx="2" fill="#f7f8fa"/>
+  <text x="224" y="159" fill="#646b78" font-size="8" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ENROLL</text>
+  </g>
+  <g data-mask="464 218 48 12">
+  <rect x="464" y="218" width="48" height="12" rx="2" fill="#f7f8fa"/>
+  <text x="488" y="227" fill="#646b78" font-size="8" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle" letter-spacing="0.06em">NARROWS</text>
+  </g>
+  <g data-mask="244 246 76 12">
+  <rect x="244" y="246" width="76" height="12" rx="2" fill="#f7f8fa"/>
+  <text x="282" y="255" fill="#646b78" font-size="8" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle" letter-spacing="0.06em">CANNOT RAISE</text>
+  </g>
+  <g data-box="40 96 160 144">
+  <rect x="40" y="96" width="160" height="144" rx="6" fill="#f7f8fa"/>
+  <rect x="40" y="96" width="160" height="144" rx="6" fill="#ffffff" stroke="#171a21" stroke-width="1"/>
+  <rect x="48" y="104" width="48" height="12" rx="2" fill="none" stroke="rgba(23,26,33,0.4)" stroke-width="0.8"/>
+  <text x="72" y="113" fill="#171a21" font-size="7" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle" letter-spacing="0.08em">SERVER</text>
+  <text x="120" y="136" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Enrollment token</text>
+  <text x="120" y="151" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">remote_profile</text>
+  <rect x="48" y="160" width="144" height="20" rx="4" fill="rgba(23,26,33,0.05)" stroke="#555c6b" stroke-width="0.8"/>
+  <text x="56" y="174" fill="#171a21" font-size="11" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif">none</text>
+  <text x="184" y="174" fill="#555c6b" font-size="8" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="end">default</text>
+  <rect x="48" y="184" width="144" height="20" rx="4" fill="rgba(23,26,33,0.05)" stroke="#555c6b" stroke-width="0.8"/>
+  <text x="56" y="198" fill="#171a21" font-size="11" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif">unrestricted</text>
+  
+  <rect x="48" y="208" width="144" height="20" rx="4" fill="rgba(23,26,33,0.05)" stroke="#555c6b" stroke-width="0.8"/>
+  <text x="56" y="222" fill="#171a21" font-size="11" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif">guarded</text>
+  <text x="184" y="222" fill="#555c6b" font-size="8" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="end">consent · MFA</text>
+  </g>
+  <g data-box="248 136 160 64">
+  <rect x="248" y="136" width="160" height="64" rx="6" fill="#f7f8fa"/>
+  <rect x="248" y="136" width="160" height="64" rx="6" fill="rgba(67,87,201,0.08)" stroke="#4357c9" stroke-width="1"/>
+  <rect x="256" y="144" width="36" height="12" rx="2" fill="none" stroke="rgba(67,87,201,0.5)" stroke-width="0.8"/>
+  <text x="274" y="153" fill="#4357c9" font-size="7" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle" letter-spacing="0.08em">AGENT</text>
+  <text x="328" y="175" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Pinned ceiling</text>
+  <text x="328" y="190" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">fixed at install</text>
+  </g>
+  <g data-box="440 152 32 32">
+  <circle cx="456" cy="168" r="16" fill="#f7f8fa"/>
+  <circle cx="456" cy="168" r="16" fill="#ffffff" stroke="#171a21" stroke-width="1"/>
+  <text x="456" y="171" fill="#171a21" font-size="8" font-weight="500" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle" letter-spacing="0.06em">AND</text>
+  </g>
+  <g data-box="376 264 160 64">
+  <rect x="376" y="264" width="160" height="64" rx="6" fill="#f7f8fa"/>
+  <rect x="376" y="264" width="160" height="64" rx="6" fill="#ffffff" stroke="#171a21" stroke-width="1"/>
+  <rect x="384" y="272" width="44" height="12" rx="2" fill="none" stroke="rgba(23,26,33,0.4)" stroke-width="0.8"/>
+  <text x="406" y="281" fill="#171a21" font-size="7" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle" letter-spacing="0.08em">SERVER</text>
+  <text x="456" y="303" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Group policy</text>
+  <text x="456" y="318" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">remote_access</text>
+  </g>
+  <g data-box="504 136 160 64">
+  <rect x="504" y="136" width="160" height="64" rx="6" fill="#f7f8fa"/>
+  <rect x="504" y="136" width="160" height="64" rx="6" fill="#ffffff" stroke="#171a21" stroke-width="1"/>
+  <rect x="512" y="144" width="36" height="12" rx="2" fill="none" stroke="rgba(23,26,33,0.4)" stroke-width="0.8"/>
+  <text x="530" y="153" fill="#171a21" font-size="7" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle" letter-spacing="0.08em">AGENT</text>
+  <text x="584" y="175" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Effective profile</text>
+  <text x="584" y="190" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">stricter wins</text>
+  </g>
+  <g data-box="712 96 200 64">
+  <rect x="712" y="96" width="200" height="64" rx="6" fill="#f7f8fa"/>
+  <rect x="712" y="96" width="200" height="64" rx="6" fill="#ffffff" stroke="#171a21" stroke-width="1"/>
+  <text x="812" y="118" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Session allowed</text>
+  <text x="812" y="133" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">desktop or file manager</text>
+  <text x="812" y="146" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">consent if required</text>
+  </g>
+  <g data-box="712 184 200 64">
+  <rect x="712" y="184" width="200" height="64" rx="6" fill="#f7f8fa"/>
+  <rect x="712" y="184" width="200" height="64" rx="6" fill="rgba(23,26,33,0.03)" stroke="rgba(23,26,33,0.45)" stroke-width="1"/>
+  <text x="812" y="206" fill="#171a21" font-size="12" font-weight="600" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Refused · 403</text>
+  <text x="812" y="221" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">not_permitted</text>
+  <text x="812" y="234" fill="#555c6b" font-size="9" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" text-anchor="middle">disabled_by_policy</text>
+  </g>
+  <g data-callout="1">
+  <text x="912" y="64" fill="#171a21" font-size="14" font-style="italic" font-family="'Instrument Serif', 'Noto Serif', Georgia, 'Times New Roman', serif" text-anchor="end">A banner and a tray notice are always shown.</text>
+  <path d="M 860 70 Q 864 82 860 92" fill="none" stroke="rgba(23,26,33,0.4)" stroke-width="1" stroke-dasharray="4,3"/>
+  <circle cx="860" cy="94" r="2" fill="#171a21"/>
+  </g>
+  <g data-callout="1">
+  <text x="248" y="104" fill="#171a21" font-size="14" font-style="italic" font-family="'Instrument Serif', 'Noto Serif', Georgia, 'Times New Roman', serif">Only a reinstall changes it.</text>
+  <path d="M 300 110 Q 304 122 300 132" fill="none" stroke="rgba(23,26,33,0.4)" stroke-width="1" stroke-dasharray="4,3"/>
+  <circle cx="300" cy="134" r="2" fill="#171a21"/>
+  </g>
+  <line x1="40" y1="368" x2="920" y2="368" stroke="rgba(23,26,33,0.1)" stroke-width="0.8"/>
+  <text x="40" y="386" fill="#555c6b" font-size="8" font-family="'Geist Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace" letter-spacing="0.18em">LEGEND</text>
+  <rect x="112" y="380" width="16" height="10" rx="2" fill="rgba(67,87,201,0.08)" stroke="#4357c9" stroke-width="1"/>
+  <text x="144" y="389" fill="#555c6b" font-size="9" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif">Focal: install-time ceiling</text>
+  <rect x="288" y="380" width="16" height="10" rx="2" fill="#ffffff" stroke="#171a21" stroke-width="1"/>
+  <text x="320" y="389" fill="#555c6b" font-size="9" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif">Profile / step</text>
+  <rect x="408" y="380" width="16" height="10" rx="2" fill="rgba(23,26,33,0.03)" stroke="rgba(23,26,33,0.45)" stroke-width="1"/>
+  <text x="440" y="389" fill="#555c6b" font-size="9" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif">Refusal</text>
+  <line x1="504" y1="385" x2="528" y2="385" stroke="#4357c9" stroke-width="1.2" marker-end="url(#enrollment-arrow-accent)"/>
+  <text x="536" y="389" fill="#555c6b" font-size="9" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif">Permitted</text>
+  <line x1="608" y1="385" x2="632" y2="385" stroke="#555c6b" stroke-width="1.2" marker-end="url(#enrollment-arrow)"/>
+  <text x="640" y="389" fill="#555c6b" font-size="9" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif">Narrows / flow</text>
+  <line x1="736" y1="385" x2="758" y2="385" stroke="#171a21" stroke-width="1" stroke-dasharray="4,3"/>
+  <line x1="760" y1="380" x2="760" y2="390" stroke="#171a21" stroke-width="1.6"/>
+  <text x="768" y="389" fill="#555c6b" font-size="9" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif">Blocked path</text>
+</svg>

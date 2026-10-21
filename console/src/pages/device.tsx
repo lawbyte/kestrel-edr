@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, CheckCircle2, ChevronLeft, CircleDashed, Copy, KeyRound, RefreshCw, RotateCw, XCircle } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, ChevronLeft, CircleDashed, Copy, KeyRound, Loader2, PowerOff, RefreshCw, RotateCw, XCircle } from 'lucide-react'
 import { toast } from 'sonner'
 import { useMemo, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
@@ -13,6 +13,7 @@ import { SearchInput } from '@/components/filters'
 import { CopyButton } from '@/components/copy-button'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent } from '@/components/ui/dialog'
+import { Field, Input } from '@/components/ui/input'
 import { useAuth } from '@/lib/auth'
 import { Tabs, TabsContent, TabsList, TabsTrigger, Tooltip } from '@/components/ui/misc'
 import { EVENT_KIND_LABEL, EVENT_KINDS_UI, HARDENING_INFO, describeAction } from '@/lib/labels'
@@ -267,6 +268,7 @@ function DeviceView({ d }: { d: DeviceDetail }) {
           ) : null}
         </Tabs>
         </ReauthProvider>
+        <DangerZone deviceId={dev.id} hostname={dev.hostname} />
       </div>
       <ConfirmActionDialog open={!!action} onOpenChange={(o) => !o && setAction(null)} spec={action} device={dev} />
     </div>
@@ -648,5 +650,91 @@ function DuplicateBanner({ d }: { d: DeviceDetail }) {
         </Dialog>
       ) : null}
     </div>
+  )
+}
+
+/** DELETE /devices/:id (devices.write): revoke the agent certificate; history stays. */
+function DangerZone({ deviceId, hostname }: { deviceId: string; hostname: string }) {
+  const { can } = useAuth()
+  const [open, setOpen] = useState(false)
+  if (!can('devices.write')) return null
+  return (
+    <section aria-labelledby="danger-zone" className="rounded-lg border border-danger/40 bg-surface">
+      <header className="border-b border-danger/30 px-4 py-2.5">
+        <h2 id="danger-zone" className="flex items-center gap-1.5 text-sm font-semibold text-danger">
+          <AlertTriangle className="size-4" aria-hidden /> Danger zone
+        </h2>
+      </header>
+      <div className="flex flex-wrap items-center gap-4 p-4">
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium">Decommission this device</p>
+          <p className="max-w-2xl text-xs text-fg-muted">Revokes the agent’s certificate so it can no longer connect. Use it for retired, wiped or replaced machines. Alerts, incidents and the audit trail are kept.</p>
+        </div>
+        <Button variant="danger-outline" onClick={() => setOpen(true)}>
+          <PowerOff /> Decommission device
+        </Button>
+      </div>
+      {open ? <DecommissionDialog deviceId={deviceId} hostname={hostname} onClose={() => setOpen(false)} /> : null}
+    </section>
+  )
+}
+
+export function DecommissionDialog({ deviceId, hostname, onClose }: { deviceId: string; hostname: string; onClose: () => void }) {
+  const qc = useQueryClient()
+  const nav = useNavigate()
+  const [typed, setTyped] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const matches = typed.trim().toLowerCase() === hostname.toLowerCase()
+  const del = useMutation({
+    mutationFn: () => api.deleteDevice(deviceId),
+    onSuccess: () => {
+      qc.removeQueries({ queryKey: qk.device(deviceId) })
+      void qc.invalidateQueries({ queryKey: ['devices'] })
+      void qc.invalidateQueries({ queryKey: qk.dashboard })
+      toast.success(`${hostname} decommissioned`, { description: 'Its certificate is revoked. Uninstall the agent with its uninstall token.' })
+      onClose()
+      nav('/devices')
+    },
+    onError: (e) => setError((e as Error).message),
+  })
+  return (
+    <Dialog open onOpenChange={(o) => !o && !del.isPending && onClose()}>
+      <DialogContent
+        title={`Decommission ${hostname}?`}
+        description="This can’t be undone from the console. To bring the machine back, install the agent again with a new enrollment token."
+        footer={
+          <>
+            <Button variant="ghost" onClick={onClose} disabled={del.isPending}>
+              Cancel
+            </Button>
+            <Button variant="danger" disabled={!matches || del.isPending} onClick={() => del.mutate()}>
+              {del.isPending ? <Loader2 className="animate-spin" /> : <PowerOff />} Decommission
+            </Button>
+          </>
+        }
+      >
+        <ul className="mb-4 list-disc space-y-1.5 pl-5 text-sm text-fg-muted marker:text-fg-subtle">
+          <li>
+            <span className="text-fg">Revokes the device’s certificate and drops its connection.</span> The agent can no longer send telemetry or receive policies and commands; pending commands are cancelled.
+          </li>
+          <li>
+            <span className="text-fg">The agent stays installed</span> on the machine until someone uninstalls it locally with its uninstall token. Reveal the token on this page first if you still need it.
+          </li>
+          <li>
+            <span className="text-fg">History is kept.</span> Alerts, incidents, response actions and audit entries for this device remain searchable.
+          </li>
+        </ul>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            if (matches && !del.isPending) del.mutate()
+          }}
+        >
+          <Field label={<>Type <span className="font-mono">{hostname}</span> to confirm</>} htmlFor="decom-host" error={error}>
+            <Input id="decom-host" autoFocus autoComplete="off" spellCheck={false} value={typed} onChange={(e) => (setTyped(e.target.value), setError(null))} className="font-mono" />
+          </Field>
+        </form>
+      </DialogContent>
+    </Dialog>
   )
 }

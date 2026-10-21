@@ -4,6 +4,8 @@ import { invalidTotp, mfaNotEnabled, needsReauth, remoteApi, remoteErrorText, se
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent } from '@/components/ui/dialog'
 import { Field, Input } from '@/components/ui/input'
+import { MfaSetupLink } from '@/components/mfa-link'
+import { useAuth } from '@/lib/auth'
 
 interface ReauthCtx {
   /** Ask for a TOTP code; resolves true once the server accepted it. */
@@ -19,6 +21,9 @@ export function ReauthProvider({ children }: { children: ReactNode }) {
   const [code, setCode] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const { me } = useAuth()
+  const [mfaMissing, setMfaMissing] = useState(false)
+  const noAuthenticator = mfaMissing || !me.user.mfa_enabled
   const resolver = useRef<((ok: boolean) => void) | null>(null)
 
   const ask = useCallback(
@@ -28,6 +33,7 @@ export function ReauthProvider({ children }: { children: ReactNode }) {
         resolver.current = resolve
         setCode('')
         setError(null)
+        setMfaMissing(false)
         setOpen(true)
       }),
     [],
@@ -48,9 +54,10 @@ export function ReauthProvider({ children }: { children: ReactNode }) {
       setReauthUntil(r.reauth_until)
       finish(true)
     } catch (e) {
+      if (mfaNotEnabled(e)) setMfaMissing(true)
       setError(
         mfaNotEnabled(e)
-          ? 'Your account has no authenticator app. Turn on two-factor authentication in your account settings first.'
+          ? 'Your account has no authenticator app yet. Set up two-factor authentication first.'
           : invalidTotp(e)
             ? 'That code didn’t work. Check your authenticator app and try the current code.'
             : remoteErrorText(e),
@@ -101,6 +108,12 @@ export function ReauthProvider({ children }: { children: ReactNode }) {
               <Field label="Authenticator code" htmlFor="reauth-code" error={error}>
                 <Input id="reauth-code" autoFocus inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))} placeholder="123456" className="font-mono tracking-widest" />
               </Field>
+              {noAuthenticator ? (
+                <p className="mt-3 text-sm text-fg-muted">
+                  No authenticator app on your account yet?{' '}
+                  <MfaSetupLink onClick={() => finish(false)}>Set up two-factor authentication</MfaSetupLink>, then come back to this device.
+                </p>
+              ) : null}
             </form>
           </DialogContent>
         ) : null}

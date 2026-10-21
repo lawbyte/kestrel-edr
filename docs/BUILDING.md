@@ -62,7 +62,7 @@ To run a simulated agent against it:
 
 ```bash
 cargo run -p kestrel-agent -- --state-dir ./simstate simulate \
-  --server 127.0.0.1:18444 --server-name localhost --ca ca.pem --token kst_enr_… \
+  --server 127.0.0.1:18444 --server-name localhost --ca ca.pem --token kte_… \
   --replay crates/kestrel-agent/replays/lumma_clickfix.jsonl --exit-after-replay 10
 ```
 
@@ -110,7 +110,7 @@ You need:
 ```powershell
 cargo test -p kestrel-common -p kestrel-detect -p kestrel-win -p kestrel-agent
 $env:KESTREL_UPDATE_PUBKEY = '<base64 Ed25519 public key>'   # optional: enables signed auto-update (see "Signed agent updates")
-cargo build -p kestrel-agent --release                       # target\release\kestrel-agent.exe
+cargo build -p kestrel-agent -p kestrel-scan -p kestrel-msica --release   # kestrel-agent.exe, kestrel-scan.exe, kestrel_msica.dll in target\release
 
 # ETW smoke test (elevated shell): sensors only, no server
 .\scripts\windows-smoke.ps1
@@ -166,12 +166,13 @@ kestrel-agent update-sign --key D:\kestrel-signing\kestrel-update-signing.key `
 ## MSI (WiX v6)
 
 ```powershell
-dotnet tool install --global wix --version 6.*
-wix extension add -g WixToolset.Util.wixext/6
+dotnet tool install --global wix --version 6.0.2
+wix extension add -g WixToolset.Util.wixext/6.0.2
 $v = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
      Where-Object name -eq 'kestrel-agent' | Select-Object -ExpandProperty version
 wix build installer/Kestrel.wxs -arch x64 -d Version=$v `
   -d AgentExe=target/release/kestrel-agent.exe -d ScanExe=target/release/kestrel-scan.exe `
+  -d CaDll=target/release/kestrel_msica.dll `
   -d TrayExe=tray/src-tauri/target/release/kestrel-tray.exe `
   -ext WixToolset.Util.wixext -o KestrelAgent.msi
 ```

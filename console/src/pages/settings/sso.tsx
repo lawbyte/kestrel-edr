@@ -1,4 +1,5 @@
 import { CopyButton } from '@/components/copy-button'
+import { MfaSetupLink } from '@/components/mfa-link'
 import { Field, Input, inputClass } from '@/components/ui/input'
 import { Switch } from '@/components/ui/misc'
 import { useAuth } from '@/lib/auth'
@@ -7,7 +8,7 @@ import { SaveBar, SettingsLoading, SettingsSection, useSettingsDraft } from '../
 
 export default function SsoTab() {
   const { q, draft, setDraft, save, dirty, reset } = useSettingsDraft()
-  const { can } = useAuth()
+  const { can, me } = useAuth()
   if (!draft) return <SettingsLoading q={q} />
   const o = draft.oidc
   const ro = !can('settings.write')
@@ -72,8 +73,13 @@ export default function SsoTab() {
               <span className="text-sm font-medium">Require two-factor authentication</span>
               <span className="block text-xs text-fg-muted">For password sign-ins. SSO users follow their identity provider’s policy.</span>
             </span>
-            <Switch checked={draft.require_mfa} onCheckedChange={(v) => setDraft({ ...draft, require_mfa: v })} disabled={ro} />
+            <Switch checked={draft.require_mfa} onCheckedChange={(v) => setDraft({ ...draft, require_mfa: v })} disabled={ro} aria-label="Require two-factor authentication" />
           </label>
+          <p className="-mt-2 text-xs text-fg-muted" data-testid="require-mfa-hint">
+            Everyone sets up their own authenticator app under <span className="text-fg">Account &amp; security</span> in the user menu. People who haven’t yet are sent there at their next password sign-in and can’t use
+            the console until they finish.{' '}
+            {me.user.mfa_enabled ? <MfaSetupLink>Your two-factor settings</MfaSetupLink> : <MfaSetupLink>Set up yours first</MfaSetupLink>}
+          </p>
           <Field label="Sign people out after (minutes)" htmlFor="sess" hint="Of inactivity.">
             <Input id="sess" type="number" min={15} max={1440} value={draft.session_timeout_minutes} onChange={(e) => setDraft({ ...draft, session_timeout_minutes: Number(e.target.value) })} className="w-32" disabled={ro} />
           </Field>

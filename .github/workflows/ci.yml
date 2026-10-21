@@ -69,7 +69,7 @@ jobs:
       - name: Agent — test + release build
         run: |
           cargo test -p kestrel-common -p kestrel-detect -p kestrel-win -p kestrel-agent -p kestrel-scan
-          cargo build -p kestrel-agent -p kestrel-scan --release
+          cargo build -p kestrel-agent -p kestrel-scan -p kestrel-msica --release
         env:
           KESTREL_UPDATE_PUBKEY: ${{ secrets.KESTREL_UPDATE_PUBKEY }}
       - name: ETW smoke test (agent in console mode, replays a benign process)
@@ -90,6 +90,7 @@ jobs:
           Copy-Item target/release/kestrel-agent.exe dist-sign/
           Copy-Item target/release/kestrel-scan.exe dist-sign/
           Copy-Item tray/src-tauri/target/release/kestrel-tray.exe dist-sign/
+          Copy-Item target/release/kestrel_msica.dll dist-sign/
       - name: Sign executables (before packaging)
         if: github.event_name == 'push' && env.HAS_SIGNING == 'true'
         uses: azure/trusted-signing-action@v0
@@ -101,7 +102,7 @@ jobs:
           trusted-signing-account-name: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ secrets.ARTIFACT_SIGNING_PROFILE }}
           files-folder: ${{ github.workspace }}/dist-sign
-          files-folder-filter: exe
+          files-folder-filter: exe,dll
           files-folder-recurse: true
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
@@ -109,12 +110,13 @@ jobs:
       - name: Build MSI (WiX v6)
         shell: pwsh
         run: |
-          dotnet tool install --global wix --version 6.*
-          wix extension add -g WixToolset.Util.wixext/6
+          dotnet tool install --global wix --version 6.0.2
+          wix extension add -g WixToolset.Util.wixext/6.0.2
           $v = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages | Where-Object name -eq 'kestrel-agent' | Select-Object -ExpandProperty version
           wix build installer/Kestrel.wxs -arch x64 -d Version=$v `
             -d AgentExe=dist-sign/kestrel-agent.exe `
             -d ScanExe=dist-sign/kestrel-scan.exe `
+            -d CaDll=dist-sign/kestrel_msica.dll `
             -d TrayExe=dist-sign/kestrel-tray.exe `
             -ext WixToolset.Util.wixext -o KestrelAgent.msi
       - name: Sign MSI

@@ -1,7 +1,8 @@
 import { Eye, Keyboard, Loader2, Maximize, Minimize, MonitorPlay, MonitorX, MousePointer2, Plug, PlugZap, ShieldAlert, Type } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import { getCsrfToken } from '@/api/client'
-import { reauthFresh, remoteApi, remoteErrorText } from '@/api/remote'
+import { MFA_NOT_ENABLED_TEXT, reauthFresh, remoteApi, remoteErrorText } from '@/api/remote'
+import { MfaSetupLink } from '@/components/mfa-link'
 import { consentTimeout } from '@/lib/remote-profile'
 import type { DesktopInfo, RemoteAccessProfile, RemoteAvailability } from '@/api/types'
 import { useReauth } from './reauth'
@@ -403,7 +404,10 @@ export function RemoteDesktop({ deviceId, hostname, availability, policyId, effe
         {error ? (
           <p role="alert" className="flex items-start gap-1.5 border-b border-border bg-danger-soft px-4 py-2 text-sm">
             <MonitorX className="mt-0.5 size-4 shrink-0 text-danger" aria-hidden />
-            {error}
+            <span>
+              {error}
+              {error.includes(MFA_NOT_ENABLED_TEXT) ? <MfaSetupLink className="ml-1.5" /> : null}
+            </span>
           </p>
         ) : null}
         {info?.secure_desktop && phase === 'connected' ? (

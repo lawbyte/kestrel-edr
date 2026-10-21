@@ -14,3 +14,8 @@ CLAUDE.local.md
 # Built agent installer served by the server (not source)
 deploy/installers/KestrelAgent.msi
 deploy/installers/VERSION
+
+# Documentation site (VitePress)
+website/node_modules/
+website/.vitepress/cache/
+website/.vitepress/dist/

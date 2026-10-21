@@ -124,7 +124,7 @@ function MinSeverity({ value, onChange, disabled }: { value: Severity; onChange:
   return (
     <label className="flex items-center gap-2 text-sm">
       <span className="text-fg-muted">Send incidents of severity</span>
-      <select value={value} onChange={(e) => onChange(e.target.value as Severity)} className={cn(inputClass, 'h-7 w-32')} disabled={disabled}>
+      <select value={value} onChange={(e) => onChange(e.target.value as Severity)} className={cn(inputClass, 'h-7 w-44')} disabled={disabled}>
         {(['critical', 'high', 'medium', 'low'] as Severity[]).map((s) => (
           <option key={s} value={s}>
             {SEVERITY_LABEL[s]}
