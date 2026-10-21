@@ -158,7 +158,10 @@ export interface FileActivity {
   renames?: number
   ext_changes?: number
   overwrites?: number
+  /** Files whose first operation in the window is a create (1.1.6: a deleted-then-recreated file is not new; folders never count). */
   new_files?: number
+  /** Touched files the process created itself, also before the window (1.1.6+, 0/absent from older agents). */
+  self_created?: number
   deletes?: number
   net_paths?: number
   top_new_ext?: string | null
@@ -324,6 +327,8 @@ export type ResponseAction =
   | { type: 'resume_protection' }
   | { type: 'scan'; path?: string | null }
   | { type: 'collect_triage' }
+  /** Remote removal (`POST /devices/:id/remove`, privilege `devices.remove`); never offered as a normal action. */
+  | { type: 'uninstall_agent'; purge_data?: boolean }
   | {
       type: 'remove_autorun'
       kind: AutorunKind
@@ -513,6 +518,10 @@ export interface AgentHealth {
   etw_ok: boolean
   etw_events_lost?: number
   etw_buffers_lost?: number
+  /** Part of etw_events_lost lost inside ETW (kernel buffers full). Absent/null from older agents. */
+  etw_kernel_events_lost?: number | null
+  /** Part of etw_events_lost dropped by the agent's own sensor queues / caps. */
+  sensor_internal_dropped?: number | null
   events_per_min?: number
   outbox_depth?: number
   sysmon_present?: boolean
@@ -631,7 +640,46 @@ export interface Device {
   uninstall_token_pending?: boolean
   /** Protection turned off locally on the device (null/absent = on). */
   pause?: PauseState | null
+  /** Capabilities from the agent's last Hello (e.g. `live.files`, `live.desktop`, `agent.uninstall`). Absent on older servers. */
+  capabilities?: string[]
+  /** Remote removal ("Remove device") state; null/absent when none was requested. */
+  removal?: DeviceRemoval | null
 }
+
+/** Agent capability needed for `POST /devices/:id/remove` (`CAP_REMOTE_UNINSTALL`). */
+export const CAP_AGENT_UNINSTALL = 'agent.uninstall'
+
+/**
+ * pending: queued, not yet received by the agent (valid 90 days, then expired).
+ * removing: the agent confirmed the uninstall started; the server marks the
+ * device removed once it stays disconnected for 10 minutes.
+ * failed: the agent reported a failure (`error`). removed: uninstalled remotely.
+ */
+export type DeviceRemovalState = 'pending' | 'removing' | 'failed' | 'expired' | 'removed'
+export interface DeviceRemoval {
+  state: DeviceRemovalState
+  action_id: Uuid
+  requested_at: TimestampMs
+  /** Display name or email of the admin who asked for the removal. */
+  requested_by: string | null
+  purge_data: boolean
+  started_at: TimestampMs | null
+  removed_at: TimestampMs | null
+  error: string | null
+}
+/** `POST /devices/:id/remove`. */
+export interface RemoveDeviceRequest {
+  purge_data: boolean
+  /** Must equal the hostname (trimmed, case-insensitive). */
+  confirm_hostname: string
+  comment?: string
+}
+export interface RemoveDeviceResponse {
+  device: Device
+  action: ResponseActionRow
+}
+/** `reason` values of `POST|DELETE /devices/:id/remove` errors. */
+export type RemoveDeviceErrorReason = 'confirm_mismatch' | 'reauth_required' | 'agent_too_old' | 'no_uninstall_token' | 'removal_pending' | 'rate_limited' | 'already_started' | 'no_pending_removal'
 
 export interface DuplicateDevice {
   id: Uuid
@@ -820,7 +868,11 @@ export type IncidentDetail = Incident & {
   comments: Comment[]
 }
 
-export type ActionStatus = 'pending' | 'sent' | 'succeeded' | 'failed' | 'expired'
+/**
+ * `running`: the agent confirmed a long action started (remote removal: "uninstall started").
+ * `cancelled`: withdrawn before delivery (remote removal: `DELETE /devices/:id/remove`).
+ */
+export type ActionStatus = 'pending' | 'sent' | 'running' | 'succeeded' | 'failed' | 'expired' | 'cancelled'
 export interface ResponseActionRow {
   id: Uuid
   device_id: Uuid

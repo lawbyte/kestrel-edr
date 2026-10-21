@@ -217,7 +217,12 @@ pub fn norm_image(p: &str) -> String {
 #[derive(Debug, Clone, Default)]
 pub struct SensorStats {
     pub etw_ok: bool,
+    /// Total = `kernel_events_lost` + `internal_dropped` (kept for older consumers).
     pub events_lost: u64,
+    /// Part of `events_lost`: discarded inside ETW (session buffers full).
+    pub kernel_events_lost: u64,
+    /// Part of `events_lost`: dropped by the sensor's own queues and caps.
+    pub internal_dropped: u64,
     pub buffers_lost: u64,
     pub events_total: u64,
     pub sysmon_present: bool,
@@ -239,6 +244,17 @@ pub trait TrayHandler: Send + Sync {
     /// Receiver of push notifications; transports forward only those
     /// [`TrayPush::visible_to`] the connection's client.
     fn subscribe(&self) -> tokio::sync::broadcast::Receiver<TrayPush>;
+}
+
+/// File name (in the agent state directory) of the uninstall helper's
+/// result after a failed remote removal (`kestrel-uninstall --quiet`).
+pub const UNINSTALL_RESULT_FILE: &str = "remote-uninstall-result.json";
+
+/// The detached uninstall helper started by
+/// [`Platform::start_uninstall_helper`].
+pub trait UninstallHelper: Send {
+    /// Exit code once the helper has exited (`None` while it runs).
+    fn try_exit_code(&mut self) -> Option<i32>;
 }
 
 #[async_trait::async_trait]
@@ -350,6 +366,33 @@ pub trait Platform: Send + Sync {
     /// this session, and only they may answer.
     fn console_session_id(&self) -> Option<u32> {
         None
+    }
+
+    /// Can this platform remove the product ("Remove device",
+    /// `ResponseAction::UninstallAgent`)? Announced as
+    /// `kestrel_common::CAP_REMOTE_UNINSTALL` in `Hello.capabilities`.
+    fn supports_remote_uninstall(&self) -> bool {
+        false
+    }
+
+    /// Start the detached uninstall helper (Windows: a private SYSTEM-only
+    /// copy of `kestrel-uninstall.exe --quiet --token-stdin [--purge]`, the
+    /// token written to its stdin, outside any job object so it survives the
+    /// service stop). `token` was already verified by the agent; it never
+    /// goes on a command line. Returns a handle to watch the helper's exit.
+    fn start_uninstall_helper(
+        &self,
+        token: &str,
+        purge_data: bool,
+    ) -> Result<Box<dyn UninstallHelper>, String> {
+        let _ = (token, purge_data);
+        Err("remote removal is not supported on this platform".into())
+    }
+
+    /// Where the uninstall helper writes its result when the removal
+    /// failed (read by the agent, also after a restart).
+    fn uninstall_result_path(&self) -> std::path::PathBuf {
+        self.state_dir().join(UNINSTALL_RESULT_FILE)
     }
 
     /// Local wall-clock time of the device as (weekday 0 = Monday … 6 =

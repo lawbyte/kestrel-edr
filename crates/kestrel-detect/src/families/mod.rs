@@ -239,6 +239,12 @@ impl<'a> Ctx<'a> {
         self.st.system_drive()
     }
 
+    /// Was this process the target of an injection / memory-write signal
+    /// (ST-07's inputs) in its lifetime?
+    pub fn tampered(&self, guid: &ProcessGuid) -> bool {
+        self.st.is_tampered(guid)
+    }
+
     /// The live genuine lsass.exe: System32 on the system volume *and*
     /// started by System32 wininit.exe (V-L1). Cached by the engine, so this
     /// is a single lookup per event (V-L14).

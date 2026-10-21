@@ -355,6 +355,12 @@ impl Inner {
                 "resume_protection is handled by the agent, not the platform".into(),
                 None,
             ),
+            // Handled by the agent core (token check, outcome, helper start).
+            ResponseAction::UninstallAgent { .. } => (
+                false,
+                "uninstall_agent is handled by the agent, not the platform".into(),
+                None,
+            ),
             ResponseAction::KillProcess { pid, guid, tree } => plain(respond::kill(
                 *pid,
                 self.guid_expect(guid),
@@ -834,6 +840,18 @@ impl Platform for WindowsPlatform {
 
     fn remote_desktop(&self) -> Option<Arc<dyn RemoteDesktop>> {
         Some(self.inner.remote_desktop.clone())
+    }
+
+    fn supports_remote_uninstall(&self) -> bool {
+        true
+    }
+
+    fn start_uninstall_helper(
+        &self,
+        token: &str,
+        purge_data: bool,
+    ) -> Result<Box<dyn kestrel_platform::UninstallHelper>, String> {
+        super::uninstall_helper::start(token, purge_data)
     }
 
     fn console_session_id(&self) -> Option<u32> {

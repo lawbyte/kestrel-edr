@@ -543,6 +543,35 @@ impl CredDump {
             if t.return_code == STATUS_INVALID_CID || !suspicious_source(ctx, &p, mask) {
                 return;
             }
+            // Triage 2026-10-22 item 10: NVIDIA nvcontainer.exe and
+            // BraveUpdate.exe (validly signed, Program Files) asked for
+            // query + VM_READ (0x410) and LSA protection refused. A signed
+            // Program Files service / updater asking only for read / query
+            // rights that Windows refused: Low Audit, still recorded.
+            // Unsigned or user-path openers, write / dup-handle / thread
+            // masks and successful opens (CD-03) are unchanged.
+            if crate::legit_apps::lsass_read_only_mask(mask)
+                && crate::legit_apps::signed_program_files_service(
+                    &p,
+                    ctx.system_drive(),
+                    ctx.tampered(&p.guid),
+                )
+            {
+                let mut h = FamilyHit::new(
+                    CD06,
+                    &p.guid,
+                    Severity::Low,
+                    format!(
+                        "{} (validly signed {} service installed under Program Files) asked LSASS for {rights} and Windows refused (status 0x{:08X}); signed services and updaters probe every process this way, so this is recorded only. LSA protection held",
+                        who(&p),
+                        p.signer.as_deref().unwrap_or("").trim(),
+                        t.return_code
+                    ),
+                );
+                h.audit_only = true;
+                out.push(h);
+                return;
+            }
             let mut h = FamilyHit::new(
                 CD06,
                 &p.guid,
@@ -1730,7 +1759,7 @@ pub(crate) fn catalog() -> Vec<RuleMeta> {
             C, High, &["T1003.001"], false,
             "Alert; in Protect mode also suspend the requesting process for the suspend window",
             &[MS_LSA_PROTECTION, RUSTINEL_302, FIBRATUS_ACCESS],
-            &["Inventory / monitoring tools that request full access and fall back to query rights"]),
+            &["Inventory / monitoring tools that request full access and fall back to query rights", "Low Audit (owner PC 2026-10-22): a validly signed native service or updater installed under Program Files on the system volume (not an interpreter, LOLBin or Electron host) whose refused request carried only read / query rights (VM_READ, QUERY_INFORMATION, QUERY_LIMITED_INFORMATION, SYNCHRONIZE; e.g. NVIDIA nvcontainer.exe and BraveUpdate.exe asking for 0x410). Unsigned or user-path openers, write / thread / dup-handle masks and successful opens (CD-03) keep their severity"]),
         meta(CD07, "LSASS dump preparation via SilentProcessExit / IFEO",
             "A value was written under HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\lsass*, or Image File Execution Options\\lsass.exe got GlobalFlag with FLG_MONITOR_SILENT_PROCESS_EXIT (0x200), Debugger or VerifierDlls. AuditLevel=8 (LSA protection audit mode) is legitimate and ignored. Logic follows SigmaHQ 55e29995 (author attribution: SigmaHQ, DRL 1.1).",
             C, Critical, &["T1003.001", "T1112", "T1546.012"], true,

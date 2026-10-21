@@ -38,11 +38,12 @@ impl SensorHandle for Sensors {
             // + persistence records dropped by the enrichment queue (V-M9).
             // Not counted: `raw_discarded_shutdown` (stragglers of sessions
             // being torn down during an orderly sensor restart, crate::pump).
-            events_lost: c.etw_events_lost.load(Ordering::Relaxed)
-                + c.raw_dropped.load(Ordering::Relaxed)
-                + c.out_dropped.load(Ordering::Relaxed)
-                + c.file_agg_dropped.load(Ordering::Relaxed)
-                + c.persist_dropped.load(Ordering::Relaxed),
+            events_lost: c.kernel_lost() + c.internal_dropped(),
+            // Owner-PC triage 2026-10-22: the two causes need different
+            // fixes (consumer too slow / buffers too small vs Kestrel's own
+            // queues), so they are also reported separately.
+            kernel_events_lost: c.kernel_lost(),
+            internal_dropped: c.internal_dropped(),
             buffers_lost: c.etw_buffers_lost.load(Ordering::Relaxed),
             events_total: c.emitted.load(Ordering::Relaxed),
             sysmon_present: c.sysmon_present.load(Ordering::Relaxed),
@@ -122,6 +123,7 @@ pub fn start(
         persistence: g.persistence,
         credential_access: g.credential_access,
         file_state: file_state.clone(),
+        canaries: shared.canaries.clone(),
     };
 
     let mut threads: Vec<JoinHandle<()>> = Vec::new();
@@ -382,6 +384,10 @@ fn watchdog(
                 reg_watch_keys = counters.reg_watch_keys.load(Ordering::Relaxed),
                 persist_events = counters.persist_events.load(Ordering::Relaxed),
                 persist_dropped = counters.persist_dropped.load(Ordering::Relaxed),
+                kernel_events_lost = counters.kernel_lost(),
+                internal_dropped = counters.internal_dropped(),
+                file_prefiltered = counters.file_prefiltered.load(Ordering::Relaxed),
+                pid_reuse_dropped = counters.pid_reuse_dropped.load(Ordering::Relaxed),
                 "sensor health"
             );
         }

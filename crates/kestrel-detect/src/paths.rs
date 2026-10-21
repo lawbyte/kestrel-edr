@@ -1414,6 +1414,201 @@ pub fn is_trusted_owner(proc_: &ProcessInfo, store: &SensitiveStore) -> bool {
     store.owners.iter().any(|o| glob_match(o, &name))
 }
 
+// ---------------------------------------------------------------------------
+// Store location anchoring (owner's PC triage 2026-10-22)
+// ---------------------------------------------------------------------------
+
+/// Where a matched store must sit to be the real one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Anchor {
+    /// Under a user profile root, below `AppData\` (browsers, Discord,
+    /// password-manager apps, WAM / MSAL caches, gcloud).
+    ProfileAppData,
+    /// Directly in a user profile's home folder (`.aws`, `.azure`, `.kube`,
+    /// `.docker`, `.ssh`).
+    ProfileHome(&'static str),
+    /// Anywhere under a user profile root (Git / GitHub CLI / ngrok /
+    /// Terraform tokens, whose location depends on configuration).
+    Profile,
+    /// Windows Credential Manager / DPAPI: a profile's `AppData\` or the
+    /// machine-wide locations (`ProgramData\Microsoft\`, System32 `Protect`).
+    WinCred,
+    /// Portable / installer-chosen locations (Steam, Telegram, FTP clients,
+    /// desktop wallets, KeePass, VPN profiles, `.ppk` keys, mail): only
+    /// fake profile trees inside Temp are rejected.
+    Free,
+}
+
+fn anchor_of(store: &SensitiveStore) -> Anchor {
+    match store.owner {
+        OwnerApp::Chromium | OwnerApp::Firefox | OwnerApp::Discord => Anchor::ProfileAppData,
+        OwnerApp::Ssh if store.app == "SSH" => Anchor::ProfileHome(".ssh"),
+        OwnerApp::CloudCli => match store.app {
+            "AWS" => Anchor::ProfileHome(".aws"),
+            "Azure CLI" => Anchor::ProfileHome(".azure"),
+            "Kubernetes" => Anchor::ProfileHome(".kube"),
+            "Docker" => Anchor::ProfileHome(".docker"),
+            "Windows token broker" | "Microsoft identity (MSAL)" | "Google Cloud SDK" => {
+                Anchor::ProfileAppData
+            }
+            _ => Anchor::Profile,
+        },
+        OwnerApp::PasswordManager if matches!(store.app, "Bitwarden" | "1Password") => {
+            Anchor::ProfileAppData
+        }
+        OwnerApp::Other if matches!(store.app, "Windows Credential Manager" | "Windows DPAPI") => {
+            Anchor::WinCred
+        }
+        _ => Anchor::Free,
+    }
+}
+
+/// The part of a normalised path below a user profile root, or `None`.
+/// Profile roots: `<any drive>:\Users\<name>\` (also driveless, as left by
+/// `\Device\HarddiskVolumeN`), the SYSTEM profile
+/// (`\Windows\System32\config\systemprofile\`), service profiles
+/// (`\Windows\ServiceProfiles\<name>\`) and redirected folders on a share
+/// (`\\server\share\...\AppData\...`, returned from `appdata\` on).
+pub fn profile_relative(norm: &str) -> Option<&str> {
+    let mut d = crate::util::strip_drive(norm);
+    if let Some(unc) = d.strip_prefix(r"\\") {
+        // Review M2: an administrative share of this machine
+        // (`\\localhost\c$\Users\...`) is a local path.
+        let mut parts = unc.splitn(3, '\\');
+        let host = parts.next().unwrap_or("");
+        let share = parts.next().unwrap_or("");
+        let loopback = matches!(host, "localhost" | "127.0.0.1" | "::1" | "." | "?");
+        let admin = share.len() == 2 && share.ends_with('$');
+        if loopback && admin {
+            d = &d[2 + host.len() + 1 + share.len()..];
+        } else {
+            let i = d.find(r"\appdata\")?;
+            return Some(&d[i + 1..]);
+        }
+    }
+    let named = |prefix: &str| -> Option<&str> {
+        let r = d.strip_prefix(prefix)?;
+        let (user, rest) = r.split_once('\\')?;
+        (!user.is_empty() && user != "." && user != ".." && !rest.is_empty()).then_some(rest)
+    };
+    named(r"\users\")
+        .or_else(|| named(r"\windows\serviceprofiles\"))
+        .or_else(|| d.strip_prefix(r"\windows\system32\config\systemprofile\"))
+}
+
+/// `NAME~N` / `NAME~N.EXT`: an 8.3 short-name component.
+fn short_name_component(c: &str) -> bool {
+    let stem = c.split('.').next().unwrap_or(c);
+    stem.rsplit_once('~').is_some_and(|(a, n)| {
+        !a.is_empty() && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+/// A fake profile tree (`...\sim-fs\C\Users\j.doe\...`, a test or replay
+/// fixture, a copy unpacked from an archive) nested inside a profile's Temp
+/// folder or below another profile: a component `users` followed by more
+/// components, below the real profile root.
+fn nested_profile_tree(rel: &str) -> bool {
+    let comps: Vec<&str> = rel.split('\\').filter(|c| !c.is_empty()).collect();
+    comps
+        .iter()
+        .enumerate()
+        .any(|(i, c)| *c == "users" && i + 2 < comps.len())
+}
+
+/// Package family name (`<name>_<publisher id>`, lower-case) of an image
+/// that runs from its MSIX package folder
+/// `<system drive>:\Program Files\WindowsApps\<name>_<ver>_<arch>_<res>_<publisher id>\`.
+/// WindowsApps is writable only by TrustedInstaller.
+pub fn msix_package_family(image: &str, system_drive: char) -> Option<String> {
+    if PathClass::of_with_system_drive(image, system_drive) != PathClass::ProgramFiles {
+        return None;
+    }
+    let rest = crate::protect::on_system_volume(image, system_drive)?;
+    let dir = rest
+        .strip_prefix(r"\program files\windowsapps\")?
+        .split('\\')
+        .next()?;
+    let parts: Vec<&str> = dir.split('_').collect();
+    if parts.len() < 3 || parts[0].is_empty() || parts.contains(&"..") {
+        return None;
+    }
+    let publisher = parts.last().filter(|p| !p.is_empty())?;
+    Some(format!("{}_{}", parts[0], publisher))
+}
+
+/// Owner's PC triage 2026-10-22: a credential store matched by name must
+/// also sit where the real store lives. Stores were matched by path suffix,
+/// so Kestrel's own test binaries reading a simulated profile under
+/// `%TEMP%\.tmpX\sim-fs\C\Users\j.doe\...`, an MSIX app reading its own
+/// virtualised copy under `AppData\Local\Packages\<its family>\LocalCache\`
+/// and a shell whose command text was logged as a path
+/// (`D:\project\...\c\Users\azka\.claude\...`) fired ST-01 / ST-02.
+///
+/// * profile stores (browsers, Discord, Bitwarden / 1Password, WAM / MSAL /
+///   gcloud caches) must be below `<profile>\AppData\`; home stores
+///   (`.aws`, `.azure`, `.kube`, `.docker`, `.ssh`) directly in the
+///   profile folder; Git / GitHub CLI / ngrok / Terraform tokens anywhere
+///   in a profile. A profile root is `<drive>:\Users\<name>\`, the SYSTEM or
+///   a service profile, or a redirected `AppData` on a share;
+/// * never inside the profile's Temp folder or a nested `\users\<x>\` tree;
+/// * Windows Credential Manager / DPAPI keys: a profile's `AppData\` or the
+///   machine-wide `\ProgramData\Microsoft\` and `\Windows\System32\Microsoft\Protect\`;
+/// * portable stores (Steam, Telegram, FTP clients, desktop wallets,
+///   KeePass, VPN profiles, `.ppk` keys) keep matching anywhere except in a
+///   fake profile tree inside Temp;
+/// * a store under `AppData\Local\Packages\<family>\LocalCache\` read by
+///   that package's own app (image in its WindowsApps folder) is the app's
+///   private data, not the store it imitates. Any other reader still counts
+///   (Store-installed Telegram keeps its `tdata` there).
+///
+/// Kestrel's decoys live under the real profile and still match.
+pub fn store_location_real(
+    norm: &str,
+    store: &SensitiveStore,
+    reader_image: &str,
+    system_drive: char,
+    reader_tampered: bool,
+) -> bool {
+    // Review M2: an 8.3 short name (`APPDAT~1`) may stand for any long name
+    // the anchors below look for; fail open (match as before) rather than
+    // lose a real store.
+    if norm.split('\\').any(short_name_component) {
+        return true;
+    }
+    let rel = profile_relative(norm);
+    if let Some(r) = rel {
+        if let Some(pk) = r.strip_prefix(r"appdata\local\packages\") {
+            if let Some((family, tail)) = pk.split_once('\\') {
+                if tail.starts_with(r"localcache\")
+                    && !reader_tampered
+                    && msix_package_family(reader_image, system_drive).as_deref() == Some(family)
+                {
+                    return false;
+                }
+            }
+        }
+        if nested_profile_tree(r) {
+            return false;
+        }
+    }
+    let in_temp = rel.is_some_and(|r| r.starts_with(r"appdata\local\temp\"));
+    match anchor_of(store) {
+        Anchor::Free => true,
+        _ if in_temp => false,
+        Anchor::Profile => rel.is_some(),
+        Anchor::ProfileAppData => rel.is_some_and(|r| r.starts_with(r"appdata\")),
+        Anchor::ProfileHome(dir) => rel.is_some_and(|r| r.split('\\').next() == Some(dir)),
+        Anchor::WinCred => {
+            let d = crate::util::strip_drive(norm);
+            rel.is_some_and(|r| r.starts_with(r"appdata\"))
+                || (rel.is_none()
+                    && (d.starts_with(r"\programdata\microsoft\")
+                        || d.starts_with(r"\windows\system32\microsoft\protect\")))
+        }
+    }
+}
+
 /// Unsigned / invalid / **unknown** signature, or image in Temp / Downloads /
 /// external media. `Unknown` (enrichment not available yet) is never trusted:
 /// the Windows layer computes hash + signature synchronously for first-seen
@@ -1734,6 +1929,9 @@ fn chromium_file(
     None
 }
 
+/// Noun of Steam's `config\config.vdf` store (client / library configuration).
+pub const STEAM_CONFIG_NOUN: &str = "client configuration (config.vdf)";
+
 fn comp_idx(comps: &[&str], name: &str) -> Option<usize> {
     comps.iter().position(|c| *c == name)
 }
@@ -1888,10 +2086,21 @@ pub fn match_normalized(p: &str) -> Option<SensitiveStore> {
                 O_STEAM,
             );
         }
-        if rest.len() == 2
-            && rest[0] == "config"
-            && matches!(rest[1], "loginusers.vdf" | "config.vdf")
-        {
+        // Owner's PC 2026-10-22: `config.vdf` is Steam's client / library
+        // configuration (GPU and overlay tools such as NVIDIA's nvcontainer
+        // scan it); stealers grab it with the secrets, so it stays a store
+        // under its own noun ([`STEAM_CONFIG_NOUN`]) that signed Program Files
+        // vendor services may read (Low Audit, see `legit_apps`).
+        if rest.len() == 2 && rest[0] == "config" && rest[1] == "config.vdf" {
+            return store(
+                DataCategory::Steam,
+                OwnerApp::Steam,
+                "Steam",
+                STEAM_CONFIG_NOUN,
+                O_STEAM,
+            );
+        }
+        if rest.len() == 2 && rest[0] == "config" && rest[1] == "loginusers.vdf" {
             return store(
                 DataCategory::Steam,
                 OwnerApp::Steam,

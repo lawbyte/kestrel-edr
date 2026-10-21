@@ -946,6 +946,296 @@ pub fn importer(p: &ProcessInfo, system_drive: char, tampered: bool) -> Option<&
     Some(app)
 }
 
+// ---------------------------------------------------------------------------
+// Owner's PC alert triage 2026-10-22 (7,614 alerts, all-Audit policy)
+// ---------------------------------------------------------------------------
+
+/// Is the image signer exactly one of [`WAM_CLIENT_SIGNERS`] with a valid signature?
+fn microsoft_client_signed(p: &ProcessInfo) -> bool {
+    p.signed == SignatureState::Valid
+        && p.signer.as_deref().is_some_and(|s| {
+            WAM_CLIENT_SIGNERS
+                .iter()
+                .any(|w| s.trim().eq_ignore_ascii_case(w))
+        })
+}
+
+/// Triage item 6: VS Code installs per user by default
+/// (`%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe`, Microsoft
+/// Corporation) and was killed by ST-04 after a WAM token-cache read and a
+/// telemetry send to `mobile.events.data.microsoft.com`. A WAM token-cache
+/// read by a validly Microsoft-signed image (Corporation or Windows) that is
+/// **not** under Program Files / WindowsApps (those are
+/// [`wam_client_reader`]) but in the user's profile (`PathClass::UserWritable`;
+/// never Temp, Downloads, external media or another volume), not a LOLBin,
+/// script host, interpreter or REPL, without a script / eval / inspector /
+/// remote-control argument, a plain launch for Electron hosts, and never
+/// injected into. Its ST-01 is Low Audit; ST-04 is Low Audit **only** when
+/// the send goes to a [`microsoft_endpoint`] (by DNS name) and keeps the full
+/// response for any other destination. The per-user folder is writable by
+/// the user (DLL side-loading, file swap): this is why the allowance is
+/// destination-bound and never silent.
+pub fn ms_wam_reader_per_user(
+    p: &ProcessInfo,
+    store_app: &str,
+    system_drive: char,
+    tampered: bool,
+) -> bool {
+    if tampered || store_app != "Windows token broker" || !microsoft_client_signed(p) {
+        return false;
+    }
+    if p.path_class != PathClass::UserWritable
+        || crate::protect::on_system_volume(&p.image, system_drive).is_none()
+    {
+        return false;
+    }
+    // Review H2: a catalog-signed Microsoft binary (powershell.exe) copied
+    // and renamed into the profile would otherwise qualify. Only the exact
+    // per-user install locations of Microsoft's WAM clients count.
+    let norm = crate::paths::normalize_path(&p.image);
+    let Some(rel) = crate::paths::profile_relative(&norm) else {
+        return false;
+    };
+    if !PER_USER_MS_WAM_CLIENTS.contains(&rel) {
+        return false;
+    }
+    let name = crate::paths::file_name(&p.image).to_ascii_lowercase();
+    if name.is_empty() || is_interpreter(&name) {
+        return false;
+    }
+    if runs_script(&p.cmdline) || is_remote_controlled(&p.cmdline) || has_eval_switch(&p.cmdline) {
+        return false;
+    }
+    !(ELECTRON_HOSTS.contains(&name.as_str()) && !positional_args(&p.cmdline).is_empty())
+}
+
+/// Exact per-user install locations (relative to the profile root,
+/// lower-case) of Microsoft-signed WAM clients (review H2).
+pub const PER_USER_MS_WAM_CLIENTS: &[&str] = &[
+    r"appdata\local\programs\microsoft vs code\code.exe",
+    r"appdata\local\programs\microsoft vs code insiders\code - insiders.exe",
+    r"appdata\local\microsoft\onedrive\onedrive.exe",
+];
+
+/// Triage item 6, narrowed after review H1: Microsoft **sign-in and
+/// telemetry** endpoints a WAM client talks to after reading its token
+/// cache (label-boundary suffix match on the correlated DNS name, never an
+/// IP). Storage and collaboration services where anyone can own a tenant
+/// (SharePoint, OneDrive, Graph, Office, Azure DevOps, `*.windows.net`,
+/// `*.azure.com`) are deliberately not listed: a stealer can upload stolen
+/// tokens to its own tenant there.
+pub const MICROSOFT_ENDPOINTS: &[&str] = &[
+    "events.data.microsoft.com",
+    "login.microsoftonline.com",
+    "login.microsoft.com",
+    "login.live.com",
+    "login.windows.net",
+    "exp-tas.com",
+    "vscode-cdn.net",
+    "update.code.visualstudio.com",
+    "marketplace.visualstudio.com",
+];
+
+/// Customer-controlled namespaces under the suffixes above (anyone can
+/// create a storage account, Service Bus namespace, SQL server or VM name
+/// there): never a Microsoft endpoint for this purpose.
+pub const MICROSOFT_CUSTOMER_NAMESPACES: &[&str] = &[
+    "core.windows.net",
+    "servicebus.windows.net",
+    "database.windows.net",
+    "azurewebsites.windows.net",
+    "cloudapp.azure.com",
+    "azurecontainer.azure.com",
+];
+
+/// Is `host` a Microsoft-owned endpoint ([`MICROSOFT_ENDPOINTS`], minus
+/// [`MICROSOFT_CUSTOMER_NAMESPACES`])?
+pub fn microsoft_endpoint(host: &str) -> bool {
+    let h = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if h.is_empty() || h.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    MICROSOFT_ENDPOINTS
+        .iter()
+        .any(|s| crate::util::host_matches(&h, s))
+        && !MICROSOFT_CUSTOMER_NAMESPACES
+            .iter()
+            .any(|s| crate::util::host_matches(&h, s))
+}
+
+/// Is `p` a validly Microsoft-signed (Corporation / Windows) sender outside
+/// Temp / Downloads / external media that was never injected into (the
+/// sender side of the per-user WAM allowance)?
+pub fn microsoft_sender_ok(p: &ProcessInfo, tampered: bool) -> bool {
+    !tampered
+        && microsoft_client_signed(p)
+        && provider_allowance_ok(p, tampered)
+        && !is_interpreter(&crate::paths::file_name(&p.image).to_ascii_lowercase())
+}
+
+/// Triage item 8: SSH client family that owns the user's `.ssh` keys.
+pub const SSH_CLIENT_IMAGES: &[&str] = &[
+    "ssh.exe",
+    "ssh-agent.exe",
+    "ssh-add.exe",
+    "scp.exe",
+    "sftp.exe",
+    "ssh-keygen.exe",
+    "plink.exe",
+    "pageant.exe",
+    "git-remote-*.exe",
+];
+
+/// Install folders (driveless, lower-case, system volume) of the SSH
+/// clients above. Git for Windows ships its `usr\bin\ssh.exe` unsigned, so
+/// the location (admin-only) is the identity here, not the signature.
+pub const SSH_CLIENT_DIRS: &[&str] = &[
+    r"\windows\system32\openssh\",
+    r"\program files\git\usr\bin\",
+    r"\program files\openssh\",
+    r"\program files\putty\",
+];
+
+/// `ssh -o` options (and `ssh_config` keywords) that run a local command:
+/// ssh then becomes a launcher, not just a client.
+const SSH_COMMAND_OPTIONS: &[&str] = &[
+    "proxycommand",
+    "localcommand",
+    "permitlocalcommand",
+    "knownhostscommand",
+    "securitykeyprovider",
+    "pkcs11provider",
+];
+
+/// The first command-running or library-loading option on an SSH client
+/// command line, if any. `name` is the lower-case image file name.
+pub fn ssh_suspicious_option(name: &str, cmdline: &str) -> Option<String> {
+    let c = cmdline.to_ascii_lowercase();
+    if let Some(o) = SSH_COMMAND_OPTIONS.iter().find(|o| c.contains(*o)) {
+        return Some(o.to_string());
+    }
+    // Review M3: switches that load a library into the client, run another
+    // program, or read an alternate config file (which can carry
+    // ProxyCommand / Match exec / a provider). Case-sensitive (`-i` is the
+    // ordinary identity file); per client, because ssh's own `-s`
+    // (subsystem, used by sftp) and `-D` (SOCKS forward) are ordinary.
+    let flags: &[&str] = match name {
+        "ssh.exe" => &["-I", "-F"],
+        "scp.exe" | "sftp.exe" => &["-F", "-S", "-D"],
+        "ssh-add.exe" => &["-s", "-S", "-e"],
+        "ssh-keygen.exe" => &["-D", "-w"],
+        "ssh-agent.exe" => &["-P"],
+        _ => &[],
+    };
+    cmdline
+        .split(|ch: char| ch.is_whitespace() || ch == '"')
+        .find(|t| flags.iter().any(|f| t.starts_with(f)))
+        .map(str::to_string)
+}
+
+/// Triage item 8: Git for Windows' unsigned `ssh.exe` read `~\.ssh\id_rsa`
+/// and connected to github.com:22 (ST-01 + ST-04 critical). An SSH client
+/// ([`SSH_CLIENT_IMAGES`]) directly inside one of [`SSH_CLIENT_DIRS`] on the
+/// system volume, with no command-running option, owns the SSH key stores.
+/// Copies elsewhere (Temp, Downloads, a profile folder, another volume),
+/// other readers and ssh with `ProxyCommand` / `LocalCommand` /
+/// `KnownHostsCommand` / provider options still alert.
+pub fn ssh_client_owner(
+    p: &ProcessInfo,
+    store: &crate::paths::SensitiveStore,
+    system_drive: char,
+    tampered: bool,
+) -> bool {
+    if tampered || store.owner != crate::paths::OwnerApp::Ssh || p.image.is_empty() {
+        return false;
+    }
+    let Some(rest) = crate::protect::on_system_volume(&p.image, system_drive) else {
+        return false;
+    };
+    if rest.split('\\').any(|c| c == "..") {
+        return false;
+    }
+    let in_dir = SSH_CLIENT_DIRS.iter().any(|d| {
+        rest.strip_prefix(d)
+            .is_some_and(|n| !n.is_empty() && !n.contains('\\'))
+    });
+    let name = crate::paths::file_name(&rest).to_string();
+    in_dir
+        && SSH_CLIENT_IMAGES
+            .iter()
+            .any(|i| crate::paths::glob_match(i, &name))
+        && ssh_suspicious_option(&name, &p.cmdline).is_none()
+}
+
+/// Triage item 9: NVIDIA's `nvcontainer.exe` (signed, Program Files) read
+/// Steam's `config\config.vdf`, then contacted api-prod.nvidia.com. GPU /
+/// overlay / game-library tools scan that file. A read of the Steam client
+/// configuration store ([`crate::paths::STEAM_CONFIG_NOUN`]) by a validly
+/// signed native Program Files image ([`signed_program_files_native`]: not
+/// an interpreter or Electron host, no script / remote-control argument,
+/// not tampered) is Low Audit (ST-04 after only
+/// such reads is Low Audit too). The Steam secrets (`ssfn*`,
+/// `loginusers.vdf`, `local.vdf`) are never covered.
+pub fn vendor_config_reader(
+    p: &ProcessInfo,
+    store: &crate::paths::SensitiveStore,
+    system_drive: char,
+    tampered: bool,
+) -> bool {
+    store.app == "Steam"
+        && store.noun == crate::paths::STEAM_CONFIG_NOUN
+        && signed_program_files_native(p, system_drive, tampered)
+}
+
+/// A validly signed (named signer) native image under Program Files /
+/// WindowsApps on the system volume: not an interpreter, script host, LOLBin
+/// or Electron host (those keep the stricter [`signed_program_files_app`]
+/// test), no script argument, not under remote control, not tampered.
+/// Unlike [`signed_program_files_app`], `-e` / `-p` style switches are not
+/// held against it: they mean "eval" / "print" only to a runtime, and
+/// native services use them for their own options (NVIDIA's nvcontainer
+/// runs with `-p 30000`, owner's PC 2026-10-22).
+fn signed_program_files_native(p: &ProcessInfo, system_drive: char, tampered: bool) -> bool {
+    if tampered
+        || p.signed != SignatureState::Valid
+        || !p.signer.as_deref().is_some_and(|s| !s.trim().is_empty())
+    {
+        return false;
+    }
+    let Some(sub) = program_files_rest(&p.image, system_drive) else {
+        return false;
+    };
+    let name = sub.rsplit('\\').next().unwrap_or("").to_string();
+    !name.is_empty()
+        && !is_interpreter(&name)
+        && !ELECTRON_HOSTS.contains(&name.as_str())
+        && !runs_script(&p.cmdline)
+        && !is_remote_controlled(&p.cmdline)
+}
+
+/// Triage item 11: WSL's service answers DNS for Linux processes (DNS
+/// tunnelling), so every lookup made inside WSL shows up as
+/// `C:\Program Files\WSL\wslservice.exe`. That exact image on the system
+/// volume with a valid Microsoft signature.
+pub fn wsl_dns_proxy(p: &ProcessInfo, system_drive: char) -> bool {
+    microsoft_client_signed(p)
+        && crate::protect::on_system_volume(&p.image, system_drive).as_deref()
+            == Some(r"\program files\wsl\wslservice.exe")
+}
+
+/// Triage item 10: read-only LSASS access bits (QUERY_INFORMATION 0x400,
+/// QUERY_LIMITED_INFORMATION 0x1000, VM_READ 0x10, SYNCHRONIZE 0x100000).
+pub fn lsass_read_only_mask(mask: u32) -> bool {
+    mask != 0 && mask & !(0x10 | 0x400 | 0x1000 | 0x0010_0000) == 0
+}
+
+/// Triage item 10: a validly signed (named signer) Program Files service or
+/// updater that is not an interpreter / LOLBin and runs no script / eval /
+/// remote-control argument (NVIDIA nvcontainer, BraveUpdate).
+pub fn signed_program_files_service(p: &ProcessInfo, system_drive: char, tampered: bool) -> bool {
+    signed_program_files_native(p, system_drive, tampered)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

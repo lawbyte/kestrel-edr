@@ -1,4 +1,4 @@
-import { AlertOctagon, AlertTriangle, Circle, ChevronDown, Info, ShieldCheck, ShieldAlert, ShieldX, ShieldQuestion, Wifi, WifiOff, Activity, Lock, CheckCircle2, XCircle, Clock, Send, Hourglass, FolderDown, FolderClock, FolderOpen, Network, HardDrive, Download, SquareTerminal, KeyRound, Globe, Upload, Radar, ShieldOff, FileCode2, FileLock2, Fingerprint, Anchor, Bird, Sunrise, Pin, CircleDashed, Rocket, OctagonPause, Waypoints, CircleHelp, Server, Bot } from 'lucide-react'
+import { AlertOctagon, AlertTriangle, Circle, ChevronDown, Info, ShieldCheck, ShieldAlert, ShieldX, ShieldQuestion, Wifi, WifiOff, Activity, Lock, CheckCircle2, XCircle, Clock, Send, Hourglass, Loader, Ban, FolderDown, FolderClock, FolderOpen, Network, HardDrive, Download, SquareTerminal, KeyRound, Globe, Upload, Radar, ShieldOff, FileCode2, FileLock2, Fingerprint, Anchor, Bird, Sunrise, Pin, CircleDashed, Rocket, OctagonPause, Waypoints, CircleHelp, Server, Bot } from 'lucide-react'
 import type { ActionStatus, DeviceStatus, GroupUpdateRing, UpdateReleaseState, IncidentStatus, PathClass, RuleCategory, RuleMode, Severity, SignatureState } from '@/api/types'
 import { ACTION_STATUS_LABEL, DEVICE_STATUS_LABEL, INCIDENT_STATUS_LABEL, PATH_CLASS_LABEL, RULE_CATEGORY_LABEL, SEVERITY_LABEL, SIGNATURE_LABEL } from '@/lib/labels'
 import { cn } from '@/lib/utils'
@@ -88,9 +88,11 @@ export function IncidentStatusBadge({ status }: { status: IncidentStatus }) {
 const ACT: Record<ActionStatus, { icon: typeof Clock; cls: string }> = {
   pending: { icon: Hourglass, cls: 'text-fg-muted' },
   sent: { icon: Send, cls: 'text-accent-text' },
+  running: { icon: Loader, cls: 'text-accent-text' },
   succeeded: { icon: CheckCircle2, cls: 'text-ok' },
   failed: { icon: XCircle, cls: 'text-danger' },
   expired: { icon: Clock, cls: 'text-fg-subtle' },
+  cancelled: { icon: Ban, cls: 'text-fg-subtle' },
 }
 export function ActionStatusBadge({ status }: { status: ActionStatus }) {
   const s = ACT[status]

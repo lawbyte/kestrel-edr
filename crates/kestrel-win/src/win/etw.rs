@@ -18,10 +18,14 @@
 //!   events, used only as a command-line source for processes that exit
 //!   before the agent can query them.
 //!
-//! Buffers: 64 KB, Minimum = Maximum, no per-processor buffering (keeps
-//! process start/stop ordered). Core uses a 1 s flush timer instead of the
-//! 5-10 s research guideline because suspend-on-suspicion latency depends on
-//! it; the high-volume IO session uses 5 s.
+//! Buffers: 64 KB, no per-processor buffering (keeps process start/stop
+//! ordered), Minimum < Maximum for the burst-prone sessions so ETW can grow
+//! the pool during a build instead of dropping events (plan and memory bound
+//! in [`consts::buffers`]). Core uses a 1 s flush timer instead of the 5-10 s
+//! research guideline because suspend-on-suspicion latency depends on it; the
+//! high-volume IO session uses 5 s. Kernel-File opens are filtered in the
+//! callback ([`crate::filters::kernel_file_candidate`]) before they reach
+//! the translator queue.
 //!
 //! Callbacks decode only the fields Kestrel uses into [`Raw`] and `try_send`
 //! them; drops are counted. For ProcessStart the callback also reads the new
@@ -42,11 +46,11 @@ use ferrisetw::trace::{
 };
 use ferrisetw::{EventRecord, SchemaLocator};
 use kestrel_common::{FileActivity, Integrity, RegistryOp, TamperKind};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::ERROR_SUCCESS;
 use windows_sys::Win32::System::Diagnostics::Etw::{
@@ -250,6 +254,30 @@ pub struct Counters {
     /// cumulative for the agent's lifetime instead of restarting at 0.
     pub etw_events_lost_carry: AtomicU64,
     pub etw_buffers_lost_carry: AtomicU64,
+    /// Events whose pid had been reused and whose owner at the event time
+    /// is unknown ([`crate::proctrack`]): dropped instead of being blamed
+    /// on the new owner. Diagnostics, not part of `events_lost`.
+    pub pid_reuse_dropped: AtomicU64,
+    /// Kernel-File opens / creates not handed to the translator because the
+    /// path can never be sensitive ([`crate::filters::kernel_file_candidate`]).
+    pub file_prefiltered: AtomicU64,
+}
+
+impl Counters {
+    /// Events lost inside ETW (session buffers full: the consumer could
+    /// not keep up), cumulative over sensor restarts.
+    pub fn kernel_lost(&self) -> u64 {
+        self.etw_events_lost.load(Ordering::Relaxed)
+    }
+
+    /// Events Kestrel itself dropped: raw queue full, agent channel full,
+    /// file-activity aggregator caps, persistence enrichment queue full.
+    pub fn internal_dropped(&self) -> u64 {
+        self.raw_dropped.load(Ordering::Relaxed)
+            + self.out_dropped.load(Ordering::Relaxed)
+            + self.file_agg_dropped.load(Ordering::Relaxed)
+            + self.persist_dropped.load(Ordering::Relaxed)
+    }
 }
 
 /// Kernel-File callback state shared with the canary poller.
@@ -434,11 +462,43 @@ fn decode_process(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
 /// filter) and, like 26/27/30, feeds the per-process ransomware aggregator
 /// right here in the callback thread; summaries are sent as
 /// [`Raw::FileActivity`].
+/// Should a Kernel-File open / create go to the translator? Only paths that
+/// can be sensitive ([`crate::filters::kernel_file_candidate`]); the
+/// translator ignores everything else (and the agent / System process), so
+/// queueing it only costs channel capacity and CPU under build load. With
+/// [`FILE_READ_EVENTS`] every create is forwarded (the translator tracks
+/// file objects for the first read).
+fn forward_file_create(
+    name: &str,
+    pid: u32,
+    sink: &Sink,
+    canaries: &RwLock<HashSet<String>>,
+) -> bool {
+    if FILE_READ_EVENTS {
+        return true;
+    }
+    if pid == sink.self_pid || pid == 4 {
+        return false;
+    }
+    let keep = match canaries.read() {
+        Ok(c) => crate::filters::kernel_file_candidate(name, c.iter()),
+        // Poisoned lock: never filter (a superset is always safe).
+        Err(_) => true,
+    };
+    if !keep {
+        sink.counters
+            .file_prefiltered
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    keep
+}
+
 fn decode_file(
     rec: &EventRecord,
     loc: &SchemaLocator,
     sink: &Sink,
     state: Option<&Mutex<FileState>>,
+    canaries: &RwLock<HashSet<String>>,
 ) -> Option<Raw> {
     let ts = ts_of(rec);
     let pid = rec.process_id();
@@ -483,6 +543,9 @@ fn decode_file(
                     emit(e);
                 }
             }
+            if !forward_file_create(&name, pid, sink, canaries) {
+                return None;
+            }
             Some(Raw::FileCreate {
                 ts,
                 pid,
@@ -495,23 +558,32 @@ fn decode_file(
             // A file was really created: aggregate it, and report it to the
             // sensitive-path filter as a create (persistence drops written
             // with open-or-create dispositions, lab VM).
-            let (fo, name) = with_fields(rec, loc, |f| {
+            // CreateNewFile uses the Create template (CreateOptions
+            // included); a directory create (mkdir) carries
+            // FILE_DIRECTORY_FILE and is never a file for the aggregator.
+            let (fo, name, co) = with_fields(rec, loc, |f| {
                 Some((
                     f.u64(field::FILE_OBJECT).unwrap_or(0),
                     f.string(field::FILE_NAME)?,
+                    f.u32(field::CREATE_OPTIONS).unwrap_or(0),
                 ))
             })?;
             if let Some(st) = agg {
                 let nt = name.to_ascii_lowercase();
                 let e = st.lock().ok().and_then(|mut st| {
                     let before = st.agg.dropped;
-                    let e = st.agg.on_create_new(ts, pid, fo, &nt);
+                    let e = st
+                        .agg
+                        .on_create_new(ts, pid, fo, &nt, is_directory_open(co));
                     sink.counters
                         .file_agg_dropped
                         .fetch_add(st.agg.dropped - before, Ordering::Relaxed);
                     e
                 });
                 emit(e);
+            }
+            if !forward_file_create(&name, pid, sink, canaries) {
+                return None;
             }
             Some(Raw::FileCreate {
                 ts,
@@ -903,13 +975,18 @@ pub struct SensorOpts {
     pub credential_access: bool,
     /// Aggregator state (shared with the canary poller).
     pub file_state: Arc<Mutex<FileState>>,
+    /// Credential canary paths (lower-cased Win32, the translator's set)
+    /// for the Kernel-File source filter.
+    pub canaries: Arc<RwLock<HashSet<String>>>,
 }
 
-fn props(flush_secs: u64, buffers: u32) -> TraceProperties {
+/// Session properties: flush timer and `(MinimumBuffers, MaximumBuffers)`
+/// from [`consts::buffers`] (dynamic growth under bursts, bounded).
+fn props(flush_secs: u64, (min, max): (u32, u32)) -> TraceProperties {
     TraceProperties {
-        buffer_size: 64,
-        min_buffer: buffers,
-        max_buffer: buffers,
+        buffer_size: consts::buffers::SIZE_KB,
+        min_buffer: min,
+        max_buffer: max,
         flush_timer: Duration::from_secs(flush_secs),
         log_file_mode: LoggingMode::EVENT_TRACE_REAL_TIME_MODE
             | LoggingMode::EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING,
@@ -964,7 +1041,7 @@ pub fn start_session(kind: SessionKind, sink: &Sink, opts: &SensorOpts) -> anyho
         SessionKind::Core => {
             let b = UserTrace::new()
                 .named(name.clone())
-                .set_trace_properties(props(1, 32))
+                .set_trace_properties(props(1, consts::buffers::CORE))
                 .enable(prov(
                     provider::KERNEL_PROCESS,
                     kw::PROC_PROCESS | kw::PROC_IMAGE,
@@ -1036,17 +1113,18 @@ pub fn start_session(kind: SessionKind, sink: &Sink, opts: &SensorOpts) -> anyho
                 file_ids.extend([eid::FILE_DELETE_PATH, eid::FILE_RENAME_PATH]);
             }
             let state = opts.file_activity.then(|| opts.file_state.clone());
+            let canaries = opts.canaries.clone();
             let s2 = sink.clone();
             let (t, h) = UserTrace::new()
                 .named(name.clone())
-                .set_trace_properties(props(1, 128))
+                .set_trace_properties(props(1, consts::buffers::FILE))
                 .enable(prov(
                     provider::KERNEL_FILE,
                     file_kw,
                     5,
                     file_ids,
                     sink,
-                    move |rec, loc| decode_file(rec, loc, &s2, state.as_deref()),
+                    move |rec, loc| decode_file(rec, loc, &s2, state.as_deref(), &canaries),
                 ))
                 .start()
                 .map_err(|e| anyhow::anyhow!("start {name}: {e:?}"))?;
@@ -1063,7 +1141,7 @@ pub fn start_session(kind: SessionKind, sink: &Sink, opts: &SensorOpts) -> anyho
             let (s1, s2, s3) = (sink.clone(), sink.clone(), sink.clone());
             let (t, h) = UserTrace::new()
                 .named(name.clone())
-                .set_trace_properties(props(1, 8))
+                .set_trace_properties(props(1, consts::buffers::PERSIST))
                 .enable(prov(
                     provider::TASK_SCHEDULER,
                     kw::ALL,
@@ -1101,7 +1179,7 @@ pub fn start_session(kind: SessionKind, sink: &Sink, opts: &SensorOpts) -> anyho
         SessionKind::Io => {
             let mut b = UserTrace::new()
                 .named(name.clone())
-                .set_trace_properties(props(5, 128))
+                .set_trace_properties(props(5, consts::buffers::IO))
                 .enable(prov(
                     provider::KERNEL_NETWORK,
                     kw::NET_IPV4 | kw::NET_IPV6,
@@ -1165,7 +1243,7 @@ pub fn start_session(kind: SessionKind, sink: &Sink, opts: &SensorOpts) -> anyho
                 .build();
             let (t, h) = KernelTrace::new()
                 .named(name.clone())
-                .set_trace_properties(props(1, 8))
+                .set_trace_properties(props(1, consts::buffers::PROC_CMD))
                 .enable(p)
                 .start()
                 .map_err(|e| anyhow::anyhow!("start {name}: {e:?}"))?;

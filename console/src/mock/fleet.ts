@@ -231,6 +231,11 @@ export function hardeningFor(p: Policy, drift: number): Record<string, boolean> 
   return out
 }
 
+/** Hello capabilities by agent version: 0.9.2 predates remote access and remote removal. */
+export function capabilitiesFor(version: string): string[] {
+  return version === '0.9.2' ? [] : ['live.files', 'live.desktop', 'agent.uninstall']
+}
+
 export function buildDevices(): Device[] {
   let ui = 0
   return specs.map((s, i) => {
@@ -261,6 +266,10 @@ export function buildDevices(): Device[] {
       ip_addresses: [`10.${isServer ? 10 : 20 + (i % 6)}.${int(1, 40)}.${int(10, 250)}`],
       av_product: chance(0.85) ? 'Microsoft Defender Antivirus' : 'Sophos Endpoint',
     }
+    // 1.1.6 agents split the loss (no extra random draws: the mock stays stable).
+    const lost = health.etw_events_lost ?? 0
+    health.etw_kernel_events_lost = Math.round(lost * 0.8)
+    health.sensor_internal_dropped = lost - health.etw_kernel_events_lost
     const version = r > 0.88 ? '0.9.2' : r > 0.8 ? '0.9.4' : '1.0.1'
     return {
       id: uuid(),
@@ -283,6 +292,8 @@ export function buildDevices(): Device[] {
       tags: isServer ? ['server'] : s.hostname.includes('LT') ? ['laptop'] : ['desktop'],
       health,
       open_incidents: 0,
+      capabilities: capabilitiesFor(version),
+      removal: null,
     } satisfies Device
   })
 }

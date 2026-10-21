@@ -519,7 +519,10 @@ async fn ingest_hardening() {
     let (_, cmd, _) = st
         .recv_until(|p| matches!(p, ServerPayload::Command { .. }))
         .await;
-    let ServerPayload::Command { command_id, action } = cmd else {
+    let ServerPayload::Command {
+        command_id, action, ..
+    } = cmd
+    else {
         unreachable!()
     };
     assert_eq!(command_id.to_string(), row["id"].as_str().unwrap());

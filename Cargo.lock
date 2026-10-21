@@ -2582,7 +2582,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-agent"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2632,7 +2632,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-common"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -2642,7 +2642,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-detect"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "aho-corasick",
  "kestrel-common",
@@ -2656,14 +2656,14 @@ dependencies = [
 
 [[package]]
 name = "kestrel-msica"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "kestrel-platform"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2674,7 +2674,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-scan"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "anyhow",
  "serde",
@@ -2684,7 +2684,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-server"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2739,14 +2739,14 @@ dependencies = [
 
 [[package]]
 name = "kestrel-uninstall"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "kestrel-win"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "aes-gcm",
  "anyhow",

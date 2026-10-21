@@ -162,6 +162,9 @@ fn capabilities(core: &Core) -> Vec<String> {
     if core.platform.remote_desktop().is_some() {
         caps.push(kestrel_common::remote::CAP_LIVE_DESKTOP.to_string());
     }
+    if core.platform.supports_remote_uninstall() {
+        caps.push(kestrel_common::CAP_REMOTE_UNINSTALL.to_string());
+    }
     caps
 }
 
@@ -453,9 +456,13 @@ async fn handle_server(
         ServerPayload::Rules(b) => {
             core.apply_rules(b).await;
         }
-        ServerPayload::Command { command_id, action } => {
+        ServerPayload::Command {
+            command_id,
+            action,
+            secret,
+        } => {
             let c = core.clone();
-            tokio::spawn(async move { c.run_command(command_id, action).await });
+            tokio::spawn(async move { c.run_command_with(command_id, action, secret).await });
         }
         ServerPayload::Update(m) => {
             // V-H3: one update in flight per agent. The slot is claimed here,

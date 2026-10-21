@@ -28,12 +28,15 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{
     CERT_E_REVOKED, CRYPT_E_NO_REVOCATION_CHECK, CRYPT_E_REVOCATION_OFFLINE, CRYPT_E_REVOKED,
-    HANDLE, TRUST_E_NOSIGNATURE, TRUST_E_PROVIDER_UNKNOWN, TRUST_E_SUBJECT_FORM_UNKNOWN,
+    HANDLE, INVALID_HANDLE_VALUE, TRUST_E_BAD_DIGEST, TRUST_E_NOSIGNATURE,
+    TRUST_E_PROVIDER_UNKNOWN, TRUST_E_SUBJECT_FORM_UNKNOWN,
 };
 use windows_sys::Win32::Security::Cryptography::Catalog::{
     CryptCATAdminAcquireContext2, CryptCATAdminCalcHashFromFileHandle2,
     CryptCATAdminEnumCatalogFromHash, CryptCATAdminReleaseCatalogContext,
-    CryptCATAdminReleaseContext, CryptCATCatalogInfoFromContext, CATALOG_INFO,
+    CryptCATAdminReleaseContext, CryptCATCatalogInfoFromContext, CryptCATClose,
+    CryptCATEnumerateMember, CryptCATGetMemberInfo, CryptCATOpen, CATALOG_INFO, CRYPTCATMEMBER,
+    CRYPTCAT_OPEN_EXISTING,
 };
 use windows_sys::Win32::Security::Cryptography::{
     CertGetNameStringW, CertVerifyCertificateChainPolicy, CERT_CHAIN_POLICY_MICROSOFT_ROOT,
@@ -73,6 +76,26 @@ pub struct FileFacts {
     pub microsoft_root: bool,
     /// Valid signature whose revocation status is still being checked online.
     pub revocation_pending: bool,
+    /// Where the signature verdict came from (embedded, system catalog,
+    /// MSIX package catalog).
+    pub sig_source: SigSource,
+}
+
+/// Source of a signature verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SigSource {
+    /// No signature found / not checked.
+    #[default]
+    None,
+    /// Authenticode signature embedded in the file.
+    Embedded,
+    /// A catalog of the system catalog database (catroot): OS files that
+    /// are signed only by catalog.
+    SystemCatalog,
+    /// The MSIX / AppX package's `AppxMetadata\CodeIntegrity.cat` (signed
+    /// with the package certificate; packaged executables usually carry no
+    /// embedded signature).
+    PackageCatalog,
 }
 
 impl FileFacts {
@@ -579,6 +602,7 @@ pub fn compute(path: &str, hash: bool) -> (FileFacts, u64, u64) {
     f.signed = v.state;
     f.signer = v.signer;
     f.microsoft_root = v.microsoft_root;
+    f.sig_source = v.source;
     match v.revocation {
         Revocation::Revoked => f.signed = SignatureState::Invalid,
         Revocation::Unknown if f.signed == SignatureState::Valid => f.revocation_pending = true,
@@ -680,10 +704,12 @@ pub struct SigVerdict {
     pub signer: Option<String>,
     pub microsoft_root: bool,
     pub revocation: Revocation,
+    pub source: SigSource,
 }
 
 /// Embedded Authenticode check with the given revocation mode, falling back
-/// to the system catalogs (no revocation) for catalog-signed OS files.
+/// to the system catalogs (no revocation) for catalog-signed OS files, then
+/// to the MSIX / AppX package catalog for files of an installed package.
 pub fn verify_ex(path: &str, mode: RevMode) -> SigVerdict {
     // V-M1: WinVerifyTrust opens the file as SYSTEM; a network path would
     // make the machine account authenticate to that host. Unknown, not
@@ -694,6 +720,7 @@ pub fn verify_ex(path: &str, mode: RevMode) -> SigVerdict {
             signer: None,
             microsoft_root: false,
             revocation: Revocation::NotChecked,
+            source: SigSource::None,
         };
     }
     let wpath = wide(path);
@@ -759,6 +786,7 @@ pub fn verify_ex(path: &str, mode: RevMode) -> SigVerdict {
                 signer,
                 microsoft_root: ms_root,
                 revocation,
+                source: SigSource::Embedded,
             };
         }
         let state = state_from_hresult(hr);
@@ -772,6 +800,7 @@ pub fn verify_ex(path: &str, mode: RevMode) -> SigVerdict {
                     (_, SignatureState::Valid) => Revocation::Good,
                     _ => Revocation::NotChecked,
                 },
+                source: SigSource::Embedded,
             };
         }
         // Catalog fallback (OS files).
@@ -782,6 +811,23 @@ pub fn verify_ex(path: &str, mode: RevMode) -> SigVerdict {
                     signer,
                     microsoft_root: ms && state == SignatureState::Valid,
                     revocation: Revocation::NotChecked,
+                    source: SigSource::SystemCatalog,
+                };
+            }
+        }
+        // MSIX / AppX: the package's code-integrity catalog (owner PC
+        // 2026-10-22: WhatsApp.Root.exe from the Store was "unsigned").
+        if let Some(cat) = crate::filters::msix_code_integrity_catalog(path) {
+            if let Some((state, signer)) = verify_package_catalog(path, &cat) {
+                return SigVerdict {
+                    state,
+                    signer,
+                    // A Store publisher certificate chains to a Microsoft
+                    // root (Microsoft Marketplace CA) without the file being
+                    // Microsoft's: never a Microsoft-root verdict here.
+                    microsoft_root: false,
+                    revocation: Revocation::NotChecked,
+                    source: SigSource::PackageCatalog,
                 };
             }
         }
@@ -790,6 +836,7 @@ pub fn verify_ex(path: &str, mode: RevMode) -> SigVerdict {
             signer: None,
             microsoft_root: false,
             revocation: Revocation::NotChecked,
+            source: SigSource::None,
         }
     }
 }
@@ -799,6 +846,56 @@ pub fn verify_ex(path: &str, mode: RevMode) -> SigVerdict {
 pub fn verify_signature_ms(path: &str) -> (SignatureState, Option<String>, bool) {
     let v = verify_ex(path, RevMode::None);
     (v.state, v.signer, v.microsoft_root)
+}
+
+/// WinVerifyTrust of `member` (file handle + its catalog hash) against the
+/// catalog file `catalog` (NUL-terminated wide path), no revocation.
+/// Returns (HRESULT, signer, chains to a Microsoft root).
+unsafe fn verify_catalog_member(
+    catalog: *const u16,
+    member_tag: *const u16,
+    path: &str,
+    hfile: HANDLE,
+    hash: &mut [u8],
+    admin: isize,
+) -> (i32, Option<String>, bool) {
+    let wpath = wide(path);
+    let mut wci: WINTRUST_CATALOG_INFO = std::mem::zeroed();
+    wci.cbStruct = std::mem::size_of::<WINTRUST_CATALOG_INFO>() as u32;
+    wci.pcwszCatalogFilePath = catalog;
+    wci.pcwszMemberTag = member_tag;
+    wci.pcwszMemberFilePath = wpath.as_ptr();
+    wci.hMemberFile = hfile;
+    wci.pbCalculatedFileHash = hash.as_mut_ptr();
+    wci.cbCalculatedFileHash = hash.len() as u32;
+    wci.hCatAdmin = admin;
+    let mut wd: WINTRUST_DATA = std::mem::zeroed();
+    wd.cbStruct = std::mem::size_of::<WINTRUST_DATA>() as u32;
+    wd.dwUIChoice = WTD_UI_NONE;
+    wd.fdwRevocationChecks = WTD_REVOKE_NONE;
+    wd.dwUnionChoice = WTD_CHOICE_CATALOG;
+    wd.Anonymous.pCatalog = &mut wci;
+    wd.dwStateAction = WTD_STATEACTION_VERIFY;
+    wd.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL | WTD_REVOCATION_CHECK_NONE;
+    let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    let hr = WinVerifyTrust(
+        std::ptr::null_mut(),
+        &mut action,
+        &mut wd as *mut _ as *mut c_void,
+    );
+    let signer = signer_from_state(wd.hWVTStateData);
+    let ms_root = microsoft_root_from_state(wd.hWVTStateData);
+    wd.dwStateAction = WTD_STATEACTION_CLOSE;
+    WinVerifyTrust(
+        std::ptr::null_mut(),
+        &mut action,
+        &mut wd as *mut _ as *mut c_void,
+    );
+    (hr, signer, ms_root)
+}
+
+fn hex_upper(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02X}")).collect()
 }
 
 unsafe fn verify_catalog(path: &str, alg: &str) -> Option<(SignatureState, Option<String>, bool)> {
@@ -832,39 +929,14 @@ unsafe fn verify_catalog(path: &str, alg: &str) -> Option<(SignatureState, Optio
             let mut ci: CATALOG_INFO = std::mem::zeroed();
             ci.cbStruct = std::mem::size_of::<CATALOG_INFO>() as u32;
             if CryptCATCatalogInfoFromContext(cat, &mut ci, 0) != 0 {
-                let tag: String = hash.iter().map(|b| format!("{b:02X}")).collect();
-                let wtag = wide(&tag);
-                let wpath = wide(path);
-                let mut wci: WINTRUST_CATALOG_INFO = std::mem::zeroed();
-                wci.cbStruct = std::mem::size_of::<WINTRUST_CATALOG_INFO>() as u32;
-                wci.pcwszCatalogFilePath = ci.wszCatalogFile.as_ptr();
-                wci.pcwszMemberTag = wtag.as_ptr();
-                wci.pcwszMemberFilePath = wpath.as_ptr();
-                wci.hMemberFile = hfile;
-                wci.pbCalculatedFileHash = hash.as_mut_ptr();
-                wci.cbCalculatedFileHash = cb;
-                wci.hCatAdmin = admin;
-                let mut wd: WINTRUST_DATA = std::mem::zeroed();
-                wd.cbStruct = std::mem::size_of::<WINTRUST_DATA>() as u32;
-                wd.dwUIChoice = WTD_UI_NONE;
-                wd.fdwRevocationChecks = WTD_REVOKE_NONE;
-                wd.dwUnionChoice = WTD_CHOICE_CATALOG;
-                wd.Anonymous.pCatalog = &mut wci;
-                wd.dwStateAction = WTD_STATEACTION_VERIFY;
-                wd.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL | WTD_REVOCATION_CHECK_NONE;
-                let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
-                let hr = WinVerifyTrust(
-                    std::ptr::null_mut(),
-                    &mut action,
-                    &mut wd as *mut _ as *mut c_void,
-                );
-                let signer = signer_from_state(wd.hWVTStateData);
-                let ms_root = microsoft_root_from_state(wd.hWVTStateData);
-                wd.dwStateAction = WTD_STATEACTION_CLOSE;
-                WinVerifyTrust(
-                    std::ptr::null_mut(),
-                    &mut action,
-                    &mut wd as *mut _ as *mut c_void,
+                let wtag = wide(&hex_upper(&hash));
+                let (hr, signer, ms_root) = verify_catalog_member(
+                    ci.wszCatalogFile.as_ptr(),
+                    wtag.as_ptr(),
+                    path,
+                    hfile,
+                    &mut hash,
+                    admin,
                 );
                 result = Some((
                     if hr == 0 {
@@ -882,4 +954,194 @@ unsafe fn verify_catalog(path: &str, alg: &str) -> Option<(SignatureState, Optio
     CryptCATAdminReleaseContext(admin, 0);
     drop(file);
     result
+}
+
+/// Copy a NUL-terminated wide string (bounded) including the terminator.
+unsafe fn wide_copy(p: *const u16) -> Option<Vec<u16>> {
+    if p.is_null() {
+        return None;
+    }
+    let mut v = Vec::new();
+    for i in 0..4096 {
+        let c = *p.add(i);
+        v.push(c);
+        if c == 0 {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Reference tag of the member of catalog `wcat` whose digest is `hash`:
+/// by the conventional tag (hex of the hash) first, else by comparing every
+/// member's indirect-data digest (tags of package catalogs are not
+/// guaranteed to follow the convention).
+unsafe fn catalog_member_tag(wcat: &[u16], hash: &[u8]) -> Option<Vec<u16>> {
+    let hcat = CryptCATOpen(wcat.as_ptr(), CRYPTCAT_OPEN_EXISTING, 0, 0, 0);
+    if hcat.is_null() || hcat == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let wtag = wide(&hex_upper(hash));
+    let mut found = None;
+    if !CryptCATGetMemberInfo(hcat, wtag.as_ptr()).is_null() {
+        found = Some(wtag);
+    } else {
+        let mut prev: *mut CRYPTCATMEMBER = std::ptr::null_mut();
+        // Bounded walk (a package catalog lists the package's PE files).
+        for _ in 0..1_000_000 {
+            let m = CryptCATEnumerateMember(hcat, prev);
+            if m.is_null() {
+                break;
+            }
+            let ind = (*m).pIndirectData;
+            if !ind.is_null() {
+                let d = &(*ind).Digest;
+                if !d.pbData.is_null()
+                    && d.cbData as usize == hash.len()
+                    && std::slice::from_raw_parts(d.pbData, d.cbData as usize) == hash
+                {
+                    found = wide_copy((*m).pwszReferenceTag);
+                    break;
+                }
+            }
+            prev = m;
+        }
+    }
+    CryptCATClose(hcat);
+    found
+}
+
+/// Verify a file of an installed MSIX / AppX package against the package's
+/// `AppxMetadata\CodeIntegrity.cat` (Authenticode hashes of the package's PE
+/// files, signed with the package certificate). Some(Valid) only when the
+/// file's hash is a member and WinVerifyTrust accepts the catalog signature;
+/// Some(Invalid) for a bad digest / revoked certificate; None (no verdict:
+/// the caller keeps "unsigned") when the file is not in the catalog or the
+/// catalog's chain is not trusted on this machine (e.g. a sideloaded
+/// developer package): never "valid" for something WinVerifyTrust rejected.
+unsafe fn verify_package_catalog(
+    path: &str,
+    catalog: &str,
+) -> Option<(SignatureState, Option<String>)> {
+    if !std::path::Path::new(catalog).is_file() {
+        return None;
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(7)
+        .open(path)
+        .ok()?;
+    use std::os::windows::io::AsRawHandle;
+    let hfile = file.as_raw_handle() as HANDLE;
+    let wcat = wide(catalog);
+    for alg in ["SHA256", "SHA1"] {
+        let walg = wide(alg);
+        let mut admin: isize = 0;
+        if CryptCATAdminAcquireContext2(
+            &mut admin,
+            std::ptr::null(),
+            walg.as_ptr(),
+            std::ptr::null(),
+            0,
+        ) == 0
+        {
+            continue;
+        }
+        let mut verdict = None;
+        let mut hash = vec![0u8; 64];
+        let mut cb = hash.len() as u32;
+        if CryptCATAdminCalcHashFromFileHandle2(admin, hfile, &mut cb, hash.as_mut_ptr(), 0) != 0 {
+            hash.truncate(cb as usize);
+            if let Some(tag) = catalog_member_tag(&wcat, &hash) {
+                let (hr, signer, _) = verify_catalog_member(
+                    wcat.as_ptr(),
+                    tag.as_ptr(),
+                    path,
+                    hfile,
+                    &mut hash,
+                    admin,
+                );
+                verdict = match package_catalog_state(hr) {
+                    Some(state) => Some((state, signer)),
+                    None => {
+                        tracing::debug!(
+                            path,
+                            hr = format_args!("{hr:#010x}"),
+                            "package catalog signature not trusted"
+                        );
+                        None
+                    }
+                };
+            }
+        }
+        CryptCATAdminReleaseContext(admin, 0);
+        if verdict.is_some() {
+            return verdict;
+        }
+    }
+    drop(file);
+    None
+}
+
+/// Verdict of a package-catalog WinVerifyTrust result: valid, definitely
+/// invalid (digest mismatch, revoked), or no verdict (chain / policy
+/// failures: not trusted here, which is not proof of tampering).
+fn package_catalog_state(hr: i32) -> Option<SignatureState> {
+    if hr == 0 {
+        Some(SignatureState::Valid)
+    } else if hr == TRUST_E_BAD_DIGEST || hr == CERT_E_REVOKED || hr == CRYPT_E_REVOKED {
+        Some(SignatureState::Invalid)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_catalog_verdicts() {
+        assert_eq!(package_catalog_state(0), Some(SignatureState::Valid));
+        assert_eq!(
+            package_catalog_state(TRUST_E_BAD_DIGEST),
+            Some(SignatureState::Invalid)
+        );
+        assert_eq!(
+            package_catalog_state(CERT_E_REVOKED),
+            Some(SignatureState::Invalid)
+        );
+        // Untrusted root / wrong usage: no verdict (stays unsigned), never valid.
+        assert_eq!(package_catalog_state(0x800B0109_u32 as i32), None);
+        assert_eq!(package_catalog_state(0x800B0110_u32 as i32), None);
+        assert_eq!(package_catalog_state(TRUST_E_NOSIGNATURE), None);
+    }
+
+    /// Lab / developer check against a real packaged executable (read-only
+    /// signature verification). Set `KESTREL_TEST_MSIX_EXE` to e.g.
+    /// `C:\Program Files\WindowsApps\5319275A.WhatsAppDesktop_…\WhatsApp.Root.exe`.
+    #[test]
+    fn msix_packaged_exe_is_package_catalog_signed() {
+        let Ok(p) = std::env::var("KESTREL_TEST_MSIX_EXE") else {
+            return;
+        };
+        let v = verify_ex(&p, RevMode::None);
+        eprintln!("{p}: {v:?}");
+        assert_eq!(v.state, SignatureState::Valid);
+        assert_eq!(v.source, SigSource::PackageCatalog);
+        assert!(v.signer.is_some());
+        assert!(!v.microsoft_root);
+    }
+
+    /// An OS binary signed only by catalog keeps verifying (system catalog).
+    #[test]
+    fn os_binary_still_verifies() {
+        let p = format!(r"{}\System32\cmd.exe", super::super::util::system_root());
+        if !std::path::Path::new(&p).is_file() {
+            return;
+        }
+        let v = verify_ex(&p, RevMode::None);
+        assert_eq!(v.state, SignatureState::Valid, "{v:?}");
+        assert_ne!(v.source, SigSource::PackageCatalog);
+    }
 }

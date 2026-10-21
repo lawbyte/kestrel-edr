@@ -9,6 +9,7 @@ Kestrel ships 55 built-in behavioural rules and a 70-rule SigmaHQ pack. This tab
 * **Behaviour, not allow-lists.** Rules look at what a process does: which credential store it opened, whether it then connected out, whether it touched LSASS or wrote an autorun. There is no general "never kill this app" list; false positives are fixed per rule, with exclusions or by the rule's own checks of the owning application and signature.
 * **Per-process correlation.** The engine keeps short-lived state per process (secret categories touched, evidence events, DNS answers), which lets rules like ST-02 and ST-04 combine several events and lets the server explain what was at risk.
 * **One path for every hit.** The mode comes from the policy (Off drops the hit). The agent itself and PIDs 0 and 4 are never subjects. An Allow IOC on the file's SHA-256 or signer suppresses all rules. Exclusions are applied. Duplicates are dropped (one alert per rule per process per 10 minutes, except escalations). In Audit the alert carries no actions; in Protect it carries actions, filtered by the response safety rules.
+* **Low-severity repeats are folded.** An Audit alert of severity Low or Info is sent at most once per rule, program (SHA-256, else path) and object (file, host name, target process) per device per 24 hours. Later repeats are counted and the next alert for the same key says how many were folded. Medium and higher alerts, ST-04 and alerts of rules in Protect are never folded.
 * **Unknown signatures are never trusted.** The first start of a new program is held up to 750 ms while it is hashed and its signature checked. Facts that arrive later re-run hash IOCs and the rules that depend on them.
 
 ## Stealer rules (ST)
@@ -38,6 +39,22 @@ Developer-tool credential stores (kubeconfig, Docker `config.json`, AWS credenti
 
 ST-04 also looks at where the data went. When a validly signed reader outside Temp and Downloads (interpreters included) read only one provider's developer-tool stores (AWS, Azure CLI, Google Cloud SDK or Docker) and the connection goes, by DNS name, to that provider's own service endpoints (for example `s3.ap-southeast-1.amazonaws.com`, `login.microsoftonline.com`, `oauth2.googleapis.com`, `registry-1.docker.io`), ST-04 is a High Audit alert with no kill and no block. That is normal SDK and CLI use, but it would also fit an attacker using the stolen credentials, so review it. A connection to any other host, to an IP address without a resolved name, an unsigned reader, or a read of any other store (kubeconfig included) gets the full response.
 
+A credential store only counts where the real one lives. Browser, Discord, Bitwarden, 1Password, Windows sign-in (WAM) and other token caches must sit under a user profile's `AppData` (a profile is `<drive>:\Users\<name>`, the SYSTEM or a service profile, or a redirected `AppData` on a share). `.aws`, `.azure`, `.kube`, `.docker` and `.ssh` must sit directly in the profile folder. Windows Credential Manager and DPAPI keys sit in a profile's `AppData`, `ProgramData\Microsoft` or `System32\Microsoft\Protect`. A copy inside the profile's Temp folder or inside a nested `Users` tree (test and replay data such as `%TEMP%\.tmpX\sim-fs\C\Users\j.doe`) is not a store, and an MSIX app reading its own `AppData\Local\Packages\<its package>\LocalCache` copy is reading its private data. Portable stores (Steam, Telegram, FTP clients, wallets, KeePass, VPN profiles) still count anywhere outside such fake trees.
+
+The SSH clients `ssh`, `ssh-agent`, `ssh-add`, `scp`, `sftp`, `ssh-keygen`, `plink`, `pageant` and `git-remote-*` own the SSH key store when they run from `System32\OpenSSH`, `Program Files\Git\usr\bin` (Git for Windows ships its `ssh.exe` unsigned), `Program Files\OpenSSH` or `Program Files\PuTTY` on the system volume, without `ProxyCommand`, `LocalCommand`, `KnownHostsCommand`, provider options or library and config switches (`ssh -I` or `-F`, `ssh-add -s`, `ssh-keygen -D` and similar) on the command line, and never after something injected into them. A copy anywhere else still alerts. Options in `~\.ssh\config` are not visible to Kestrel.
+
+A Microsoft-signed app installed in the user profile (Visual Studio Code installs to `%LOCALAPPDATA%\Programs` by default) reading the WAM token cache raises a Low Audit ST-01. Only the exact per-user install paths count (Visual Studio Code, Visual Studio Code Insiders, OneDrive). ST-04 after it is a Low Audit alert only when the connection goes, by DNS name, to a Microsoft sign-in or telemetry endpoint (for example `mobile.events.data.microsoft.com`, `login.microsoftonline.com`, `default.exp-tas.com`), from Microsoft-signed processes that are not interpreters. Services where anyone can own a tenant (SharePoint, OneDrive, Graph, Office, Azure DevOps, `*.windows.net`, `*.azure.com`), any other host, an IP without a name, unsigned readers, other signers and interpreters get the full response.
+
+Steam's `config\config.vdf` (client and library configuration) read by a validly signed native service installed under Program Files, such as NVIDIA's `nvcontainer.exe`, raises a Low Audit ST-01 and ST-04. Steam Guard files (`ssfn*`), `loginusers.vdf` and `local.vdf` are never covered.
+
+When ST-04 is Audit only because the reads were benign (WAM cache, an Electron app's own safeStorage key, developer-tool stores, Steam `config.vdf` as above), its severity is Low. For developer-tool stores and Steam `config.vdf` that holds only when the reader itself, its same-vendor backend or the provider's endpoint is on the other end; another sender stays High. The provider-endpoint case above stays High. ST-04 alerts are never folded.
+
+ST-07 is not raised when an application installed under Program Files or WindowsApps opens a WebView2 process it launched (`msedgewebview2.exe` whose parent, or grandparent through the WebView2 browser process, is the opener). This covers handle opens only, never thread injection or debugger attach. A LOLBin or script host as the opener, an injected opener, a WebView2 under remote control or pointed at a real browser profile, a WebView2 opened by another program or launched by a tool in a user folder, and real browsers keep ST-07.
+
+ST-12 alerts once per program (SHA-256, else path and size) per device per 7 days, the first time it runs; later runs are folded into that alert. The same file running from a riskier folder (Temp, Downloads or removable media after AppData) alerts again. A new unsigned program in Downloads, Temp or AppData still alerts on its first run.
+
+ST-14 lookups made by WSL's service (`Program Files\WSL\wslservice.exe`, Microsoft-signed) are Low Audit alerts: WSL answers DNS for Linux processes, so the alert says the name was looked up on behalf of a process inside WSL.
+
 When ST-04 sees the connection come from the reader's parent, and that parent is validly signed under Program Files by the same signer as the reader (for example Docker Desktop's `com.docker.backend.exe`), only the reader is killed: the parent, its process tree and the destination are left alone. A validly signed sender installed under Program Files gets a destination block for its own image, not for the whole host, so a shared CDN address is not cut for every program.
 
 ## Ransomware rules (RW)
@@ -53,6 +70,8 @@ When ST-04 sees the connection come from the reader's parent, and that parent is
 | RW-07 | Ransomware canary tampered | Critical | **Protect** |
 | RW-08 | Ransom-note fan-out | Critical | **Protect** |
 | RW-12 | Ransomware kill-chain correlation | Critical | **Protect** |
+
+RW-06 counts only files that existed before: files the same process created in the sensor window are left out, so a compiler that writes temporary files and renames them to `.rlib` is not encryption. RW-08 needs a ransom note: a name with an extension (the sensor cannot tell a new folder from a new file), never a build artefact such as `.a`, `.o`, `.obj`, `.rlib`, `.rmeta`, `.d`, `.pdb`, `.lib` or `.exp` (`.tmp` only with a note-like name), and a text or document extension (`.txt`, `.html`, `.htm`, `.hta`, `.rtf`, `.url`) or a note-like name (`readme`, `decrypt`, `restore`, `recover`, `how_to`, `help`, `instructions`, `ransom`, `!!!`). The response (5 folders, note extension and note-like name) is unchanged; `.md` files and images with a note-like name count only for the alert-only check of 20 or more folders, so `README.md` written by `npm install` into many folders is never killed.
 
 ## Credential dumping rules (CD)
 
@@ -71,6 +90,8 @@ When ST-04 sees the connection come from the reader's parent, and that parent is
 | CD-11 | NTDS.dit extraction | High | Audit |
 | CD-12 | WDigest cleartext credential downgrade | High | **Protect** |
 | CD-13 | LSA protection / Credential Guard tamper | High | Audit |
+
+CD-06 is a Low Audit alert when a validly signed native service or updater installed under Program Files asked LSASS only for read or query rights and Windows refused (NVIDIA's `nvcontainer.exe` and `BraveUpdate.exe` do this with `0x410`). Unsigned or user-folder openers, requests with write, thread or handle-duplication rights, and successful opens keep their severity.
 
 ## Persistence rules (PS)
 

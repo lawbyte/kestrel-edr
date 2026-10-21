@@ -109,7 +109,35 @@ pub enum ResponseAction {
     /// Turn protection back on after it was turned off locally with the
     /// tray switch. Handled by the agent itself (no-op when not off).
     ResumeProtection,
+    /// Remove Kestrel from the PC ("Remove device" in the console). Only
+    /// from the authenticated server stream: the agent refuses it from the
+    /// detection engine and the tray. The device's uninstall token is never
+    /// part of the action (actions are stored in the actions table and shown
+    /// in the API, so the token must not be); the server attaches it at
+    /// delivery time only, in
+    /// `ServerPayload::Command.secret`. Agents announce support with
+    /// [`CAP_REMOTE_UNINSTALL`] in `Hello.capabilities`; the server never
+    /// sends it to agents without that capability.
+    UninstallAgent {
+        /// Also delete `%ProgramData%\Kestrel` (quarantine, logs) after a
+        /// successful removal.
+        #[serde(default)]
+        purge_data: bool,
+    },
 }
+
+/// `Hello.capabilities` entry of agents that understand
+/// [`ResponseAction::UninstallAgent`].
+pub const CAP_REMOTE_UNINSTALL: &str = "agent.uninstall";
+
+/// `ActionOutcome.artifact` of an `UninstallAgent` that passed the token
+/// check and started the detached uninstall helper (`ok = true`). The
+/// command stays open server-side ("removing") until the device stays
+/// disconnected, or a later failure outcome arrives.
+pub const UNINSTALL_STARTED: &str = "uninstall_started";
+/// `ActionOutcome.artifact` of a failed `UninstallAgent` (`ok = false`):
+/// token mismatch, helper missing, Windows Installer error.
+pub const UNINSTALL_FAILED: &str = "uninstall_failed";
 
 /// Persistence mechanism targeted by [`ResponseAction::RemoveAutorun`].
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,6 +174,7 @@ impl ResponseAction {
             ResponseAction::CollectTriage => "collect_triage",
             ResponseAction::RemoveAutorun { .. } => "remove_autorun",
             ResponseAction::ResumeProtection => "resume_protection",
+            ResponseAction::UninstallAgent { .. } => "uninstall_agent",
         }
     }
 
@@ -170,6 +199,9 @@ impl ResponseAction {
             | ResponseAction::Scan { .. }
             | ResponseAction::CollectTriage
             | ResponseAction::ResumeProtection => "response.collect",
+            // Uninstalls the product: admin only, and only through
+            // `POST /devices/:id/remove` (never the generic action endpoint).
+            ResponseAction::UninstallAgent { .. } => "devices.remove",
         }
     }
 }
@@ -192,6 +224,17 @@ pub struct ActionOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uninstall_agent_wire_format() {
+        let a: ResponseAction = serde_json::from_str(r#"{"type":"uninstall_agent"}"#).unwrap();
+        assert_eq!(a, ResponseAction::UninstallAgent { purge_data: false });
+        assert_eq!(a.name(), "uninstall_agent");
+        assert_eq!(a.privilege(), "devices.remove");
+        let j =
+            serde_json::to_string(&ResponseAction::UninstallAgent { purge_data: true }).unwrap();
+        assert_eq!(j, r#"{"type":"uninstall_agent","purge_data":true}"#);
+    }
 
     #[test]
     fn unblock_network_wire_format() {

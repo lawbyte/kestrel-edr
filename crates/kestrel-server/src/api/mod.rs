@@ -226,6 +226,10 @@ pub fn router() -> Router<AppState> {
             "/devices/:id/uninstall-token/rotate",
             post(devices::rotate_uninstall_token),
         )
+        .route(
+            "/devices/:id/remove",
+            post(devices::request_removal).delete(devices::cancel_removal),
+        )
         .route("/devices/:id/merge", post(devices::merge))
         .route(
             "/devices/:id/duplicates/dismiss",

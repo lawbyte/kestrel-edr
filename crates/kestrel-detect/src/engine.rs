@@ -663,6 +663,11 @@ enum BenignRead {
     Wam,
     /// `legit_apps::dev_tool_reader`
     DevTool,
+    /// `legit_apps::ms_wam_reader_per_user` (triage item 6): ST-04 stays
+    /// Low Audit only towards a Microsoft endpoint.
+    WamPerUser,
+    /// `legit_apps::vendor_config_reader` (triage item 9).
+    VendorConfig,
 }
 
 #[derive(Default)]
@@ -685,6 +690,12 @@ struct ProcState {
     /// Docker, cloud CLIs) read by a signed, non-interpreter Program Files
     /// developer tool (`legit_apps::dev_tool_reader`; ST-04 then Audit-only).
     dev_tool_cred: bool,
+    /// Triage 2026-10-22 item 6: WAM token-cache reads by a per-user
+    /// Microsoft-signed app (`legit_apps::ms_wam_reader_per_user`).
+    ms_wam_cred: bool,
+    /// Triage 2026-10-22 item 9: Steam client configuration read by a signed
+    /// Program Files vendor service (`legit_apps::vendor_config_reader`).
+    vendor_cfg_cred: bool,
     /// 2026-10-22: the one cloud provider (`legit_apps::cloud_provider`)
     /// whose developer-tool stores were read, while `non_provider_cred` is
     /// false (every credential read so far was that provider's store).
@@ -1187,6 +1198,104 @@ pub(crate) struct EngineState {
     /// Audit and no response action leaves the engine except resuming a
     /// suspended process.
     paused: Option<kestrel_common::PauseMode>,
+    /// Triage 2026-10-22 item 1: ST-12 first-seen memory per binary
+    /// (sha256, else path + size), bounded ([`MAX_ST12_SEEN`]).
+    st12_seen: HashMap<String, SeenBinary>,
+    /// Triage 2026-10-22 item 12: Low / Info Audit alerts already emitted per
+    /// (rule, image, evidence object) in the last 24 h: (last alert, repeats
+    /// folded since). Bounded ([`MAX_LOW_SEEN`]).
+    low_seen: HashMap<u64, (TimestampMs, u32)>,
+}
+
+/// ST-12 first-seen entry (triage 2026-10-22 item 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SeenBinary {
+    /// Time of the last ST-12 alert for this binary.
+    last_alert: TimestampMs,
+    /// Riskiest path class it alerted from (1 profile / AppData, 2 Temp /
+    /// Downloads / removable or network media).
+    rank: u8,
+    /// Executions folded into that alert since.
+    repeats: u32,
+}
+
+/// ST-12 alerts once per binary per device per this interval.
+const ST12_FIRST_SEEN_MS: i64 = 7 * 24 * 3600 * 1000;
+const MAX_ST12_SEEN: usize = 8192;
+/// Low / Info Audit aggregation interval and bound.
+const LOW_AGG_MS: i64 = 24 * 3600 * 1000;
+const MAX_LOW_SEEN: usize = 8192;
+
+/// ST-12 identity of an image: its sha256 when known, else path + size.
+fn st12_key(p: &ProcessInfo) -> String {
+    match p.sha256.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+        Some(h) => format!("sha256:{}", h.to_ascii_lowercase()),
+        None => format!(
+            "path:{}|{}",
+            normalize_path(&p.image),
+            p.file_size
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "?".into())
+        ),
+    }
+}
+
+/// Riskiness of an ST-12 path class: Temp / Downloads / external media
+/// rank above other user-writable folders (AppData, profile).
+fn st12_rank(c: PathClass) -> u8 {
+    match c {
+        PathClass::Temp | PathClass::Downloads | PathClass::External => 2,
+        _ => 1,
+    }
+}
+
+/// The object a Low / Info alert is about, for aggregation (item 12).
+fn evidence_object(e: &Event) -> String {
+    match &e.data {
+        // The started file itself (ST-12 first-seen decides per binary and
+        // path class; this only folds exact repeats).
+        EventData::ProcessStart(ps) => format!(
+            "start:{}|{}|{:016x}",
+            normalize_path(&ps.image),
+            ps.file_size.map(|s| s.to_string()).unwrap_or_default(),
+            crate::canary::fnv64(&ps.cmdline)
+        ),
+        EventData::ProcessStop { .. } => "stop".into(),
+        EventData::FileAccess { path, .. } => normalize_path(path),
+        EventData::NetConnect {
+            dst_ip, dst_host, ..
+        } => dst_host
+            .as_deref()
+            .map(|h| h.trim_end_matches('.').to_ascii_lowercase())
+            .unwrap_or_else(|| dst_ip.clone()),
+        EventData::DnsQuery { qname, .. } => qname.trim_end_matches('.').to_ascii_lowercase(),
+        EventData::DpapiUnprotect { description } => format!("dpapi:{description}"),
+        EventData::ProcessAccess(t)
+        | EventData::RemoteThread(t)
+        | EventData::ThreadContext(t)
+        | EventData::DebugAttach(t) => normalize_path(&t.target_image),
+        EventData::ImageLoad { path, .. } => normalize_path(path),
+        EventData::FileActivity(fa) => format!(
+            "files:{}",
+            fa.note_name
+                .as_deref()
+                .unwrap_or(fa.top_new_ext.as_deref().unwrap_or(""))
+        ),
+        EventData::ScriptBlock { content, .. } => {
+            format!("script:{:016x}", crate::canary::fnv64(content))
+        }
+        EventData::Tamper { kind, .. } => format!("tamper:{kind:?}"),
+        // Review M6: the object plus what was written into it (value data,
+        // task action, service binary, WMI consumer).
+        EventData::RegistrySet { .. }
+        | EventData::TaskRegistered(_)
+        | EventData::ServiceInstalled(_)
+        | EventData::WmiSubscription(_) => format!(
+            "{}|{:016x}",
+            changed_object(e).to_ascii_lowercase(),
+            crate::canary::fnv64(&format!("{:?}", e.data))
+        ),
+    }
 }
 
 fn kind_bit(k: EventKind) -> u32 {
@@ -1237,6 +1346,8 @@ impl EngineState {
             autorun_reissue: HashMap::new(),
             families: crate::families::all(),
             paused: None,
+            st12_seen: HashMap::new(),
+            low_seen: HashMap::new(),
         };
         s.set_sigma(sigma);
         s.update_policy(policy);
@@ -1439,6 +1550,13 @@ impl EngineState {
         if hash_changed {
             for w in self.suspends.iter_mut().filter(|w| &w.guid == guid) {
                 w.sha256 = info.sha256.clone();
+            }
+            // Review M1: the hash arrived late (large images are hashed
+            // after start), so ST-12's first-seen identity changes from
+            // path + size to the hash: judge again by hash.
+            if !sig_changed {
+                let parent = self.table.parent_of(&info).cloned();
+                self.check_st12(&ev, &info, parent.as_ref());
             }
         }
         std::mem::take(&mut self.out)
@@ -1682,6 +1800,10 @@ impl EngineState {
                 self.lsass_guid = found;
             }
         }
+    }
+
+    pub(crate) fn is_tampered(&self, g: &ProcessGuid) -> bool {
+        self.tampered.contains(g)
     }
 
     pub(crate) fn system_drive(&self) -> char {
@@ -2011,6 +2133,9 @@ impl EngineState {
         if mode == RuleMode::Off {
             return;
         }
+        // The policy's mode, before a local pause (folding of Low alerts
+        // must not depend on the pause switch).
+        let policy_protect = mode == RuleMode::Protect;
         // Protection turned off locally: detect and report only.
         let mode = if self.paused.is_some() && mode == RuleMode::Protect {
             RuleMode::Audit
@@ -2121,6 +2246,60 @@ impl EngineState {
                 }
             }
             return;
+        }
+
+        // Triage 2026-10-22 item 12: aggregation safety net. A Low / Info
+        // alert in Audit mode is emitted at most once per (rule, image hash
+        // or path, evidence object) per 24 h on this device; later repeats
+        // are counted and reported on the next alert of the same key.
+        if !policy_protect
+            && hit.severity <= Severity::Low
+            && !tp_rule
+            && hit.rule != ST04
+            && !hit.remediation_only
+            && !proc_.image.is_empty()
+        {
+            let image_id = proc_
+                .sha256
+                .as_deref()
+                .map(str::trim)
+                .filter(|h| !h.is_empty())
+                .map(|h| h.to_ascii_lowercase())
+                .unwrap_or_else(|| normalize_path(&proc_.image));
+            // Review L2: keys are hashed (bounded memory per entry).
+            let key =
+                crate::canary::fnv64(&format!("{dedup_key}|{image_id}|{}", evidence_object(ev)));
+            match self.low_seen.get_mut(&key) {
+                Some((t, n)) if ev.ts >= *t && ev.ts - *t < LOW_AGG_MS => {
+                    *n = n.saturating_add(1);
+                    return;
+                }
+                Some((t, n)) => {
+                    if *n > 0 {
+                        hit.summary.push_str(&format!(
+                            " (the same alert was folded {n} more times in the previous 24 h)"
+                        ));
+                    }
+                    *t = ev.ts;
+                    *n = 0;
+                }
+                None => {
+                    if self.low_seen.len() >= MAX_LOW_SEEN {
+                        let now = ev.ts;
+                        self.low_seen
+                            .retain(|_, (t, _)| now >= *t && now - *t < LOW_AGG_MS);
+                        if self.low_seen.len() >= MAX_LOW_SEEN {
+                            // Drop the oldest eighth in one pass.
+                            let mut ts: Vec<TimestampMs> =
+                                self.low_seen.values().map(|(t, _)| *t).collect();
+                            ts.sort_unstable();
+                            let cut = ts[ts.len() / 8];
+                            self.low_seen.retain(|_, (t, _)| *t > cut);
+                        }
+                    }
+                    self.low_seen.insert(key, (ev.ts, 0));
+                }
+            }
         }
 
         let mut actions = Vec::new();
@@ -2663,10 +2842,126 @@ impl EngineState {
             if !extra.is_empty() {
                 summary.push_str(&format!(" ({})", extra.join(", ")));
             }
+            // Triage 2026-10-22 item 1 (6,900 ST-12 alerts from rustc /
+            // cargo / clippy-driver / protoc / wix / makensis): first-seen.
+            // One alert per binary (sha256, else path + size) per device per
+            // 7 days; later executions are folded into it. The same binary
+            // from a riskier folder (Temp / Downloads / removable) alerts
+            // again.
+            let key = st12_key(info);
+            let rank = st12_rank(info.path_class);
+            let prev = self.st12_seen.get(&key).copied();
+            // Review M1: in Protect mode every run is still suspended and
+            // judged (folding would skip the suspend window).
+            let fold_ok = self.mode(ST12) != RuleMode::Protect;
+            self.state(&info.guid, e.ts).add_evidence(e);
+            if let Some(s) = prev.filter(|_| fold_ok) {
+                if e.ts >= s.last_alert
+                    && e.ts - s.last_alert < ST12_FIRST_SEEN_MS
+                    && rank <= s.rank
+                {
+                    // Already reported within 7 days from an equally or more
+                    // exposed folder: fold this execution into that alert.
+                    if let Some(s) = self.st12_seen.get_mut(&key) {
+                        s.repeats = s.repeats.saturating_add(1);
+                    }
+                    return;
+                }
+                if rank > s.rank && e.ts - s.last_alert < ST12_FIRST_SEEN_MS {
+                    summary.push_str(" — the same file ran before from a less exposed folder and now runs from a riskier one");
+                } else if s.repeats > 0 {
+                    summary.push_str(&format!(
+                        " — it ran {} more times since the previous alert for this file",
+                        s.repeats
+                    ));
+                }
+            }
             let mut hit = Hit::new(ST12, &info.guid, sev, summary);
             hit.suspend = true;
             self.state(&info.guid, e.ts).add_evidence(e);
+            let before = self.out.len();
             self.emit(e, hit);
+            let alerted = self.out[before..]
+                .iter()
+                .any(|o| matches!(o, Output::Alert(d) if d.alert.rule_id == ST12));
+            if alerted {
+                let rank = match prev {
+                    Some(s) if e.ts - s.last_alert < ST12_FIRST_SEEN_MS => rank.max(s.rank),
+                    _ => rank,
+                };
+                if !self.st12_seen.contains_key(&key) && self.st12_seen.len() >= MAX_ST12_SEEN {
+                    let now = e.ts;
+                    self.st12_seen.retain(|_, s| {
+                        now >= s.last_alert && now - s.last_alert < ST12_FIRST_SEEN_MS
+                    });
+                    if self.st12_seen.len() >= MAX_ST12_SEEN {
+                        if let Some(k) = self
+                            .st12_seen
+                            .iter()
+                            .min_by_key(|(_, s)| s.last_alert)
+                            .map(|(k, _)| k.clone())
+                        {
+                            self.st12_seen.remove(&k);
+                        }
+                    }
+                }
+                self.st12_seen.insert(
+                    key,
+                    SeenBinary {
+                        last_alert: e.ts,
+                        rank,
+                        repeats: 0,
+                    },
+                );
+            }
+        }
+    }
+
+    /// First-seen ST-12 memory for persistence across agent restarts
+    /// (triage 2026-10-22 item 1): JSON array of
+    /// `[key, last_alert_ms, rank, repeats]`, entries younger than 7 days.
+    pub fn st12_seen_export(&self, now: TimestampMs) -> String {
+        let rows: Vec<(&String, i64, u8, u32)> = self
+            .st12_seen
+            .iter()
+            // Only hash identities survive a restart (review 1.1.6 #7): a
+            // path + size identity (no hash: images over the hashing limit)
+            // could be swapped for a same-size payload at the same path.
+            .filter(|(k, _)| k.starts_with("sha256:"))
+            .filter(|(_, s)| now >= s.last_alert && now - s.last_alert < ST12_FIRST_SEEN_MS)
+            .map(|(k, s)| (k, s.last_alert, s.rank, s.repeats))
+            .collect();
+        serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
+    }
+
+    /// Restore [`Self::st12_seen_export`] output (malformed input is ignored;
+    /// bounded to [`MAX_ST12_SEEN`] entries, newest kept). Rows already
+    /// expired at `now`, or stamped more than a day after `now` (clock moved
+    /// back, or a damaged value that would silence ST-12 for good), are
+    /// dropped: the binary then simply alerts once more.
+    pub fn st12_seen_import(&mut self, json: &str, now: TimestampMs) {
+        let Ok(mut rows) = serde_json::from_str::<Vec<(String, i64, u8, u32)>>(json) else {
+            return;
+        };
+        rows.retain(|r| {
+            r.0.starts_with("sha256:")
+                && r.1 <= now.saturating_add(24 * 3600 * 1000)
+                && now.saturating_sub(r.1) < ST12_FIRST_SEEN_MS
+        });
+        rows.sort_by_key(|r| std::cmp::Reverse(r.1));
+        for (k, last_alert, rank, repeats) in rows.into_iter().take(MAX_ST12_SEEN) {
+            if k.len() > 1024 || self.st12_seen.len() >= MAX_ST12_SEEN {
+                continue;
+            }
+            let e = self.st12_seen.entry(k).or_insert(SeenBinary {
+                last_alert,
+                rank: rank.clamp(1, 2),
+                repeats,
+            });
+            if last_alert > e.last_alert {
+                e.last_alert = last_alert;
+                e.rank = rank.clamp(1, 2);
+            }
         }
     }
 
@@ -2907,6 +3202,28 @@ impl EngineState {
         if proc_.image.is_empty() {
             return;
         }
+        // Owner's PC triage 2026-10-22: the store must sit where the real
+        // one lives (a real profile root, not a simulated profile in Temp,
+        // an MSIX app's own LocalCache copy or a mangled command line).
+        if !crate::paths::store_location_real(
+            &norm,
+            &store,
+            &proc_.image,
+            self.system_drive,
+            self.tampered.contains(&proc_.guid),
+        ) {
+            return;
+        }
+        // Triage item 8: Git for Windows / OpenSSH / PuTTY clients in their
+        // admin-only install folders own the SSH key stores.
+        if crate::legit_apps::ssh_client_owner(
+            &proc_,
+            &store,
+            self.system_drive,
+            self.tampered.contains(&proc_.guid),
+        ) {
+            return;
+        }
         // Soak 2026-10-21: the browser's own signed install tree (updater
         // helpers such as Chrome's os_update_handler.exe) owns its stores;
         // Microsoft-signed Program Files apps are WAM clients of the token
@@ -2934,6 +3251,20 @@ impl EngineState {
         } else if crate::legit_apps::dev_tool_reader(&proc_, store.app, self.system_drive, tampered)
         {
             BenignRead::DevTool
+        } else if crate::legit_apps::ms_wam_reader_per_user(
+            &proc_,
+            store.app,
+            self.system_drive,
+            tampered,
+        ) {
+            BenignRead::WamPerUser
+        } else if crate::legit_apps::vendor_config_reader(
+            &proc_,
+            &store,
+            self.system_drive,
+            tampered,
+        ) {
+            BenignRead::VendorConfig
         } else {
             BenignRead::No
         };
@@ -2952,6 +3283,8 @@ impl EngineState {
         match benign {
             BenignRead::Wam => st.wam_cred = true,
             BenignRead::DevTool => st.dev_tool_cred = true,
+            BenignRead::WamPerUser => st.ms_wam_cred = true,
+            BenignRead::VendorConfig => st.vendor_cfg_cred = true,
             BenignRead::No => st.non_wam_cred = true,
         }
         match (
@@ -3013,6 +3346,23 @@ impl EngineState {
                 hit.mode_override = Some(RuleMode::Audit);
                 hit.summary.push_str(&format!(
                     " (validly signed {} application installed under Program Files reading a developer-tool credential store, which developer tools such as Docker Desktop, kubectl, Lens or cloud CLIs do; alert only)",
+                    proc_.signer.as_deref().unwrap_or("").trim()
+                ));
+            }
+            BenignRead::WamPerUser => {
+                // Triage item 6: per-user VS Code. Recorded; ST-04 is Low
+                // Audit only towards Microsoft's own endpoints.
+                hit.severity = Severity::Low;
+                hit.mode_override = Some(RuleMode::Audit);
+                hit.summary.push_str(" (Microsoft-signed app installed in the user profile reading the Windows sign-in (WAM) token cache, which WAM clients do; alert only, but a later send to anything other than Microsoft's own sign-in / telemetry endpoints gets the full response)");
+            }
+            BenignRead::VendorConfig => {
+                // Triage item 9: GPU / overlay / launcher services scan
+                // Steam's client configuration.
+                hit.severity = Severity::Low;
+                hit.mode_override = Some(RuleMode::Audit);
+                hit.summary.push_str(&format!(
+                    " (validly signed {} service installed under Program Files reading Steam's client configuration, which GPU, overlay and game-library tools do; the Steam Guard and login token files are not covered; alert only)",
                     proc_.signer.as_deref().unwrap_or("").trim()
                 ));
             }
@@ -3333,6 +3683,21 @@ impl EngineState {
         }
     }
 
+    /// Triage 2026-10-22 item 11: WSL's service resolves (and, with
+    /// mirrored / proxy networking, connects) for Linux processes, so the
+    /// real requester is invisible. Low, Audit, no action, own dedup key.
+    fn st14_wsl(hit: &mut Hit, p: &ProcessInfo, verb: &str, what: &str) {
+        hit.severity = Severity::Low;
+        hit.mode_override = Some(RuleMode::Audit);
+        hit.actions.clear();
+        hit.strong = false;
+        hit.dedup_key = Some(format!("{ST14}#wsl"));
+        hit.summary = format!(
+            "{} {verb} {what} on behalf of a process inside WSL (WSL answers DNS and relays traffic for Linux processes, so Kestrel cannot see which one asked); the name is a dead-drop / exfiltration service stealers use, so check what runs inside WSL if this is unexpected",
+            short_name(p)
+        );
+    }
+
     fn on_net(&mut self, e: &Event, dst_ip: &str, dst_port: u16, dst_host: Option<&str>) {
         if self.is_agent_owned(&e.guid) || e.pid == 0 || e.pid == 4 {
             return;
@@ -3417,7 +3782,11 @@ impl EngineState {
                         describe(&proc_)
                     ),
                 );
-                hit.actions = Self::st14_actions(&proc_, std::slice::from_ref(&ip_norm), None);
+                if crate::legit_apps::wsl_dns_proxy(&proc_, self.system_drive) {
+                    Self::st14_wsl(&mut hit, &proc_, "connected to", &what);
+                } else {
+                    hit.actions = Self::st14_actions(&proc_, std::slice::from_ref(&ip_norm), None);
+                }
                 self.state(&proc_.guid, e.ts).add_evidence(e);
                 self.emit(e, hit);
             }
@@ -3546,15 +3915,53 @@ impl EngineState {
         // client (e.g. VS Code sign-in, then telemetry): Audit, not a kill.
         // Owner's PC 2026-10-22: likewise developer-tool credential stores
         // read only by signed Program Files developer tools.
-        if let Some(s) = self
-            .states
-            .get(&rg)
-            .filter(|s| (s.wam_cred || s.own_app_dpapi || s.dev_tool_cred) && !s.non_wam_cred)
-        {
+        // Triage 2026-10-22 item 6: a per-user Microsoft-signed WAM client
+        // (VS Code under %LOCALAPPDATA%) is only Audit when the send went to
+        // Microsoft's own sign-in / telemetry endpoints (by DNS name) from a
+        // Microsoft-signed, untampered sender; anything else is the full
+        // response.
+        let ms_host = host
+            .as_deref()
+            .filter(|h| crate::legit_apps::microsoft_endpoint(h))
+            .map(|h| h.trim_end_matches('.').to_string());
+        let ms_send_ok = ms_host.is_some()
+            && crate::legit_apps::microsoft_sender_ok(&proc_, self.tampered.contains(&proc_.guid))
+            && crate::legit_apps::microsoft_sender_ok(&rp, self.tampered.contains(&rg));
+        if let Some(s) = self.states.get(&rg).filter(|s| {
+            (s.wam_cred || s.own_app_dpapi || s.dev_tool_cred || s.ms_wam_cred || s.vendor_cfg_cred)
+                && !s.non_wam_cred
+                && (!s.ms_wam_cred || ms_send_ok)
+        }) {
+            // Triage item 5: Audit because the reads were benign, so the
+            // severity is Low (it was Critical and flooded the incident
+            // queue). Review H4: developer-tool stores and Steam's
+            // config.vdf are Low only when the reader itself or its
+            // same-vendor backend sent the data, or it went to that store's
+            // provider endpoint; a different sender (git-remote-https
+            // pushing a committed `.aws\credentials`) stays High Audit. The
+            // provider-endpoint branch below stays High.
             hit.mode_override = Some(RuleMode::Audit);
             hit.strong = false;
+            let vendor_send = rg == proc_.guid
+                || vendor_backend
+                || s.cloud_provider.is_some_and(|p| {
+                    host.as_deref()
+                        .is_some_and(|h| crate::legit_apps::provider_endpoint(p, h))
+                });
+            hit.severity = if (s.dev_tool_cred || s.vendor_cfg_cred) && !vendor_send {
+                Severity::High
+            } else {
+                Severity::Low
+            };
             if s.dev_tool_cred {
                 hit.summary.push_str(" (only developer-tool credential stores such as kubeconfig, Docker or cloud CLI credentials were read, by a signed developer tool installed under Program Files; alert only)");
+            } else if s.vendor_cfg_cred && !(s.wam_cred || s.own_app_dpapi || s.ms_wam_cred) {
+                hit.summary.push_str(" (only Steam's client configuration was read, by a signed vendor service installed under Program Files; alert only)");
+            } else if s.ms_wam_cred {
+                hit.summary.push_str(&format!(
+                    " (only the Windows sign-in (WAM) token cache was read, by a Microsoft-signed app, and the connection went to Microsoft's own endpoint {}; alert only)",
+                    ms_host.as_deref().unwrap_or("")
+                ));
             } else {
                 hit.summary.push_str(" (only the Windows sign-in (WAM) token cache and/or the app's own Electron safeStorage key were read, by a signed Program Files app; alert only)");
             }
@@ -3672,7 +4079,11 @@ impl EngineState {
         }
         if self.exfil_match(&q).is_some() && !self.domain_owner_ok(&proc_, &q) {
             let mut hit = Hit::new(ST14, &proc_.guid, Severity::High, format!("{} looked up {q} — a dead-drop / exfiltration service stealers use for C2 and uploads", describe(&proc_)));
-            hit.actions = Self::st14_actions(&proc_, &ips, None);
+            if crate::legit_apps::wsl_dns_proxy(&proc_, self.system_drive) {
+                Self::st14_wsl(&mut hit, &proc_, "looked up", &q);
+            } else {
+                hit.actions = Self::st14_actions(&proc_, &ips, None);
+            }
             self.state(&proc_.guid, e.ts).add_evidence(e);
             self.emit(e, hit);
         }
@@ -3761,6 +4172,12 @@ impl EngineState {
                 return;
             }
         }
+        // Triage 2026-10-22 item 7: an app opening the WebView2 process it
+        // hosts (WhatsApp, Teams, Outlook, Widgets) is hosting, not browser
+        // tampering.
+        if matches!(e.data, EventData::ProcessAccess(_)) && self.hosts_webview(&src, t) {
+            return;
+        }
         let mut hit = Hit::new(
             ST07,
             &src.guid,
@@ -3771,6 +4188,82 @@ impl EngineState {
         hit.actions.push(quarantine(&src));
         self.state(&src.guid, e.ts).add_evidence(e);
         self.emit(e, hit);
+    }
+
+    /// Triage 2026-10-22 item 7 (`WhatsApp.Root.exe` opened
+    /// `msedgewebview2.exe` with 0x1f0fff): the target is a WebView2 process
+    /// (`msedgewebview2.exe`) that `src` hosts: its parent in the process
+    /// table is `src`, or it carries `--webview-exe-name=<src image name>`
+    /// (WebView2 renderers and utilities, whose parent is the WebView2
+    /// browser process). Never when `src` is a LOLBin / script host, when
+    /// the WebView2 runs under remote control, or when its
+    /// `--user-data-dir` is a real browser profile (Edge, Chrome, ...).
+    /// Real browsers (msedge, chrome, brave, firefox) and a WebView2 opened
+    /// by an unrelated process keep ST-07.
+    fn hosts_webview(&self, src: &ProcessInfo, t: &TargetProcess) -> bool {
+        if !crate::paths::file_name(&t.target_image).eq_ignore_ascii_case("msedgewebview2.exe") {
+            return false;
+        }
+        // Review H3: the host is an installed application (Program Files /
+        // WindowsApps on the system volume, admin-only), not an unsigned
+        // tool in a user folder that launched a WebView2 of its own, and
+        // was never injected into.
+        let src_name = file_name_lower(&src.image);
+        if src_name.is_empty()
+            || crate::legit_apps::is_interpreter(&src_name)
+            || !crate::legit_apps::in_program_files(&src.image, self.system_drive)
+            || self.tampered.contains(&src.guid)
+        {
+            return false;
+        }
+        let Some(tp) = t
+            .target_guid
+            .as_ref()
+            .and_then(|g| self.table.get(g))
+            .or_else(|| self.table.by_pid(t.target_pid))
+        else {
+            return false;
+        };
+        if !file_name_lower(&tp.image).eq("msedgewebview2.exe")
+            || crate::legit_apps::is_remote_controlled(&tp.cmdline)
+        {
+            return false;
+        }
+        // Chromium honours the last `--user-data-dir`; an 8.3 short name
+        // could hide a real browser profile.
+        let sw = crate::legit_apps::switches(&tp.cmdline);
+        if let Some(udd) = sw
+            .iter()
+            .rev()
+            .find(|(k, _)| k == "user-data-dir")
+            .and_then(|(_, v)| v.as_deref())
+        {
+            if udd.contains('~') {
+                return false;
+            }
+            let ls = normalize_path(&format!(
+                "{}\\Local State",
+                udd.trim().trim_end_matches('\\')
+            ));
+            if match_normalized(&ls).is_some_and(|s| s.app != "Chromium-based browser") {
+                return false;
+            }
+        }
+        // The opener launched it: it is the WebView2's parent, or (renderers,
+        // GPU / utility processes) its grandparent through the WebView2
+        // browser process. A name on the command line alone is not enough.
+        let mut cur = self.table.parent_of(tp);
+        for _ in 0..3 {
+            let Some(pp) = cur else { break };
+            if pp.guid == src.guid {
+                return true;
+            }
+            if !file_name_lower(&pp.image).eq("msedgewebview2.exe") {
+                break;
+            }
+            cur = self.table.parent_of(pp);
+        }
+        false
     }
 
     // ------------------------------------------------------------------

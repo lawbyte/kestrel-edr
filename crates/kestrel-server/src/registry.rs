@@ -25,6 +25,8 @@ pub struct AgentConn {
     pub kill: tokio::sync::Notify,
     /// `Hello.capabilities` of this stream (e.g. `live.files`, `live.desktop`).
     pub capabilities: Vec<String>,
+    /// `Hello.agent_version` of this stream.
+    pub agent_version: String,
     /// Remote-access ceiling the agent reported in its `Hello` (`None`:
     /// agent older than profiles).
     pub remote_ceiling: Option<kestrel_common::remote::RemoteAccessProfile>,

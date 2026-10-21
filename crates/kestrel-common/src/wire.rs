@@ -84,6 +84,12 @@ pub enum ServerPayload {
     Command {
         command_id: Uuid,
         action: ResponseAction,
+        /// Secrets the action needs, attached by the server at delivery time
+        /// only (never stored with the action, never in the REST API). Today:
+        /// the uninstall token(s) for `UninstallAgent`. Absent for every
+        /// other action; older agents ignore it. `Debug` redacts it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secret: Option<CommandSecret>,
     },
     /// Update the agent; the agent verifies `signature` (Ed25519 over
     /// `kestrel-update-v1\n{version}\n{url}\n{sha256}`) before installing.
@@ -122,6 +128,28 @@ pub enum ServerPayload {
         session_id: Uuid,
         msg: LiveServerMsg,
     },
+}
+
+/// Secret part of a `ServerPayload::Command` (see there). Never logged:
+/// `Debug` prints only how many tokens there are.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Default)]
+pub struct CommandSecret {
+    /// Candidate uninstall tokens for `UninstallAgent`: the device's current
+    /// token and, while a rotation is unconfirmed, the pending one. The agent
+    /// uses the one that matches its stored Argon2id hash.
+    #[serde(default)]
+    pub uninstall_tokens: Vec<String>,
+}
+
+impl std::fmt::Debug for CommandSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommandSecret")
+            .field(
+                "uninstall_tokens",
+                &format_args!("[redacted; {}]", self.uninstall_tokens.len()),
+            )
+            .finish()
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -179,6 +207,15 @@ pub struct AgentHealth {
     pub etw_events_lost: u64,
     #[serde(default)]
     pub etw_buffers_lost: u64,
+    /// Part of `etw_events_lost` discarded inside ETW (kernel session
+    /// buffers full: the consumer could not keep up). `None` from agents
+    /// older than 2026-10-22, which only report the total.
+    #[serde(default)]
+    pub etw_kernel_events_lost: Option<u64>,
+    /// Part of `etw_events_lost` dropped by the agent's own sensor queues
+    /// and caps (internal queue / agent channel full, aggregator caps).
+    #[serde(default)]
+    pub sensor_internal_dropped: Option<u64>,
     #[serde(default)]
     pub events_per_min: u64,
     #[serde(default)]
@@ -312,6 +349,39 @@ pub fn strip_nul(v: &mut serde_json::Value) -> usize {
             n + m.values_mut().map(strip_nul).sum::<usize>()
         }
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod command_secret_tests {
+    use super::*;
+    use crate::ResponseAction;
+
+    #[test]
+    fn secret_is_optional_and_redacted() {
+        let id = Uuid::nil();
+        // Older servers / every other action: no `secret` on the wire.
+        let p = ServerPayload::Command {
+            command_id: id,
+            action: ResponseAction::ApplyHardening,
+            secret: None,
+        };
+        let j = serde_json::to_string(&p).unwrap();
+        assert!(!j.contains("secret"), "{j}");
+        let back: ServerPayload = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, p);
+        let p = ServerPayload::Command {
+            command_id: id,
+            action: ResponseAction::UninstallAgent { purge_data: false },
+            secret: Some(CommandSecret {
+                uninstall_tokens: vec!["kun_supersecret".into()],
+            }),
+        };
+        let dbg = format!("{p:?}");
+        assert!(!dbg.contains("kun_supersecret"), "{dbg}");
+        assert!(dbg.contains("redacted; 1"), "{dbg}");
+        let j = serde_json::to_string(&p).unwrap();
+        assert_eq!(serde_json::from_str::<ServerPayload>(&j).unwrap(), p);
     }
 }
 

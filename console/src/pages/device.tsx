@@ -4,7 +4,7 @@ import { toast } from 'sonner'
 import { useMemo, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { api, qk } from '@/api/endpoints'
-import type { DeviceDetail, EventKind, HardeningControl, ProcessInfo, TreeNode } from '@/api/types'
+import type { Device, DeviceDetail, EventKind, HardeningControl, ProcessInfo, TreeNode } from '@/api/types'
 import { ActionStatusBadge, DeviceStatusBadge, ModeBadge, ProvenanceBadges, SeverityBadge } from '@/components/badges'
 import { Card, EmptyState, ErrorState, KeyValue, LoadingRows, Mono } from '@/components/common'
 import { ProcessDetail, ProcessTree } from '@/components/process-tree'
@@ -19,6 +19,7 @@ import { useAuth } from '@/lib/auth'
 import { Tabs, TabsContent, TabsList, TabsTrigger, Tooltip } from '@/components/ui/misc'
 import { EVENT_KIND_LABEL, EVENT_KINDS_UI, HARDENING_INFO, describeAction } from '@/lib/labels'
 import { describeEvent } from '@/lib/events'
+import { eventsLostDetail } from '@/lib/health'
 import { formatBytes, formatDateTime, formatTime, formatUptime, timeAgo } from '@/lib/format'
 import { basename, cn } from '@/lib/utils'
 import { visibleRemoteTabs } from '@/lib/remote-tabs'
@@ -29,6 +30,7 @@ import { RemoteDesktop } from '@/components/remote/remote-desktop'
 import { FileManager } from '@/components/remote/file-manager'
 import { ReauthProvider } from '@/components/remote/reauth'
 import { RemoteAccessSummaryCard, RemoteAccessSummaryLine } from '@/components/remote/summary'
+import { REMOVE_PRIVILEGE, RemovalBadge, RemovalBanner, RemoveDeviceDialog, RemoveDeviceRow, isRemoved } from '@/components/device-removal'
 
 export default function DevicePage() {
   const { id = '' } = useParams()
@@ -48,7 +50,9 @@ function DeviceView({ d }: { d: DeviceDetail }) {
   const { can } = useAuth()
   const [search] = useSearchParams()
   const ra = d.remote_access
-  const remoteTabs = visibleRemoteTabs(can, ra)
+  const removed = isRemoved(dev)
+  const [removing, setRemoving] = useState(false)
+  const remoteTabs = removed ? { desktop: false, files: false } : visibleRemoteTabs(can, ra)
   // Servers before remote-access profiles send no effective profile: they enforce nothing extra, so don't hide controls.
   const effective = ra?.effective ? normaliseProfile(ra.effective) : profileUnrestricted()
 
@@ -63,6 +67,7 @@ function DeviceView({ d }: { d: DeviceDetail }) {
             <div className="flex flex-wrap items-center gap-3">
               <h1 className="font-mono text-[1.375rem] font-semibold tracking-[-0.01em]">{dev.hostname}</h1>
               <DeviceStatusBadge status={dev.status} />
+              {dev.removal ? <RemovalBadge state={dev.removal.state} className="text-sm" /> : null}
             </div>
             <p className="mt-1 text-sm text-fg-muted">
               {dev.os_name} <span className="font-mono text-xs">{dev.os_build}</span> · {dev.logged_on_user ?? 'no one signed in'} · last seen {timeAgo(dev.last_seen)} · {dev.group_name} group
@@ -71,6 +76,7 @@ function DeviceView({ d }: { d: DeviceDetail }) {
         </div>
       </div>
 
+      {removed ? null : (
       <div className="sticky top-0 z-20 flex flex-wrap items-center gap-2 border-b border-border bg-bg/90 px-6 py-2 backdrop-blur" role="toolbar" aria-label="Device actions">
         {isolated ? (
           <ActionButton spec={{ action: { type: 'release_host' }, impact: 'Restores normal network access for this device.' }} onPick={setAction} />
@@ -86,15 +92,18 @@ function DeviceView({ d }: { d: DeviceDetail }) {
           </Link>
         ) : null}
       </div>
+      )}
 
+      <ReauthProvider>
       <div className="space-y-5 p-6">
-        <ProtectionOffBanner device={dev} onPick={setAction} />
+        <RemovalBanner device={dev} onRetry={() => setRemoving(true)} />
+        {removed ? null : <ProtectionOffBanner device={dev} onPick={setAction} />}
         <DuplicateBanner d={d} />
         <div className="grid items-start gap-5 lg:grid-cols-3">
           <Card title="Sensor health" className="lg:col-span-2">
             <div className="grid gap-x-6 gap-y-3 sm:grid-cols-2 xl:grid-cols-3">
               <Health label="Kernel telemetry (ETW)" ok={h.etw_ok} detail={h.etw_ok ? `${h.events_per_min ?? 0} events/min` : 'Session not running'} />
-              <Health label="Events lost (1 h)" ok={(h.etw_events_lost ?? 0) === 0} warn={(h.etw_events_lost ?? 0) > 0 && (h.etw_events_lost ?? 0) < 500} detail={`${h.etw_events_lost ?? 0} events, ${h.etw_buffers_lost ?? 0} buffers`} />
+              <Health label="Events lost (1 h)" ok={(h.etw_events_lost ?? 0) === 0} warn={(h.etw_events_lost ?? 0) > 0 && (h.etw_events_lost ?? 0) < 500} detail={eventsLostDetail(h)} />
               <Health label="Sysmon" ok={!!h.sysmon_present} neutral={!h.sysmon_present} detail={h.sysmon_present ? 'Present: adds handle-access detail' : 'Not installed (optional)'} />
               <Health label="DPAPI audit channel" ok={!!h.dpapi_channel_enabled} neutral={!h.dpapi_channel_enabled} detail={h.dpapi_channel_enabled ? 'Enabled: ST-03 active' : 'Off (optional): turn on in Policies, Hardening for ST-03'} />
               <Health label="AMSI provider" ok={!!h.amsi_ok} neutral={!h.amsi_ok} detail={h.amsi_ok ? 'Registered' : 'Not used in this version: script content comes from PowerShell logging'} />
@@ -120,13 +129,12 @@ function DeviceView({ d }: { d: DeviceDetail }) {
                 ['Tags', dev.tags.join(', ') || '—'],
               ]}
             />
-            <UninstallToken deviceId={dev.id} hostname={dev.hostname} pending={!!dev.uninstall_token_pending} />
+            {removed ? null : <UninstallToken deviceId={dev.id} hostname={dev.hostname} pending={!!dev.uninstall_token_pending} />}
           </Card>
         </div>
 
-        {ra?.ceiling ? <RemoteAccessSummaryCard info={ra} policyId={dev.policy_id} policyName={dev.policy_name} /> : null}
+        {ra?.ceiling && !removed ? <RemoteAccessSummaryCard info={ra} policyId={dev.policy_id} policyName={dev.policy_name} /> : null}
 
-        <ReauthProvider>
         <Tabs defaultValue={search.get('tab') ?? 'timeline'}>
           <TabsList>
             <TabsTrigger value="timeline">Event timeline</TabsTrigger>
@@ -276,9 +284,10 @@ function DeviceView({ d }: { d: DeviceDetail }) {
             </TabsContent>
           ) : null}
         </Tabs>
-        </ReauthProvider>
-        <DangerZone deviceId={dev.id} hostname={dev.hostname} />
+        {removed ? null : <DangerZone device={dev} onRemove={() => setRemoving(true)} />}
       </div>
+      {removing ? <RemoveDeviceDialog device={dev} onClose={() => setRemoving(false)} /> : null}
+      </ReauthProvider>
       <ConfirmActionDialog open={!!action} onOpenChange={(o) => !o && setAction(null)} spec={action} device={dev} />
     </div>
   )
@@ -663,11 +672,14 @@ function DuplicateBanner({ d }: { d: DeviceDetail }) {
   )
 }
 
-/** DELETE /devices/:id (devices.write): revoke the agent certificate; history stays. */
-function DangerZone({ deviceId, hostname }: { deviceId: string; hostname: string }) {
+/** DELETE /devices/:id (devices.write): revoke the agent certificate; history stays. POST /devices/:id/remove (devices.remove): remote uninstall. */
+function DangerZone({ device, onRemove }: { device: Device; onRemove: () => void }) {
   const { can } = useAuth()
   const [open, setOpen] = useState(false)
-  if (!can('devices.write')) return null
+  const { id: deviceId, hostname } = device
+  const decommission = can('devices.write')
+  const remove = can(REMOVE_PRIVILEGE)
+  if (!decommission && !remove) return null
   return (
     <section aria-labelledby="danger-zone" className="rounded-lg border border-danger/40 bg-surface">
       <header className="border-b border-danger/30 px-4 py-2.5">
@@ -675,15 +687,18 @@ function DangerZone({ deviceId, hostname }: { deviceId: string; hostname: string
           <AlertTriangle className="size-4" aria-hidden /> Danger zone
         </h2>
       </header>
-      <div className="flex flex-wrap items-center gap-4 p-4">
+      {remove ? <RemoveDeviceRow device={device} onOpen={onRemove} /> : null}
+      {decommission ? (
+      <div className={cn('flex flex-wrap items-center gap-4 p-4', remove && 'border-t border-border')}>
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium">Decommission this device</p>
-          <p className="max-w-2xl text-xs text-fg-muted">Revokes the agent’s certificate so it can no longer connect. Use it for retired, wiped or replaced machines. Alerts, incidents and the audit trail are kept.</p>
+          <p className="max-w-2xl text-xs text-fg-muted">Revokes the agent’s certificate so it can no longer connect, and takes the device off the list. The agent stays installed on the PC. Use it for retired, wiped or replaced machines. Alerts, incidents and the audit trail are kept.</p>
         </div>
         <Button variant="danger-outline" onClick={() => setOpen(true)}>
           <PowerOff /> Decommission device
         </Button>
       </div>
+      ) : null}
       {open ? <DecommissionDialog deviceId={deviceId} hostname={hostname} onClose={() => setOpen(false)} /> : null}
     </section>
   )

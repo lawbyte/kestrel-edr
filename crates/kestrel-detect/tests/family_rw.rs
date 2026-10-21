@@ -753,7 +753,7 @@ fn rw08_fallback_combined_with_rw06_kills() {
         None,
     ));
     let mut fa = mass(60, 25, 50);
-    fa.note_name = Some("x8k2q.log".into());
+    fa.note_name = Some("x8k2q.txt".into());
     fa.note_dirs = 25;
     let out = e.process(&file_activity(10, "enc", 10, fa));
     assert_eq!(rw_ids(&out), vec!["RW-06", "RW-08"]);

@@ -8,29 +8,33 @@ import { MfaSetupLink } from '@/components/mfa-link'
 import { useAuth } from '@/lib/auth'
 
 interface ReauthCtx {
-  /** Ask for a TOTP code; resolves true once the server accepted it. */
-  ask: () => Promise<boolean>
+  /** Ask for a TOTP code; resolves true once the server accepted it. `why` replaces the dialog's explanation. */
+  ask: (why?: string) => Promise<boolean>
   /** Run `fn`; on 403 `reauth_required` ask for a code and retry once. */
-  withReauth: <T>(fn: () => Promise<T>) => Promise<T>
+  withReauth: <T>(fn: () => Promise<T>, why?: string) => Promise<T>
 }
 const Ctx = createContext<ReauthCtx | null>(null)
 
-/** MFA step-up for remote access (`require_mfa_reauth`): one dialog shared by the remote tabs. */
+const REMOTE_WHY = 'This device’s remote-access profile requires a fresh MFA check. One confirmation is valid for 10 minutes.'
+
+/** MFA step-up (remote access `require_mfa_reauth`, device removal): one dialog shared by the device page. */
 export function ReauthProvider({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false)
   const [code, setCode] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [why, setWhy] = useState(REMOTE_WHY)
   const { me } = useAuth()
   const [mfaMissing, setMfaMissing] = useState(false)
   const noAuthenticator = mfaMissing || !me.user.mfa_enabled
   const resolver = useRef<((ok: boolean) => void) | null>(null)
 
   const ask = useCallback(
-    () =>
+    (reason?: string) =>
       new Promise<boolean>((resolve) => {
         resolver.current?.(false)
         resolver.current = resolve
+        setWhy(reason ?? REMOTE_WHY)
         setCode('')
         setError(null)
         setMfaMissing(false)
@@ -67,12 +71,12 @@ export function ReauthProvider({ children }: { children: ReactNode }) {
     }
   }
   const withReauth = useCallback(
-    async <T,>(fn: () => Promise<T>): Promise<T> => {
+    async <T,>(fn: () => Promise<T>, reason?: string): Promise<T> => {
       try {
         return await fn()
       } catch (e) {
         if (!needsReauth(e)) throw e
-        if (!(await ask())) throw e
+        if (!(await ask(reason))) throw e
         return fn()
       }
     },
@@ -87,7 +91,7 @@ export function ReauthProvider({ children }: { children: ReactNode }) {
           <DialogContent
             size="sm"
             title="Confirm it’s you"
-            description="This device’s remote-access profile requires a fresh MFA check. One confirmation is valid for 10 minutes."
+            description={why}
             footer={
               <>
                 <Button variant="ghost" onClick={() => finish(false)}>

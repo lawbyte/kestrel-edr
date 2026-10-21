@@ -1,0 +1,8 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 0, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "LAWBYTE\\azka", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 8100, "guid": "stealer", "type": "process_start", "ppid": 4000, "image": "C:\\Users\\azka\\AppData\\Local\\Temp\\upd_x64.exe", "cmdline": "\"C:\\Users\\azka\\AppData\\Local\\Temp\\upd_x64.exe\"", "user": "LAWBYTE\\azka", "integrity": "medium", "signed": "unsigned", "parent_guid": "explorer", "sha256": "9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f"}
+{"ts": 1760000000100, "pid": 8100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\azka\\AppData\\Local\\Google\\Chrome\\User Data\\Local State", "op": "read"}
+{"ts": 1760000000110, "pid": 8100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\azka\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000000120, "pid": 8100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\azka\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000000130, "pid": 8100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\azka\\AppData\\Local\\Packages\\Claude_pzs8sxrjxfjjc\\LocalCache\\Local\\Google\\Chrome\\User Data\\Local State", "op": "read"}
+{"ts": 1760000000140, "pid": 8100, "guid": "stealer", "type": "file_access", "path": "D:\\Users\\azka\\.aws\\credentials", "op": "read"}
+{"ts": 1760000001500, "pid": 8100, "guid": "stealer", "type": "net_connect", "proto": "tcp", "dst_ip": "45.61.136.10", "dst_port": 443, "src_port": 50123}

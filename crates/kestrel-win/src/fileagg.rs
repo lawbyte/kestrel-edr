@@ -34,6 +34,25 @@ pub const MAX_TOTAL_OPS: usize = 131_072;
 pub const MAX_FILE_OBJECTS: usize = 65_536;
 /// A name newly created in at least this many directories is a ransom-note candidate.
 pub const NOTE_MIN_DIRS: u32 = 3;
+/// Files remembered per process as created by itself (first operation a
+/// confirmed create), beyond the window (1.1.6 `self_created`). Oldest
+/// first out.
+pub const MAX_ORIGINS_PER_PID: usize = 2048;
+/// Files remembered per process as already existing when it first met them
+/// (opened, overwritten, renamed or deleted first). Kept separately so junk
+/// creates cannot push them out (review 1.1.6 #3). Together about 250 KB
+/// for a busy process.
+pub const MAX_PREEXISTING_PER_PID: usize = 4096;
+/// A Create (12) and the CreateNewFile (30) of the same open arrive this
+/// close together (ms); older pairs on a reused FileObject are different
+/// opens (review 1.1.6 #4).
+const SAME_OPEN_MS: i64 = 50;
+/// Rename targets remembered per process as the same file as their source
+/// (oldest first out).
+const MAX_ALIASES_PER_PID: usize = 2048;
+/// Directory FileObjects remembered (a CreateNewFile / rename / delete on
+/// one is a directory operation, never a file).
+pub const MAX_DIR_OBJECTS: usize = 16_384;
 
 /// Extensions that are normal results of a rename / new file (documents,
 /// media, archives, temp and editor artefacts). A rename *to* one of these is
@@ -331,6 +350,81 @@ enum Kind {
 }
 
 impl PidState {
+    /// Remember how this process first met `file` (bounded per kind, oldest
+    /// first out). Never changes an existing entry. Once the pre-existing
+    /// memory overflowed, a file first met by a create is no longer credited
+    /// as self-created: it may be a document the process deleted earlier
+    /// and forgot (review 1.1.6 #3).
+    fn note_origin(&mut self, file: u64, created: bool, fo: u64) {
+        if self.origins.contains_key(&file) {
+            return;
+        }
+        let created = created && !self.pre_overflow;
+        self.origins.insert(file, Origin { created, fo });
+        if created {
+            self.created_order.push_back(file);
+        } else {
+            self.pre_order.push_back(file);
+        }
+        self.trim_origins();
+    }
+
+    /// Mark a file first met through a not-yet-confirmed open as created
+    /// (the CreateNewFile of the same open arrived).
+    fn confirm_created(&mut self, file: u64, fo: u64) {
+        if self.pre_overflow {
+            return;
+        }
+        if let Some(o) = self.origins.get_mut(&file) {
+            if !o.created && o.fo == fo {
+                o.created = true;
+                self.created_order.push_back(file);
+                self.trim_origins();
+            }
+        }
+    }
+
+    fn trim_origins(&mut self) {
+        while self.created_order.len() > MAX_ORIGINS_PER_PID {
+            if let Some(f) = self.created_order.pop_front() {
+                if self.origins.get(&f).is_some_and(|o| o.created) {
+                    self.origins.remove(&f);
+                }
+            }
+        }
+        while self.pre_order.len() > MAX_PREEXISTING_PER_PID {
+            if let Some(f) = self.pre_order.pop_front() {
+                if self.origins.get(&f).is_some_and(|o| !o.created) {
+                    self.origins.remove(&f);
+                    self.pre_overflow = true;
+                }
+            }
+        }
+    }
+
+    fn resolve(&self, h: u64) -> u64 {
+        self.aliases.get(&h).copied().unwrap_or(h)
+    }
+
+    fn alias(&mut self, target: u64, file: u64) {
+        if target == file {
+            self.aliases.remove(&target);
+            return;
+        }
+        if self.aliases.insert(target, file).is_none() {
+            self.alias_order.push_back(target);
+        }
+        while self.alias_order.len() > MAX_ALIASES_PER_PID {
+            if let Some(t) = self.alias_order.pop_front() {
+                self.aliases.remove(&t);
+            }
+        }
+    }
+
+    fn created_itself(&self, file: u64) -> Option<bool> {
+        self.origins.get(&file).map(|o| o.created)
+    }
+
     fn push(&mut self, op: Op) {
         *self.files.entry(op.file).or_default() += 1;
         self.ops.push_back(op);
@@ -365,6 +459,15 @@ impl PidState {
 struct Op {
     ts: i64,
     kind: Kind,
+    /// FileObject of the open (0 when unknown).
+    fo: u64,
+    /// A create proven by CreateNewFile (30). Create (12) is logged even
+    /// when the open fails, so its disposition proves nothing (review
+    /// 1.1.6 #1 / #2).
+    confirmed: bool,
+    /// A rename away from `file` (the old name is known): the path is free
+    /// afterwards, so a later create of it is a rewrite.
+    vacates: bool,
     file: u64,
     dir: u64,
     net: bool,
@@ -374,9 +477,33 @@ struct Op {
     new_name: Option<Box<str>>,
 }
 
+/// How a process first met a file (1.1.6).
+#[derive(Debug, Clone, Copy)]
+struct Origin {
+    /// Its first operation on the file was a create.
+    created: bool,
+    /// FileObject of that first operation (Create 12 with an overwrite
+    /// disposition may precede the CreateNewFile 30 of the same open).
+    fo: u64,
+}
+
 #[derive(Debug, Default)]
 struct PidState {
     ops: VecDeque<Op>,
+    /// File hash -> origin, kept beyond the window (bounded per kind,
+    /// [`MAX_ORIGINS_PER_PID`] / [`MAX_PREEXISTING_PER_PID`]); the orders
+    /// are insertion orders (may hold stale entries, also bounded).
+    origins: HashMap<u64, Origin>,
+    created_order: VecDeque<u64>,
+    pre_order: VecDeque<u64>,
+    /// A pre-existing origin was evicted (see `note_origin`).
+    pre_overflow: bool,
+    /// Rename target path hash -> the file key of its source: a document
+    /// renamed away (`doc.docx` -> `doc.docx.bak`) and later deleted is
+    /// still the same original (review 1.1.6 #5). Bounded,
+    /// [`MAX_ALIASES_PER_PID`].
+    aliases: HashMap<u64, u64>,
+    alias_order: VecDeque<u64>,
     /// Distinct files among `ops` (file hash → ops on it), kept in step with
     /// `ops` so the emission decision never needs a full [`summarise`].
     files: HashMap<u64, u32>,
@@ -408,6 +535,8 @@ pub struct FileAgg {
     kernel_hits: HashMap<String, i64>,
     pids: HashMap<u32, PidState>,
     file_objects: HashMap<(u32, u64), String>,
+    /// FileObjects opened as directories (in scope), see [`MAX_DIR_OBJECTS`].
+    dir_objects: HashSet<(u32, u64)>,
     total_ops: usize,
     /// Operations dropped by the caps (health counter).
     pub dropped: u64,
@@ -449,6 +578,10 @@ impl FileAgg {
         self.file_objects.insert((pid, fo), path.to_string());
     }
 
+    fn is_dir_object(&self, pid: u32, fo: u64) -> bool {
+        fo != 0 && self.dir_objects.contains(&(pid, fo))
+    }
+
     /// Kernel-File Create (12). `disposition` is `CreateOptions >> 24`.
     pub fn on_create(
         &mut self,
@@ -459,40 +592,91 @@ impl FileAgg {
         disposition: u32,
         is_dir: bool,
     ) -> Option<AggEmit> {
-        if is_dir {
-            return None;
+        if fo != 0 && !is_dir {
+            // FileObject addresses are reused after close (any path).
+            self.dir_objects.remove(&(pid, fo));
         }
         let scope = self.scope.classify(path)?;
+        if is_dir {
+            // A later CreateNewFile / rename / delete on this open is a
+            // directory operation (cargo's `out` folders), never a file.
+            if fo != 0 {
+                if self.dir_objects.len() >= MAX_DIR_OBJECTS {
+                    self.dir_objects.clear();
+                }
+                self.dir_objects.insert((pid, fo));
+            }
+            return None;
+        }
         self.remember_fo(pid, fo, path);
         match disposition {
             // FILE_SUPERSEDE, FILE_OVERWRITE, FILE_OVERWRITE_IF
-            0 | 4 | 5 => self.record(ts, pid, Kind::Overwrite, path, None, scope),
-            // FILE_CREATE
-            2 => self.record(ts, pid, Kind::NewFile, path, None, scope),
+            0 | 4 | 5 => self.record(ts, pid, fo, Kind::Overwrite, false, path, None, scope),
+            // FILE_CREATE: unconfirmed (the open may fail on an existing
+            // file); the CreateNewFile that follows a real create confirms it.
+            2 => self.record(ts, pid, fo, Kind::NewFile, false, path, None, scope),
+            // FILE_OPEN: the file existed. Remembered (no operation) so a
+            // later create of that path is never "self-created" (review
+            // 1.1.6 #5).
+            1 => {
+                self.note_existing(ts, pid, path);
+                None
+            }
             _ => None,
         }
     }
 
-    /// Kernel-File CreateNewFile (30).
-    pub fn on_create_new(&mut self, ts: i64, pid: u32, fo: u64, path: &str) -> Option<AggEmit> {
+    /// Kernel-File CreateNewFile (30). `is_dir`: its CreateOptions carry
+    /// FILE_DIRECTORY_FILE; a FileObject already opened as a directory is
+    /// one as well.
+    pub fn on_create_new(
+        &mut self,
+        ts: i64,
+        pid: u32,
+        fo: u64,
+        path: &str,
+        is_dir: bool,
+    ) -> Option<AggEmit> {
         let scope = self.scope.classify(path)?;
+        if is_dir || self.is_dir_object(pid, fo) {
+            return None;
+        }
         self.remember_fo(pid, fo, path);
-        self.record(ts, pid, Kind::NewFile, path, None, scope)
+        self.record(ts, pid, fo, Kind::NewFile, true, path, None, scope)
+    }
+
+    /// An in-scope file opened with FILE_OPEN: it existed before this
+    /// process met it. Only processes the aggregator already tracks (any
+    /// earlier file operation) or with room under the process cap.
+    fn note_existing(&mut self, ts: i64, pid: u32, path: &str) {
+        if !self.pids.contains_key(&pid) && self.pids.len() >= MAX_PIDS {
+            return;
+        }
+        let st = self.pids.entry(pid).or_default();
+        st.last_ts = st.last_ts.max(ts);
+        let file = st.resolve(h64(path));
+        st.note_origin(file, false, 0);
     }
 
     /// Kernel-File DeletePath (26).
     pub fn on_delete(&mut self, ts: i64, pid: u32, fo: u64, file_path: &str) -> Option<AggEmit> {
+        if self.is_dir_object(pid, fo) {
+            return None;
+        }
         let path = if file_path.is_empty() {
             self.file_objects.get(&(pid, fo))?.clone()
         } else {
             file_path.to_string()
         };
         let scope = self.scope.classify(&path)?;
-        self.record(ts, pid, Kind::Delete, &path, None, scope)
+        self.record(ts, pid, fo, Kind::Delete, false, &path, None, scope)
     }
 
     /// Kernel-File RenamePath (27).
     pub fn on_rename(&mut self, ts: i64, pid: u32, fo: u64, file_path: &str) -> Option<AggEmit> {
+        if self.is_dir_object(pid, fo) {
+            return None;
+        }
         let known = self.file_objects.get(&(pid, fo)).cloned();
         let (old, new) = match known {
             Some(o) if !file_path.is_empty() && o != file_path => (Some(o), file_path.to_string()),
@@ -508,14 +692,26 @@ impl FileAgg {
         if old.is_some() {
             self.remember_fo(pid, fo, &new);
         }
-        self.record(ts, pid, Kind::Rename, &new, old.as_deref(), scope)
+        self.record(
+            ts,
+            pid,
+            fo,
+            Kind::Rename,
+            false,
+            &new,
+            old.as_deref(),
+            scope,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record(
         &mut self,
         ts: i64,
         pid: u32,
+        fo: u64,
         kind: Kind,
+        confirmed: bool,
         path: &str,
         old: Option<&str>,
         scope: ScopeKind,
@@ -563,10 +759,67 @@ impl FileAgg {
             self.total_ops -= 1;
             self.dropped += 1;
         }
+        if kind == Kind::NewFile && confirmed && old.is_none() {
+            // A file really created at a path that was a rename target: a
+            // new file of its own from now on.
+            st.alias(h64(path), h64(path));
+        }
+        let file = st.resolve(h64(old.unwrap_or(path)));
+        let mut kind = kind;
+        // Create (12) and CreateNewFile (30) of one open, in either order:
+        // the open created the file and overwrote nothing. Only when the
+        // other half is the latest operation on this file, on the same
+        // FileObject, within SAME_OPEN_MS (a reused FileObject is another
+        // open, review 1.1.6 #4).
+        let same_open = |st: &PidState| {
+            st.ops
+                .iter()
+                .rev()
+                .take(64)
+                .position(|op| op.file == file)
+                .map(|i| st.ops.len() - 1 - i)
+                .filter(|&i| {
+                    let op = &st.ops[i];
+                    fo != 0 && op.fo == fo && ts - op.ts <= SAME_OPEN_MS && ts >= op.ts
+                })
+        };
+        if kind == Kind::NewFile && confirmed {
+            if let Some(i) = same_open(st) {
+                if st.ops[i].kind == Kind::Overwrite || st.ops[i].kind == Kind::NewFile {
+                    let op = &mut st.ops[i];
+                    op.kind = Kind::NewFile;
+                    op.confirmed = true;
+                    op.new_name = Some(name.into());
+                    st.confirm_created(file, fo);
+                }
+            }
+            st.note_origin(file, true, fo);
+        } else if kind == Kind::Overwrite {
+            if same_open(st).is_some_and(|i| st.ops[i].kind == Kind::NewFile && st.ops[i].confirmed)
+            {
+                // The CreateNewFile came first.
+                kind = Kind::NewFile;
+            }
+            st.note_origin(file, false, fo);
+        } else {
+            // Deletes, renames and unconfirmed creates (a failed CREATE_NEW
+            // on an existing document must not make it "self-created").
+            st.note_origin(file, false, fo);
+        }
+        if kind == Kind::Rename && old.is_some() {
+            // Later operations on the new name are operations on the same
+            // file (its origin included: a compiler renaming its own temp
+            // output stays self-created).
+            st.alias(h64(path), file);
+        }
         st.push(Op {
             ts,
             kind,
-            file: h64(old.unwrap_or(path)),
+            fo,
+            confirmed: confirmed
+                || (kind == Kind::NewFile && st.created_itself(file) == Some(true)),
+            vacates: kind == Kind::Rename && old.is_some(),
+            file,
             dir: h64(parent(path)),
             net: scope == ScopeKind::Network,
             new_ext,
@@ -698,6 +951,7 @@ impl FileAgg {
             self.total_ops = self.total_ops.saturating_sub(st.ops.len());
         }
         self.file_objects.retain(|(p, _), _| *p != pid);
+        self.dir_objects.retain(|(p, _)| *p != pid);
     }
 }
 
@@ -779,37 +1033,75 @@ impl DecoyOpeners {
 }
 
 fn summarise(st: &PidState) -> FileActivity {
+    // A "file" that is the parent folder of another confirmed create in the
+    // window is a directory whose create was not recognised as one
+    // (CreateNewFile delivered before the Create that carried
+    // FILE_DIRECTORY_FILE): never a file, a new file or a note. Only when
+    // every operation on it is a confirmed create: a failed open of
+    // `doc.docx\x` must not hide the document (review 1.1.6 #1).
+    let not_created: HashSet<u64> = st
+        .ops
+        .iter()
+        .filter(|o| !(o.kind == Kind::NewFile && o.confirmed))
+        .map(|o| o.file)
+        .collect();
+    let parents: HashSet<u64> = st
+        .ops
+        .iter()
+        .filter(|o| o.kind == Kind::NewFile && o.confirmed)
+        .map(|o| o.dir)
+        .filter(|d| !not_created.contains(d))
+        .collect();
     let mut files = HashSet::new();
     let mut dirs = HashSet::new();
-    let (mut renames, mut overwrites, mut news, mut deletes, mut net) = (
-        HashSet::new(),
+    let (mut renames, mut overwrites, mut deletes, mut net) = (
         HashSet::new(),
         HashSet::new(),
         HashSet::new(),
         HashSet::new(),
     );
+    // First operation on each file in the window, and files deleted so far
+    // (a later create of the same path is a rewrite, not a new file).
+    let mut first_kind: HashMap<u64, Kind> = HashMap::new();
+    let mut deleted: HashSet<u64> = HashSet::new();
     let mut ext_files: HashMap<u64, &str> = HashMap::new();
     let mut note_dirs: HashMap<&str, HashSet<u64>> = HashMap::new();
-    let first = st.ops.front().map(|o| o.ts).unwrap_or(0);
-    let last = st.ops.back().map(|o| o.ts).unwrap_or(0);
+    let mut first = None;
+    let mut last = 0;
     for o in &st.ops {
+        // An unconfirmed create (Create 12 with FILE_CREATE and no
+        // CreateNewFile) may be a failed open: it is not an operation on
+        // any file (review 1.1.6 #1 / #2).
+        if parents.contains(&o.file) || (o.kind == Kind::NewFile && !o.confirmed) {
+            continue;
+        }
+        first.get_or_insert(o.ts);
+        last = o.ts;
         files.insert(o.file);
         dirs.insert(o.dir);
+        first_kind.entry(o.file).or_insert(o.kind);
         if o.net {
             net.insert(o.file);
         }
         match o.kind {
             Kind::Rename => {
                 renames.insert(o.file);
+                if o.vacates {
+                    deleted.insert(o.file);
+                }
             }
             Kind::Overwrite => {
                 overwrites.insert(o.file);
             }
             Kind::NewFile => {
-                news.insert(o.file);
+                if deleted.contains(&o.file) {
+                    // Deleted, then re-created: the content was replaced.
+                    overwrites.insert(o.file);
+                }
             }
             Kind::Delete => {
                 deletes.insert(o.file);
+                deleted.insert(o.file);
             }
         }
         if let Some(e) = o.new_ext.as_deref() {
@@ -821,6 +1113,17 @@ fn summarise(st: &PidState) -> FileActivity {
             }
         }
     }
+    // New: the first operation in the window is a create and the process
+    // did not know the file before (an origin evicted from the bounded
+    // memory counts as unknown, i.e. new).
+    let news = first_kind
+        .iter()
+        .filter(|(f, k)| **k == Kind::NewFile && st.created_itself(**f) != Some(false))
+        .count();
+    let self_created = files
+        .iter()
+        .filter(|f| st.created_itself(**f) == Some(true))
+        .count();
     let mut ext_count: HashMap<&str, u32> = HashMap::new();
     for e in ext_files.values() {
         *ext_count.entry(e).or_default() += 1;
@@ -835,6 +1138,7 @@ fn summarise(st: &PidState) -> FileActivity {
         .map(|(n, d)| (*n, d.len() as u32))
         .filter(|(_, d)| *d >= NOTE_MIN_DIRS)
         .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0)));
+    let first = first.unwrap_or(0);
     FileActivity {
         remote_writer: false,
         canary_in_place: false,
@@ -844,7 +1148,8 @@ fn summarise(st: &PidState) -> FileActivity {
         renames: renames.len() as u32,
         ext_changes,
         overwrites: overwrites.len() as u32,
-        new_files: news.len() as u32,
+        new_files: news as u32,
+        self_created: self_created as u32,
         deletes: deletes.len() as u32,
         net_paths: net.len() as u32,
         top_new_ext: top.as_ref().map(|(e, _)| e.clone()),
@@ -1109,7 +1414,7 @@ mod tests {
         let mut a = agg();
         for d in 0..6 {
             let p = format!(r"{DEV}\users\labuser\documents\d{d}\readme_restore.txt");
-            a.on_create_new(d as i64 * 10, 8, 0, &p);
+            a.on_create_new(d as i64 * 10, 8, 0, &p, false);
             for i in 0..3 {
                 a.on_create(d as i64 * 10 + 1, 8, 0, &doc(d * 10 + i, d), 0, false);
             }
@@ -1231,5 +1536,485 @@ mod tests {
         let e = a.on_delete(3_000, 2, 55, "").unwrap();
         assert_eq!(e.activity.deletes, 1);
         assert!(a.on_delete(3_000, 2, 12345, "").is_none());
+    }
+
+    // ------------------------------------------------ 1.1.6 file semantics
+
+    /// Feeds aggregator summaries into the real detection engine.
+    mod with_engine {
+        use super::super::*;
+        use kestrel_common::{Event, EventData, Policy, ProcessGuid, ProcessStart, RuleBundle};
+        use kestrel_common::{RuleMode, SignatureState};
+        use kestrel_detect::{Engine, HostContext, Output};
+
+        pub const T0: i64 = 1_760_000_000_000;
+
+        pub fn engine(mode: Option<RuleMode>) -> Engine {
+            let host = HostContext {
+                boot_id: "boot-1".into(),
+                hostname: "LAB".into(),
+                agent_image: r"C:\Program Files\Kestrel\kestrel-agent.exe".into(),
+                agent_pid: 0,
+                server_ips: vec![],
+                system_drive: Some('c'),
+            };
+            let mut p = Policy::default();
+            if let Some(m) = mode {
+                for r in ["RW-06", "RW-07", "RW-08"] {
+                    p.rules.insert(r.into(), m);
+                }
+            }
+            Engine::new(host, p, RuleBundle::default()).unwrap()
+        }
+
+        pub fn start(e: &mut Engine, pid: u32, image: &str) {
+            e.process(&Event {
+                ts: T0,
+                pid,
+                guid: ProcessGuid(format!("p{pid}")),
+                data: EventData::ProcessStart(ProcessStart {
+                    image: image.into(),
+                    cmdline: image.into(),
+                    signed: SignatureState::Unsigned,
+                    sha256: Some(format!("{pid:064x}")),
+                    file_size: Some(4096),
+                    ..Default::default()
+                }),
+            });
+        }
+
+        /// Rule ids of every alert the summaries produce.
+        pub fn rules(e: &mut Engine, out: &[AggEmit]) -> Vec<String> {
+            let mut r = Vec::new();
+            for a in out {
+                for o in e.process(&Event {
+                    ts: T0 + a.ts,
+                    pid: a.pid,
+                    guid: ProcessGuid(format!("p{}", a.pid)),
+                    data: EventData::FileActivity(a.activity.clone()),
+                }) {
+                    if let Output::Alert(d) = o {
+                        r.push(d.alert.rule_id.clone());
+                    }
+                }
+            }
+            r
+        }
+    }
+
+    const PROJ: &str = r"\device\harddiskvolume5\src\proj\target\debug";
+
+    /// cargo / rustc: build-script `out` folders (mkdir, the CreateNewFile
+    /// arriving in either order, with or without its CreateOptions), temp
+    /// outputs written with CREATE_ALWAYS (Create 12 overwrite-if, then
+    /// CreateNewFile 30 of the same open) and renamed to `.rlib` / `.rmeta`
+    /// up to 15 s later.
+    fn compiler_sequence(a: &mut FileAgg, pid: u32) -> Vec<AggEmit> {
+        let mut out = Vec::new();
+        let mut fo = 0x10_000u64;
+        let mut next = || {
+            fo += 8;
+            fo
+        };
+        for i in 0..60usize {
+            let ts = i as i64 * 50;
+            // OUT_DIR, three delivery variants.
+            let dir = format!(r"{PROJ}\build\crate{i}-abc\out");
+            let f = next();
+            match i % 3 {
+                0 => {
+                    out.extend(a.on_create(ts, pid, f, &dir, 2, true));
+                    out.extend(a.on_create_new(ts, pid, f, &dir, false));
+                }
+                1 => out.extend(a.on_create_new(ts, pid, f, &dir, true)),
+                _ => {
+                    // CreateNewFile without directory information, before
+                    // its Create: only the files written inside it later
+                    // show it is a folder.
+                    out.extend(a.on_create_new(ts, pid, f, &dir, false));
+                    out.extend(a.on_create(ts, pid, f, &dir, 2, true));
+                }
+            }
+            let gen = format!(r"{dir}\bindings.rs");
+            let f = next();
+            out.extend(a.on_create(ts + 1, pid, f, &gen, 5, false));
+            out.extend(a.on_create_new(ts + 1, pid, f, &gen, false));
+            // Temp outputs, CREATE_ALWAYS.
+            for ext in ["rlib", "rmeta"] {
+                let tmp = format!(r"{PROJ}\deps\rmeta{i}\lib{i}.{ext}.tmp");
+                let f = next();
+                out.extend(a.on_create(ts + 2, pid, f, &tmp, 5, false));
+                out.extend(a.on_create_new(ts + 2, pid, f, &tmp, false));
+            }
+        }
+        // Renames 15 s after the first creates (outside the 10 s window).
+        for i in 0..60usize {
+            let ts = 15_000 + i as i64 * 20;
+            for ext in ["rlib", "rmeta"] {
+                let tmp = format!(r"{PROJ}\deps\rmeta{i}\lib{i}.{ext}.tmp");
+                let fin = format!(r"{PROJ}\deps\d{}\libcrate{i}.{ext}", i % 8);
+                let f = next();
+                a.on_create(ts, pid, f, &tmp, 1, false);
+                out.extend(a.on_rename(ts + 1, pid, f, &fin));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn compiler_outputs_are_self_created_and_folders_are_not_files() {
+        let mut a = agg();
+        let out = compiler_sequence(&mut a, 300);
+        assert!(!out.is_empty());
+        for e in &out {
+            let f = &e.activity;
+            assert_ne!(f.note_name.as_deref(), Some("out"), "{f:?}");
+            assert!(f.new_files <= f.self_created, "{f:?}");
+            // A summary emitted between the Create (12) and the
+            // CreateNewFile (30) of one open sees that file as an overwrite
+            // of an unknown file for that instant: at most one.
+            assert!(f.self_created + 1 >= f.files_touched, "{f:?}");
+            assert!(f.overwrites <= 1, "CREATE_ALWAYS of a new file: {f:?}");
+        }
+        // The rename-only summaries (creates outside the window) still know
+        // the files are the compiler's own.
+        let last = &out.last().unwrap().activity;
+        assert!(last.renames >= 10 && last.new_files == 0, "{last:?}");
+        assert_eq!(last.self_created, last.files_touched, "{last:?}");
+        // Directories never count as files: 60 `out` folders + 60 generated
+        // files + 120 temp outputs at most.
+        let max = out.iter().map(|e| e.activity.files_touched).max().unwrap();
+        assert!(max <= 180, "{max}");
+        for mode in [None, Some(kestrel_common::RuleMode::Protect)] {
+            let mut e = with_engine::engine(mode);
+            with_engine::start(
+                &mut e,
+                300,
+                r"C:\Users\labuser\.rustup\toolchains\stable\bin\rustc.exe",
+            );
+            let r = with_engine::rules(&mut e, &out);
+            assert!(
+                !r.iter().any(|x| x == "RW-06" || x == "RW-08"),
+                "{mode:?}: {r:?}"
+            );
+        }
+    }
+
+    /// Ransomware deleting pre-existing documents and writing the
+    /// encrypted content back under the same name (both CreateNewFile
+    /// orders): the files are rewritten, not new.
+    #[test]
+    fn delete_then_recreate_of_existing_documents_is_rw06() {
+        for order in 0..2 {
+            let mut a = agg();
+            let mut out = Vec::new();
+            for i in 0..150usize {
+                let ts = 1_000 + i as i64 * 20;
+                let ext = if i % 2 == 0 { "docx" } else { "xlsx" };
+                let p = format!(r"{DEV}\users\labuser\documents\d{}\report{i}.{ext}", i % 6);
+                let (f1, f2) = (0x5000 + i as u64 * 16, 0x9000 + i as u64 * 16);
+                a.on_create(ts, 400, f1, &p, 1, false); // open
+                out.extend(a.on_delete(ts + 1, 400, f1, &p));
+                if order == 0 {
+                    out.extend(a.on_create(ts + 2, 400, f2, &p, 5, false));
+                    out.extend(a.on_create_new(ts + 2, 400, f2, &p, false));
+                } else {
+                    out.extend(a.on_create_new(ts + 2, 400, f2, &p, false));
+                    out.extend(a.on_create(ts + 2, 400, f2, &p, 5, false));
+                }
+            }
+            assert!(!out.is_empty());
+            for e in &out {
+                let f = &e.activity;
+                assert_eq!(f.new_files, 0, "{f:?}");
+                assert_eq!(f.self_created, 0, "{f:?}");
+                assert_eq!(f.deletes, f.files_touched, "{f:?}");
+                // A summary between a delete and its re-create: at most one
+                // file not yet rewritten.
+                assert!(f.overwrites + 1 >= f.files_touched, "{f:?}");
+            }
+            let max = out.iter().map(|e| e.activity.files_touched).max().unwrap();
+            assert!(max >= 50, "{max}");
+            let mut e = with_engine::engine(None);
+            with_engine::start(&mut e, 400, r"C:\Users\labuser\AppData\Local\Temp\enc.exe");
+            let r = with_engine::rules(&mut e, &out);
+            assert!(r.iter().any(|x| x == "RW-06"), "order {order}: {r:?}");
+        }
+    }
+
+    /// Junk files created to dilute the counts, plus in-place encryption of
+    /// documents the process opened first: still RW-06.
+    #[test]
+    fn self_created_junk_does_not_hide_existing_documents() {
+        let mut a = agg();
+        let mut out = Vec::new();
+        for i in 0..200usize {
+            let p = format!(r"{DEV}\users\labuser\documents\junk\j{i}.dat");
+            out.extend(a.on_create_new(i as i64, 401, 0x100 + i as u64, &p, false));
+        }
+        for i in 0..100usize {
+            let ts = 2_300 + i as i64 * 50;
+            let p = doc(i, i % 5);
+            let f = 0x8000 + i as u64;
+            out.extend(a.on_create(ts, 401, f, &p, 1, false));
+            out.extend(a.on_rename(ts + 1, 401, f, &format!("{p}.k3str")));
+        }
+        let best = out
+            .iter()
+            .map(|e| &e.activity)
+            .max_by_key(|f| f.files_touched)
+            .unwrap();
+        assert_eq!(best.self_created, 200, "{best:?}");
+        assert!(best.files_touched - best.self_created >= 30, "{best:?}");
+        let mut e = with_engine::engine(None);
+        with_engine::start(&mut e, 401, r"C:\Users\labuser\Downloads\enc.exe");
+        let r = with_engine::rules(&mut e, &out);
+        assert!(r.iter().any(|x| x == "RW-06"), "{r:?}");
+    }
+
+    /// Folders named like ransom notes (`README`, `readme.txt`) created in
+    /// many directories are never a note, whatever the delivery order.
+    #[test]
+    fn directories_named_readme_are_never_notes() {
+        for name in ["readme", "readme.txt", "how_to_decrypt.txt"] {
+            let mut a = agg();
+            let mut out = Vec::new();
+            for d in 0..30usize {
+                let p = format!(r"{DEV}\users\labuser\documents\d{d}\{name}");
+                let f = 0x700 + d as u64 * 8;
+                match d % 3 {
+                    0 => {
+                        out.extend(a.on_create(d as i64, 9, f, &p, 2, true));
+                        out.extend(a.on_create_new(d as i64, 9, f, &p, false));
+                    }
+                    1 => out.extend(a.on_create_new(d as i64, 9, f, &p, true)),
+                    _ => {
+                        out.extend(a.on_create_new(d as i64, 9, f, &p, false));
+                        out.extend(a.on_create(d as i64, 9, f, &p, 2, true));
+                        // Something is written inside it.
+                        let inner = format!(r"{p}\x{d}.bin");
+                        out.extend(a.on_create_new(d as i64, 9, f + 1, &inner, false));
+                    }
+                }
+            }
+            let act = a.canary_modified(100, 9, "x").activity;
+            assert_eq!(act.note_name, None, "{name}: {act:?}");
+            for e in &out {
+                assert_eq!(e.activity.note_name, None, "{name}: {:?}", e.activity);
+            }
+            // A real note file of the same name still counts.
+            let mut b = agg();
+            for d in 0..30usize {
+                let p = format!(r"{DEV}\users\labuser\documents\d{d}\{name}");
+                b.on_create_new(d as i64, 9, 0x700 + d as u64 * 8, &p, false);
+            }
+            let act = b.canary_modified(100, 9, "x").activity;
+            assert_eq!(act.note_name.as_deref(), Some(name));
+            assert_eq!(act.new_files, 30);
+            assert_eq!(act.self_created, 30);
+        }
+    }
+
+    /// The origin memory is bounded per process.
+    #[test]
+    fn origins_are_bounded() {
+        let mut a = agg();
+        for i in 0..(MAX_ORIGINS_PER_PID + 500) {
+            a.on_create_new(i as i64 * 20, 5, 0, &doc(i, i % 3), false);
+        }
+        for i in 0..(MAX_PREEXISTING_PER_PID + 500) {
+            a.on_create(i as i64 * 20, 5, 0, &doc(100_000 + i, i % 3), 1, false);
+        }
+        for i in 0..3000usize {
+            let p = doc(200_000 + i, 0);
+            a.on_create(i as i64, 5, 9, &p, 1, false);
+            a.on_rename(i as i64, 5, 9, &format!("{p}.x"));
+        }
+        let st = a.pids.get(&5).unwrap();
+        assert!(st.origins.len() <= MAX_ORIGINS_PER_PID + MAX_PREEXISTING_PER_PID);
+        assert!(st.created_order.len() <= MAX_ORIGINS_PER_PID);
+        assert!(st.pre_order.len() <= MAX_PREEXISTING_PER_PID);
+        assert!(st.aliases.len() <= MAX_ALIASES_PER_PID);
+        // Pre-existing knowledge overflowed: no more self-created credit.
+        assert!(st.pre_overflow);
+    }
+
+    // ---------------------------------------- hostile review of 1.1.6
+
+    /// Encrypts `n` existing documents in place (open, overwrite) across 6
+    /// folders, calling `prime` for each document first.
+    fn in_place_encryption(
+        a: &mut FileAgg,
+        pid: u32,
+        n: usize,
+        mut prime: impl FnMut(&mut FileAgg, i64, &str, u64) -> Vec<AggEmit>,
+    ) -> Vec<AggEmit> {
+        let mut out = Vec::new();
+        for i in 0..n {
+            let ts = 60_000 + i as i64 * 20;
+            let p = doc(i, i % 6);
+            let f = 0x40_000 + i as u64 * 16;
+            out.extend(prime(a, ts, &p, f));
+            out.extend(a.on_create(ts + 1, pid, f + 8, &p, 5, false));
+        }
+        out
+    }
+
+    fn rw06_fires(pid: u32, out: &[AggEmit]) -> bool {
+        let mut e = with_engine::engine(None);
+        with_engine::start(&mut e, pid, r"C:\Users\labuser\AppData\Local\Temp\enc.exe");
+        with_engine::rules(&mut e, out).iter().any(|r| r == "RW-06")
+    }
+
+    /// Review #1 / #2: failed opens logged by Create (12) never prove a
+    /// create: neither `doc.docx\x` (would make the document look like a
+    /// folder) nor CREATE_NEW on the existing document (would make it look
+    /// self-created), not even when done long before the encryption.
+    #[test]
+    fn failed_create_opens_do_not_hide_documents() {
+        for variant in 0..3 {
+            let mut a = agg();
+            let pid = 500 + variant;
+            if variant == 2 {
+                // CREATE_NEW of every document (fails: they exist), 60 s
+                // before the encryption (outside the window).
+                for i in 0..150usize {
+                    a.on_create(i as i64, pid, 0x1000 + i as u64, &doc(i, i % 6), 2, false);
+                }
+            }
+            let out = in_place_encryption(&mut a, pid, 150, |a, ts, p, f| {
+                match variant {
+                    // CREATE_NEW of a child of the document (fails).
+                    0 => a
+                        .on_create(ts, pid, f, &format!(r"{p}\x"), 2, false)
+                        .into_iter()
+                        .collect(),
+                    // CREATE_NEW of the document itself (fails: it exists).
+                    1 => a.on_create(ts, pid, f, p, 2, false).into_iter().collect(),
+                    // Primed earlier (above).
+                    _ => {
+                        let _ = (ts, p, f);
+                        Vec::new()
+                    }
+                }
+            });
+            let best = out
+                .iter()
+                .map(|e| &e.activity)
+                .max_by_key(|f| f.overwrites)
+                .unwrap();
+            assert!(best.overwrites >= 50, "variant {variant}: {best:?}");
+            assert_eq!(best.self_created, 0, "variant {variant}: {best:?}");
+            assert!(rw06_fires(pid, &out), "variant {variant}");
+        }
+    }
+
+    /// Review #3: thousands of junk creates do not push the knowledge that
+    /// documents existed out of the origin memory.
+    #[test]
+    fn junk_creates_do_not_evict_preexisting_knowledge() {
+        let mut a = agg();
+        let pid = 510;
+        let mut out = Vec::new();
+        // Delete 150 documents.
+        for i in 0..150usize {
+            let p = doc(i, i % 6);
+            a.on_create(i as i64, pid, 0x100 + i as u64, &p, 1, false);
+            out.extend(a.on_delete(i as i64, pid, 0x100 + i as u64, &p));
+        }
+        // 3,000 junk creates, slowly enough that the deletes leave the window.
+        for i in 0..3000usize {
+            let p = format!(r"{DEV}\users\labuser\documents\junk\j{i}.dat");
+            a.on_create_new(1_000 + i as i64 * 5, pid, 0x9_000 + i as u64, &p, false);
+        }
+        // Re-create the documents with encrypted content.
+        let mut re = Vec::new();
+        for i in 0..150usize {
+            let ts = 30_000 + i as i64 * 20;
+            let p = doc(i, i % 6);
+            re.extend(a.on_create_new(ts, pid, 0x50_000 + i as u64, &p, false));
+        }
+        let st = a.pids.get(&pid).unwrap();
+        assert!(st.created_order.len() <= MAX_ORIGINS_PER_PID);
+        assert!(st.pre_order.len() <= MAX_PREEXISTING_PER_PID);
+        let last = &re.last().expect("summaries").activity;
+        assert_eq!(last.new_files, 0, "{last:?}");
+        assert_eq!(last.self_created, 0, "{last:?}");
+    }
+
+    /// Review #4: a FileObject reused by a later open does not turn an
+    /// earlier real overwrite into a create.
+    #[test]
+    fn reused_file_object_does_not_rewrite_history() {
+        let mut a = agg();
+        let pid = 520;
+        let mut out = Vec::new();
+        for i in 0..150usize {
+            let ts = 1_000 + i as i64 * 20;
+            let p = doc(i, i % 6);
+            let f = 0x60_000 + i as u64 * 16;
+            out.extend(a.on_create(ts, pid, f, &p, 5, false)); // real truncation
+                                                               // Same FileObject address reused 100 ms later for a new file.
+            out.extend(a.on_create_new(ts + 100, pid, f, &p, false));
+        }
+        let best = out
+            .iter()
+            .map(|e| &e.activity)
+            .max_by_key(|f| f.overwrites)
+            .unwrap();
+        assert!(best.overwrites >= 50, "{best:?}");
+        assert_eq!(best.self_created, 0, "{best:?}");
+        assert!(rw06_fires(pid, &out));
+    }
+
+    /// Review #5: renaming a document away (to a known extension), writing
+    /// the encrypted content under the original name and deleting the
+    /// renamed copy is a rewrite of the original.
+    #[test]
+    fn rename_away_then_recreate_is_a_rewrite() {
+        let mut a = agg();
+        let pid = 530;
+        let mut out = Vec::new();
+        for i in 0..150usize {
+            let ts = 1_000 + i as i64 * 20;
+            let p = doc(i, i % 6);
+            let bak = format!("{p}.bak");
+            let f = 0x70_000 + i as u64 * 16;
+            a.on_create(ts, pid, f, &p, 1, false);
+            out.extend(a.on_rename(ts + 1, pid, f, &bak));
+            out.extend(a.on_create_new(ts + 2, pid, f + 8, &p, false));
+            a.on_create(ts + 3, pid, f + 4, &bak, 1, false);
+            out.extend(a.on_delete(ts + 3, pid, f + 4, &bak));
+        }
+        let best = out
+            .iter()
+            .map(|e| &e.activity)
+            .max_by_key(|f| f.overwrites)
+            .unwrap();
+        assert!(best.overwrites >= 50, "{best:?}");
+        assert_eq!(best.new_files, 0, "{best:?}");
+        assert!(rw06_fires(pid, &out));
+    }
+
+    /// Review #6: the directory mark of a FileObject is cleared by any
+    /// later file open on it, in scope or not, and with the process.
+    #[test]
+    fn directory_marks_do_not_leak() {
+        let mut a = agg();
+        let d = format!(r"{DEV}\users\labuser\documents\folder");
+        a.on_create(0, 7, 0x77, &d, 1, true);
+        assert!(a.is_dir_object(7, 0x77));
+        a.on_create(
+            1,
+            7,
+            0x77,
+            r"\device\harddiskvolume3\windows\temp\x.tmp",
+            1,
+            false,
+        );
+        assert!(!a.is_dir_object(7, 0x77));
+        a.on_create(2, 7, 0x78, &d, 1, true);
+        a.forget_pid(7);
+        assert!(!a.is_dir_object(7, 0x78));
     }
 }

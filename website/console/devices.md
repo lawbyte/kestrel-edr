@@ -95,6 +95,65 @@ The agent reports every change, and the server writes it to the audit log with t
 
 Your own **Turn protection back on** request is also logged as `response.request`.
 
+## Remove device
+
+**Remove device** uninstalls Kestrel from a PC remotely. Use it when a PC leaves the company, is handed to someone outside your fleet, or should simply stop being managed. Open the device and click **Remove device** in the danger zone at the bottom of the page.
+
+<Shot name="console/device-remove-dialog" alt="Remove device dialog with the hostname typed to confirm, the option to also delete quarantined files and logs, and a comment" />
+
+What happens:
+
+1. The server queues an `uninstall_agent` command for the device. The agent checks it against its uninstall token (the server sends the token with the command), then runs the normal MSI uninstall. Protection on the PC stops at that point.
+2. Once the agent has confirmed that the uninstall started and the device then stays disconnected for 10 minutes, the server marks it removed. Its certificates are revoked 7 days later. Until then, a PC whose uninstall did not finish (for example it was shut down halfway) can still connect: the device then comes back to the list with the status Removal failed, so a PC that still runs Kestrel never ends up locked out.
+3. The device leaves the device list. Its alerts, incidents, actions and audit entries are kept.
+
+Who can do it: only administrators. It needs the `devices.remove` privilege, which only the admin role has, and an interactive console session. API tokens are refused even if they carry the privilege, so a leaked automation token cannot uninstall your fleet. If your account has two-factor authentication, the console asks for a fresh authenticator code first (one code is valid for 10 minutes). Each admin can ask for at most 20 removals per hour.
+
+To confirm, type the device's hostname (not case-sensitive). You can add a comment, for example a ticket number; it is saved in the audit log.
+
+**Also delete quarantined files and logs on the PC** (off by default) also deletes `C:\ProgramData\Kestrel` after a successful uninstall, the same option as in the uninstall tool on the PC. Leave it off if you may still need the quarantined files or the local logs.
+
+### Offline PCs
+
+You can remove a PC that is offline. The request waits on the server and the agent uninstalls itself the next time it connects. A queued request stays valid for 90 days; after that it expires and nothing is uninstalled. While the request is still queued you can take it back with **Cancel removal** on the device page. Once the server has sent it to the agent, it can no longer be cancelled.
+
+### Statuses
+
+The device page shows a banner, and the devices list shows a badge (icon and label) next to the device status:
+
+| Status | Meaning |
+|---|---|
+| Removal pending | Queued; the agent has not received it yet (the PC is offline or about to pick it up). **Cancel removal** is available. |
+| Removing | The agent confirmed that the uninstall started. Protection on the PC has stopped. The device is marked removed once it stays disconnected for 10 minutes. |
+| Removal failed | The agent reported a failure, for example a token mismatch or a Windows Installer error code. The banner shows the error text. Kestrel is still installed and the device stays in the list; fix the cause and click **Try again**. The token was sent to the PC, so the server replaces the device's uninstall token automatically. |
+| Removal expired | The PC did not connect within 90 days. Nothing was uninstalled. |
+| Removed | Uninstalled remotely. The device is hidden from the list. |
+
+<Shot name="console/devices-removal" alt="Devices list with a Removal pending badge on one device and, with Show removed devices on, a removed device shown muted" />
+
+### Removed devices
+
+Removed devices are hidden from the device list by default. Turn on **Show removed devices** to list them again: they are shown muted, with *Removed (uninstalled remotely)*, the date and the admin who asked for it. Their device page stays available and read-only (no actions, no danger zone), so history and investigations keep working.
+
+### Older agents
+
+Remote removal needs an agent that announces support for it (capability `agent.uninstall`). For older agents the button is disabled with *The agent on this PC is too old for remote removal. Update the agent, or use the uninstall tool on the PC.* Update the agent with [Agent updates](./updates), or uninstall it on the PC (see [Uninstall](../deploy/enroll#uninstall)).
+
+### Audit log
+
+| Action | When |
+|---|---|
+| `device.remove.requested` | An admin asked for the removal (with the purge option and comment). |
+| `device.remove.started` | The agent confirmed that the uninstall started. |
+| `device.remove.completed` | The device was marked removed. |
+| `device.remove.failed` | The agent reported a failure. |
+| `device.remove.cancelled` | An admin cancelled a queued removal. |
+| `device.remove.expired` | A queued removal expired after 90 days. |
+
+User-mode software cannot promise that every uninstall succeeds: a PC that never connects again keeps the agent. The statuses above tell you what actually happened on each PC.
+
 ## Decommissioning
 
-To decommission a device, open it and use **Decommission device** in the danger zone at the bottom of the page (needs the `devices.write` privilege; type the hostname to confirm). Decommissioning (or merging a duplicate into another device) revokes its certificates, drops its live connection at once and cancels queued commands. Its history is kept. The agent stays installed on the PC; to remove it, uninstall it with the uninstall token (see [Uninstall](../deploy/enroll#uninstall)).
+To decommission a device, open it and use **Decommission device** in the danger zone at the bottom of the page (needs the `devices.write` privilege; type the hostname to confirm). Decommissioning (or merging a duplicate into another device) revokes its certificates, drops its live connection at once and cancels queued commands. Its history is kept.
+
+Decommission only removes the device from the console. **The agent stays installed on the PC** and keeps running without a server. Use it for PCs that are already wiped, lost or replaced. To also uninstall the agent, use [Remove device](#remove-device) instead, or uninstall it on the PC with the uninstall token (see [Uninstall](../deploy/enroll#uninstall)).

@@ -1905,7 +1905,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-common"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -1915,7 +1915,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-tray"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "anyhow",
  "kestrel-common",

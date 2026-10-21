@@ -246,7 +246,9 @@ Get-Service KestrelAgent                                  # Status: Running
 
 ## Uninstall
 
-Kestrel protects itself against removal. To uninstall it from a PC you need that PC's uninstall token:
+Kestrel protects itself against removal. The simplest way is **Remove device** in the danger zone of the device page: an admin types the hostname to confirm and the agent uninstalls itself, or does so the next time it connects if the PC is offline (see [Remove device](../console/devices#remove-device)). Older agents do not support it.
+
+To uninstall on the PC itself you need that PC's uninstall token:
 
 1. In the console, open the device and click **Reveal** under **Uninstall token**. Revealing it is recorded in the audit log.
 2. On the PC, open the Start menu and choose **Kestrel EDR > Uninstall Kestrel EDR**. Accept the Windows administrator prompt, paste the token and click **Uninstall**.

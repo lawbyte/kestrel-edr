@@ -130,6 +130,20 @@ pub async fn hello(
     .bind(peer_ip)
     .execute(&state.db)
     .await?;
+    // Remembered for offline devices too (the console disables "Remove
+    // device" for agents without `agent.uninstall`).
+    let caps: Vec<String> = h
+        .capabilities
+        .iter()
+        .filter(|c| !c.is_empty() && c.len() <= 64)
+        .take(32)
+        .cloned()
+        .collect();
+    sqlx::query("UPDATE devices SET capabilities = $2 WHERE id = $1")
+        .bind(device_id)
+        .bind(&caps)
+        .execute(&state.db)
+        .await?;
     // Local pause state (tray switch) as of this connect; heartbeats keep it current.
     let mut pause = h.pause.clone();
     if let (Some(p), Some(mk)) = (pause.as_mut(), user_hasher(state, device_id).await?) {
@@ -188,7 +202,7 @@ pub async fn hello(
     if bundle.version != h.rules_version {
         out.push(ServerPayload::Rules(bundle));
     }
-    out.extend(pending_commands(state, device_id).await?);
+    out.extend(pending_commands(state, device_id, &caps, &h.agent_version).await?);
     let msgs: Vec<(i64, serde_json::Value)> = sqlx::query_as(
         "DELETE FROM pending_messages WHERE device_id = $1 AND expires_at > $2 RETURNING id, payload",
     )
@@ -278,7 +292,13 @@ async fn uninstall_token_confirmed(
 }
 
 /// Commands not yet delivered (pending, or sent on a stream that dropped before the Ack).
-pub async fn pending_commands(state: &AppState, device_id: Uuid) -> anyhow::Result<Vec<Outbound>> {
+/// `caps` / `agent_version`: what the connecting agent announced in Hello.
+pub async fn pending_commands(
+    state: &AppState,
+    device_id: Uuid,
+    caps: &[String],
+    agent_version: &str,
+) -> anyhow::Result<Vec<Outbound>> {
     let now = now_ms();
     let rows: Vec<(Uuid, serde_json::Value)> = sqlx::query_as(
         "UPDATE response_actions SET status = 'sent', sent_at = $2 WHERE device_id = $1 AND status IN ('pending','sent') \
@@ -290,15 +310,83 @@ pub async fn pending_commands(state: &AppState, device_id: Uuid) -> anyhow::Resu
     .await?;
     let mut out = vec![];
     for (id, action) in rows {
-        if let Ok(action) = serde_json::from_value::<ResponseAction>(action) {
-            out.push(ServerPayload::Command {
-                command_id: id,
-                action,
-            });
-            state.publish("action", id, "updated");
+        let Ok(action) = serde_json::from_value::<ResponseAction>(action) else {
+            continue;
+        };
+        match command_payload(state, device_id, id, action, caps, agent_version).await? {
+            Some(p) => out.push(p),
+            None => continue,
         }
+        state.publish("action", id, "updated");
     }
     Ok(out)
+}
+
+/// The `Command` to send for action `id`, with its secret attached (only
+/// here, at delivery time). `None` = the action cannot be delivered to this
+/// agent and was failed instead (remote removal on an agent without
+/// `agent.uninstall`, or no uninstall token on file).
+pub async fn command_payload(
+    state: &AppState,
+    device_id: Uuid,
+    id: Uuid,
+    action: ResponseAction,
+    caps: &[String],
+    agent_version: &str,
+) -> anyhow::Result<Option<ServerPayload>> {
+    let mut secret = None;
+    if matches!(action, ResponseAction::UninstallAgent { .. }) {
+        if !caps
+            .iter()
+            .any(|c| c == kestrel_common::CAP_REMOTE_UNINSTALL)
+        {
+            crate::removal::fail(
+                state,
+                device_id,
+                id,
+                &format!(
+                    "unsupported: the agent on this PC (version {}) does not support remote removal; update the agent or use the uninstall tool on the PC",
+                    crate::mdsafe::plain(agent_version, 64)
+                ),
+            )
+            .await?;
+            return Ok(None);
+        }
+        // An unreadable sealed token (master key changed, damaged row) must
+        // never break the agent's session: fail this command instead.
+        let tokens = match crate::removal::delivery_tokens(state, device_id).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!(%device_id, error = %e, "uninstall token unreadable; removal failed");
+                crate::removal::fail(
+                    state,
+                    device_id,
+                    id,
+                    "the server could not read its stored uninstall token for this device; rotate the token on the device page, then try again",
+                )
+                .await?;
+                return Ok(None);
+            }
+        };
+        if tokens.is_empty() {
+            crate::removal::fail(
+                state,
+                device_id,
+                id,
+                "the server holds no uninstall token for this device; rotate the token on the device page, then try again",
+            )
+            .await?;
+            return Ok(None);
+        }
+        secret = Some(kestrel_common::wire::CommandSecret {
+            uninstall_tokens: tokens,
+        });
+    }
+    Ok(Some(ServerPayload::Command {
+        command_id: id,
+        action,
+        secret,
+    }))
 }
 
 /// Queue a command for a device and deliver it now if the agent is connected.
@@ -338,22 +426,46 @@ pub async fn enqueue_command(
             .await?;
         state.publish("incident", inc, "updated");
     }
-    if state.agents.is_connected(&device_id) {
+    deliver_now(state, device_id, id, action).await?;
+    state.publish("action", id, "created");
+    Ok(id)
+}
+
+/// Send a queued command now if the agent is connected (else it waits for
+/// the next connect: [`pending_commands`]).
+pub async fn deliver_now(
+    state: &AppState,
+    device_id: Uuid,
+    id: Uuid,
+    action: &ResponseAction,
+) -> anyhow::Result<()> {
+    let now = now_ms();
+    if let Some(conn) = state.agents.get(&device_id) {
         let updated = sqlx::query("UPDATE response_actions SET status = 'sent', sent_at = $2 WHERE id = $1 AND status = 'pending'")
             .bind(id)
             .bind(now)
             .execute(&state.db)
             .await?
             .rows_affected();
-        if updated == 1
-            && !state.agents.send(
-                &device_id,
-                ServerPayload::Command {
-                    command_id: id,
-                    action: action.clone(),
-                },
+        let payload = if updated == 1 {
+            command_payload(
+                state,
+                device_id,
+                id,
+                action.clone(),
+                &conn.capabilities,
+                &conn.agent_version,
             )
-        {
+            .await?
+        } else {
+            None
+        };
+        let delivered = match payload {
+            Some(p) => state.agents.send(&device_id, p),
+            // Failed instead (agent too old / no token) or already taken.
+            None => true,
+        };
+        if !delivered {
             // Channel full or just disconnected: leave for redelivery on the next connect.
             sqlx::query(
                 "UPDATE response_actions SET status = 'pending', sent_at = NULL WHERE id = $1",
@@ -363,8 +475,7 @@ pub async fn enqueue_command(
             .await?;
         }
     }
-    state.publish("action", id, "created");
-    Ok(id)
+    Ok(())
 }
 
 /// Deliver a non-command message now, or keep it for the next connect.
@@ -676,7 +787,7 @@ pub async fn heartbeat(state: &AppState, s: &Session, hb: &Heartbeat) -> anyhow:
                 "TP-SRV-EVENTS-LOST",
                 "Agent telemetry loss rising",
                 Severity::Medium,
-                format!("ETW dropped {delta} events on {} since the previous heartbeat; detections may be blind.", s.hostname),
+                events_lost_summary(&s.hostname, delta, &hb.health, p),
             )
             .await;
         }
@@ -839,6 +950,16 @@ pub async fn action_result(
     command_id: Uuid,
     outcome: &ActionOutcome,
 ) -> anyhow::Result<()> {
+    // Remote removal has its own lifecycle (started → removed / failed).
+    let kind: Option<(String,)> =
+        sqlx::query_as("SELECT action_type FROM response_actions WHERE id = $1 AND device_id = $2")
+            .bind(command_id)
+            .bind(s.device_id)
+            .fetch_optional(&state.db)
+            .await?;
+    if kind.is_some_and(|k| k.0 == "uninstall_agent") {
+        return crate::removal::on_outcome(state, s, command_id, outcome).await;
+    }
     let now = now_ms();
     let detail = crate::scrub::redact_secrets(&outcome.detail);
     // V-L4: the status update and its side effects commit together.
@@ -1085,4 +1206,83 @@ pub async fn pause_report(
     )
     .await;
     Ok(())
+}
+
+/// `TP-SRV-EVENTS-LOST` summary. Agents from 1.1.6 split the total into
+/// events Windows lost (ETW buffers full) and events Kestrel's own sensor
+/// queues dropped; the split is named when both heartbeats carry it.
+fn events_lost_summary(host: &str, delta: u64, cur: &AgentHealth, prev: &AgentHealth) -> String {
+    let side = |c: Option<u64>, p: Option<u64>| c.zip(p).map(|(c, p)| c.saturating_sub(p));
+    match (
+        side(cur.etw_kernel_events_lost, prev.etw_kernel_events_lost),
+        side(cur.sensor_internal_dropped, prev.sensor_internal_dropped),
+    ) {
+        (Some(k), Some(d)) => {
+            let cause = if k >= d {
+                "mostly Windows: the PC produced events faster than ETW could hand them over (heavy load, such as large builds)"
+            } else {
+                "mostly Kestrel: the agent's own queues were full (the agent could not keep up, or was slowed down on purpose)"
+            };
+            format!(
+                "{delta} events were lost on {host} since the previous heartbeat ({k} lost by Windows, {d} dropped by Kestrel), {cause}; detections may be blind."
+            )
+        }
+        _ => format!(
+            "ETW dropped {delta} events on {host} since the previous heartbeat; detections may be blind."
+        ),
+    }
+}
+
+#[cfg(test)]
+mod events_lost_tests {
+    use super::*;
+
+    fn h(total: u64, k: Option<u64>, d: Option<u64>) -> AgentHealth {
+        AgentHealth {
+            etw_ok: true,
+            etw_events_lost: total,
+            etw_kernel_events_lost: k,
+            sensor_internal_dropped: d,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn summary_names_the_side_when_both_heartbeats_split_it() {
+        let s = events_lost_summary(
+            "FIN-LT-003",
+            900,
+            &h(1000, Some(850), Some(150)),
+            &h(100, Some(50), Some(50)),
+        );
+        assert_eq!(
+            s,
+            "900 events were lost on FIN-LT-003 since the previous heartbeat (800 lost by Windows, 100 dropped by Kestrel), mostly Windows: the PC produced events faster than ETW could hand them over (heavy load, such as large builds); detections may be blind."
+        );
+        let s = events_lost_summary(
+            "PC",
+            600,
+            &h(600, Some(0), Some(600)),
+            &h(0, Some(0), Some(0)),
+        );
+        assert!(
+            s.contains("(0 lost by Windows, 600 dropped by Kestrel), mostly Kestrel"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn summary_without_split_is_unchanged() {
+        let old =
+            "ETW dropped 600 events on PC since the previous heartbeat; detections may be blind.";
+        assert_eq!(
+            events_lost_summary("PC", 600, &h(600, None, None), &h(0, None, None)),
+            old
+        );
+        // Agent upgraded between the two heartbeats: no reliable split.
+        assert_eq!(
+            events_lost_summary("PC", 600, &h(600, Some(500), Some(100)), &h(0, None, None)),
+            old
+        );
+    }
 }

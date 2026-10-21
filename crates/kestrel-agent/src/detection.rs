@@ -19,6 +19,53 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::agent::Core;
+use crate::store::{Store, KV_ST12_SEEN};
+
+/// How often the ST-12 first-seen memory is saved (also at shutdown).
+const ST12_SAVE_EVERY: Duration = Duration::from_secs(5 * 60);
+/// Largest stored ST-12 memory accepted / written (8,192 rows are about
+/// 1 MB; anything bigger is damaged and ignored).
+const ST12_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// Restore the ST-12 first-seen memory from the store (triage 2026-10-22
+/// item 1). A missing, oversized, unreadable or malformed value leaves the
+/// memory empty: each binary then alerts once more, nothing else changes.
+fn load_st12(store: &Store, engine: &mut Engine, now: i64) {
+    match store.kv_get(KV_ST12_SEEN) {
+        Ok(Some(v)) if v.len() <= ST12_MAX_BYTES => {
+            if std::panic::catch_unwind(AssertUnwindSafe(|| engine.st12_seen_import(&v, now)))
+                .is_err()
+            {
+                tracing::error!("engine panicked restoring the ST-12 first-seen memory");
+            }
+        }
+        Ok(Some(v)) => tracing::warn!(
+            bytes = v.len(),
+            "stored ST-12 first-seen memory is too large; starting empty"
+        ),
+        Ok(None) => {}
+        Err(e) => tracing::warn!("cannot read the ST-12 first-seen memory ({e}); starting empty"),
+    }
+}
+
+/// Save the ST-12 first-seen memory (bounded by the engine to 8,192 live
+/// entries).
+fn save_st12(store: &Store, engine: &Engine, now: i64) {
+    let Ok(v) = std::panic::catch_unwind(AssertUnwindSafe(|| engine.st12_seen_export(now))) else {
+        tracing::error!("engine panicked exporting the ST-12 first-seen memory");
+        return;
+    };
+    if v.len() > ST12_MAX_BYTES {
+        tracing::warn!(
+            bytes = v.len(),
+            "ST-12 first-seen memory too large; not saved"
+        );
+        return;
+    }
+    if let Err(e) = store.kv_set(KV_ST12_SEEN, &v) {
+        tracing::warn!("cannot save the ST-12 first-seen memory: {e}");
+    }
+}
 
 pub enum EngineCtl {
     Policy(Box<Policy>),
@@ -210,6 +257,7 @@ pub fn spawn(
             for s in seeds {
                 engine.seed_process(s);
             }
+            load_st12(&core.store, &mut engine, kestrel_common::now_ms());
             let _ = ready_tx.send(Ok(()));
             local.block_on(detect_loop(core, engine, events, enrich, ctl, rt));
         })?;
@@ -287,6 +335,7 @@ async fn detect_loop(
     let max_batch = core.tuning.batch_max_events.max(1);
     let max_delay = core.tuning.batch_max_delay;
     let mut ticks: u64 = 0;
+    let mut st12_saved = Instant::now();
     plant_canaries(&core, &mut engine);
 
     let flush = |batch: &mut Vec<Event>, started: &mut Option<Instant>| {
@@ -375,10 +424,15 @@ async fn detect_loop(
                 if ticks.is_multiple_of(240) {
                     disp.gc();
                 }
+                if st12_saved.elapsed() >= ST12_SAVE_EVERY {
+                    st12_saved = Instant::now();
+                    save_st12(&core.store, &engine, kestrel_common::now_ms());
+                }
             }
         }
     }
     flush(&mut batch, &mut batch_started);
+    save_st12(&core.store, &engine, kestrel_common::now_ms());
 }
 
 fn route(disp: &mut Dispatcher, outs: Vec<Output>) {
@@ -578,6 +632,129 @@ pub fn command_activity(action: &ResponseAction, o: &ActionOutcome) -> Option<Ac
 mod tests {
     use super::*;
     use kestrel_common::{PathClass, ProcessGuid, SignatureState};
+
+    const RUSTC: &str = r"C:\Users\azka\.rustup\toolchains\x\bin\rustc.exe";
+
+    fn st12_engine() -> Engine {
+        let host = HostContext {
+            boot_id: "boot-1".into(),
+            hostname: "SIM-ST12".into(),
+            agent_image: r"C:\Program Files\Kestrel\kestrel-agent.exe".into(),
+            agent_pid: 0,
+            server_ips: vec![],
+            system_drive: Some('c'),
+        };
+        Engine::new(host, Policy::default(), RuleBundle::default()).unwrap()
+    }
+
+    /// ST-12 alerts produced by one unsigned start of `RUSTC`.
+    fn st12_alerts(e: &mut Engine, guid: &str, pid: u32, ts: i64) -> usize {
+        let ev = Event {
+            ts,
+            pid,
+            guid: ProcessGuid(guid.into()),
+            data: kestrel_common::EventData::ProcessStart(kestrel_common::ProcessStart {
+                image: RUSTC.into(),
+                cmdline: RUSTC.into(),
+                signed: SignatureState::Unsigned,
+                sha256: Some("55".repeat(32)),
+                file_size: Some(4096),
+                ..Default::default()
+            }),
+        };
+        e.process(&ev)
+            .iter()
+            .filter(|o| matches!(o, Output::Alert(d) if d.alert.rule_id == "ST-12"))
+            .count()
+    }
+
+    #[test]
+    fn st12_memory_survives_a_restart_through_the_store() {
+        let now = kestrel_common::now_ms();
+        let store = Store::open_in_memory().unwrap();
+        let mut a = st12_engine();
+        assert_eq!(st12_alerts(&mut a, "a", 10, now), 1);
+        save_st12(&store, &a, now);
+        let mut b = st12_engine();
+        load_st12(&store, &mut b, now + 1);
+        assert_eq!(st12_alerts(&mut b, "b", 11, now + 10), 0);
+    }
+
+    #[test]
+    fn st12_memory_missing_or_damaged_starts_empty() {
+        let now = kestrel_common::now_ms();
+        let big = "x".repeat(ST12_MAX_BYTES + 1);
+        let future = format!(
+            r#"[["sha256:{}",{},1,0]]"#,
+            "55".repeat(32),
+            now + 400 * 86_400_000
+        );
+        for bad in [
+            None,
+            Some("{not json"),
+            Some("[[1,2,3]]"),
+            Some("null"),
+            Some(""),
+            Some(big.as_str()),
+            Some(future.as_str()),
+        ] {
+            let store = Store::open_in_memory().unwrap();
+            if let Some(v) = bad {
+                store.kv_set(KV_ST12_SEEN, v).unwrap();
+            }
+            let mut e = st12_engine();
+            load_st12(&store, &mut e, now);
+            assert_eq!(
+                st12_alerts(&mut e, "c", 12, now),
+                1,
+                "{:?}",
+                bad.map(|b| &b[..b.len().min(40)])
+            );
+            // Saving afterwards replaces the damaged value with a valid one.
+            save_st12(&store, &e, now);
+            let v = store.kv_get(KV_ST12_SEEN).unwrap().unwrap();
+            assert!(v.starts_with('[') && v.contains(&"55".repeat(32)), "{v}");
+        }
+    }
+
+    /// The running agent (SimPlatform) restores the memory at engine start
+    /// and writes it back at shutdown.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn agent_loads_and_saves_st12_memory() {
+        use crate::sim::{SimOptions, SimPlatform, SIM_USER};
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path();
+        let cfg = crate::config::AgentConfig {
+            server: "127.0.0.1:9".into(),
+            hostname: Some("SIM-ST12".into()),
+            ..crate::config::AgentConfig::default()
+        };
+        cfg.save(state).unwrap();
+        let now = kestrel_common::now_ms();
+        let key = "66".repeat(32);
+        {
+            let st = Store::open(state).unwrap();
+            st.kv_set(KV_ST12_SEEN, &format!(r#"[["sha256:{key}",{now},1,3]]"#))
+                .unwrap();
+        }
+        let sim = Arc::new(SimPlatform::new(SimOptions {
+            state_dir: state.to_path_buf(),
+            replay: None,
+            speed: 1.0,
+            hostname: "SIM-ST12".into(),
+            user: SIM_USER.into(),
+        }));
+        let h = crate::agent::start(sim, state.to_path_buf(), crate::agent::Tuning::default())
+            .await
+            .unwrap();
+        // Overwrite the stored value while running: the shutdown save must
+        // put the engine's restored memory back.
+        h.core.store.kv_set(KV_ST12_SEEN, "[]").unwrap();
+        h.stop().await;
+        let st = Store::open(state).unwrap();
+        let v = st.kv_get(KV_ST12_SEEN).unwrap().unwrap();
+        assert!(v.contains(&key), "{v}");
+    }
 
     fn alert(cats: Vec<DataCategory>, actions: Vec<ActionOutcome>) -> Alert {
         Alert {

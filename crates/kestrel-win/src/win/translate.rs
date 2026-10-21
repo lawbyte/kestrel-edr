@@ -19,14 +19,14 @@ use crate::evtxml::SysmonKind;
 use crate::filters;
 use crate::ntpath::{norm_key, DeviceMap};
 use crate::persist::{Dedup, Hints, PersistRecord};
-use crate::proctrack::ProcTracker;
+use crate::proctrack::{Decision, Owner, PendingAttr, ProcTracker};
 use crate::regdiff::{render_sysmon, RegJoin, PENDING_WAIT_MS};
 use kestrel_common::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION;
@@ -44,6 +44,11 @@ const EARLY_START_MS: i64 = 3_000;
 const EARLY_HOLD_MS: i64 = 2_000;
 const MAX_PENDING_REG: usize = 4096;
 const MAX_PENDING_PERSIST: usize = 1024;
+/// How long an event whose pid owner is not known yet waits for the core
+/// session (process start / stop, 1 s flush timer) to catch up.
+const ATTR_HOLD_MS: i64 = 2_500;
+/// Bound on such events (oldest are decided at once past it).
+const MAX_PENDING_ATTR: usize = 8_192;
 
 pub struct Shared {
     pub boot_id: String,
@@ -97,7 +102,13 @@ pub struct Translator {
     flows: FlowTable,
     dns: HashMap<u32, HashMap<IpAddr, (String, i64)>>,
     file_objects: HashMap<(u32, u64), (String, bool, i64)>,
-    file_seen: HashMap<(u32, String, u8), i64>,
+    /// File-open de-duplication per process *instance* (GUID), so a reused
+    /// pid neither inherits nor suppresses its predecessor's opens.
+    file_seen: HashMap<(ProcessGuid, String, u8), i64>,
+    /// Events (file / network / DNS / script, from sessions delivered
+    /// independently of process start/stop) whose pid owner at the event
+    /// time is not known yet ([`crate::proctrack`]).
+    unattributed: PendingAttr<Event>,
     thread_opens: HashMap<u32, (u32, i64)>,
     cmdlines: HashMap<u32, (String, i64)>,
     held: VecDeque<Held>,
@@ -127,48 +138,6 @@ pub struct Translator {
     integrities: HashMap<u32, Integrity>,
 }
 
-/// `kestrel_detect::paths::may_be_sensitive`, guarded: if the detection crate
-/// panics (not yet implemented in a dev build) a built-in substring list is
-/// used instead so the sensor keeps working.
-fn may_be_sensitive(path: &str) -> bool {
-    static DETECT_OK: OnceLock<bool> = OnceLock::new();
-    let ok = *DETECT_OK.get_or_init(|| {
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let r = std::panic::catch_unwind(|| {
-            kestrel_detect::paths::may_be_sensitive(r"C:\Windows\x.txt")
-        })
-        .is_ok();
-        std::panic::set_hook(prev);
-        r
-    });
-    if ok {
-        return std::panic::catch_unwind(|| kestrel_detect::paths::may_be_sensitive(path))
-            .unwrap_or(false);
-    }
-    let p = path.to_ascii_lowercase();
-    const FALLBACK: &[&str] = &[
-        "\\login data",
-        "\\cookies",
-        "\\web data",
-        "\\local state",
-        "\\key4.db",
-        "\\key3.db",
-        "\\logins.json",
-        "\\cookies.sqlite",
-        "\\local extension settings\\",
-        "\\tdata\\",
-        "\\discord\\local storage\\",
-        "\\.aws\\",
-        "\\.azure\\",
-        "\\.ssh\\",
-        "\\filezilla\\",
-        "\\wallets\\",
-        "\\steam\\ssfn",
-    ];
-    FALLBACK.iter().any(|f| p.contains(f))
-}
-
 impl Translator {
     pub fn new(s: Arc<Shared>, out: mpsc::Sender<Event>) -> Self {
         Translator {
@@ -178,6 +147,7 @@ impl Translator {
             dns: HashMap::new(),
             file_objects: HashMap::new(),
             file_seen: HashMap::new(),
+            unattributed: PendingAttr::new(MAX_PENDING_ATTR),
             thread_opens: HashMap::new(),
             cmdlines: HashMap::new(),
             held: VecDeque::new(),
@@ -216,6 +186,7 @@ impl Translator {
             || {
                 let mut t = me.borrow_mut();
                 let now = now_ms();
+                t.expire_attr(now);
                 t.release(now);
                 t.flush_reg(now, false);
                 t.flush_persist(now, false);
@@ -228,6 +199,7 @@ impl Translator {
             tracing::debug!(drained, "translator drained queued events at stop");
         }
         // Flush whatever is held.
+        self.expire_attr(i64::MAX);
         self.release(i64::MAX);
         self.flush_reg(now_ms(), true);
         self.flush_persist(i64::MAX, true);
@@ -546,7 +518,11 @@ impl Translator {
         process_image(&h)
     }
 
-    /// Ensure an unknown live pid gets registered (missed start event).
+    /// Ensure an unknown live pid gets registered (missed start event, or
+    /// start not delivered yet). A pid whose last known owner exited is
+    /// looked up again: the live process may be its successor (registered as
+    /// a sighting, ordered by its create time — never matched to events
+    /// that predate it).
     fn ensure_known(&mut self, pid: u32) {
         if pid == 0 || pid == 4 {
             return;
@@ -555,7 +531,7 @@ impl Translator {
             .s
             .tracker
             .read()
-            .map(|t| t.get(pid).is_some())
+            .map(|t| t.get(pid).is_some_and(|e| e.exited_at.is_none()))
             .unwrap_or(true);
         if known {
             return;
@@ -563,6 +539,10 @@ impl Translator {
         if let Some(lp) = live_proc(pid) {
             let created = filetime_to_ms(lp.create_ft);
             if let Ok(mut t) = self.s.tracker.write() {
+                if t.has_instance(pid, created) {
+                    // Exited but not yet gone (open handles): nothing new.
+                    return;
+                }
                 t.on_start(pid, created, lp.image.as_deref().unwrap_or(""), 0);
             }
             let now = now_ms();
@@ -589,6 +569,115 @@ impl Translator {
             ts,
             pid,
             guid: self.guid(pid, ts),
+            data,
+        }
+    }
+
+    /// Attribution decision for an event of `pid` at `ts` (ETW clock). A pid
+    /// with no live owner is looked up on the system first (the current
+    /// owner is registered as a sighting; it only matches if it started at
+    /// or before `ts`).
+    fn decide(&mut self, pid: u32, ts: i64, deadline: bool) -> Decision {
+        let owner = self
+            .s
+            .tracker
+            .read()
+            .map(|t| t.owner_at(pid, ts))
+            .unwrap_or(Owner::Unknown);
+        if matches!(owner, Owner::Pending | Owner::Unknown) {
+            self.ensure_known(pid);
+        }
+        self.s
+            .tracker
+            .read()
+            .map(|t| t.decide(pid, ts, deadline))
+            .unwrap_or(Decision::EmitUnlinked)
+    }
+
+    /// Emit an event (built with a placeholder GUID) attributed to the
+    /// process instance that owned its pid at the event's timestamp, hold
+    /// it until that owner is known, or drop it (pid reused, owner unknown).
+    fn attribute(&mut self, ev: Event) {
+        let now = now_ms();
+        match self.decide(ev.pid, ev.ts, false) {
+            Decision::Hold => {
+                let (pid, ts) = (ev.pid, ev.ts);
+                let mut q = std::mem::replace(&mut self.unattributed, PendingAttr::new(1));
+                let forced = q.push(now + ATTR_HOLD_MS, pid, ts, ev, |p, t, f| {
+                    self.decide(p, t, f)
+                });
+                self.unattributed = q;
+                for (d, ev) in forced {
+                    self.finish_attr(d, ev);
+                }
+            }
+            d => self.finish_attr(d, ev),
+        }
+    }
+
+    fn finish_attr(&mut self, d: Decision, mut ev: Event) {
+        match d {
+            Decision::Emit(g) => ev.guid = g,
+            Decision::EmitUnlinked => ev.guid = ProcessGuid::derive(&self.s.boot_id, ev.pid, 0),
+            Decision::Drop | Decision::Hold => {
+                self.s
+                    .counters
+                    .pid_reuse_dropped
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(
+                    pid = ev.pid,
+                    ts = ev.ts,
+                    "event dropped: pid owner at event time unknown (pid reused)"
+                );
+                return;
+            }
+        }
+        if let EventData::FileAccess { path, op } = &ev.data {
+            let key = (ev.guid.clone(), norm_key(path), *op as u8);
+            if self
+                .file_seen
+                .get(&key)
+                .is_some_and(|prev| (ev.ts - prev).abs() < FILE_DEDUP_MS)
+            {
+                return;
+            }
+            self.file_seen.insert(key, ev.ts);
+        }
+        self.emit(ev);
+    }
+
+    /// The core session delivered a start / stop of `pid`: decide its held events.
+    fn retry_attr(&mut self, pid: u32) {
+        if self.unattributed.is_empty() {
+            return;
+        }
+        let now = now_ms();
+        let mut q = std::mem::replace(&mut self.unattributed, PendingAttr::new(1));
+        let out = q.retry_pid(pid, now, |p, t, f| self.decide(p, t, f));
+        self.unattributed = q;
+        for (d, ev) in out {
+            self.finish_attr(d, ev);
+        }
+    }
+
+    fn expire_attr(&mut self, now: i64) {
+        if self.unattributed.is_empty() {
+            return;
+        }
+        let mut q = std::mem::replace(&mut self.unattributed, PendingAttr::new(1));
+        let out = q.expire(now, |p, t, f| self.decide(p, t, f));
+        self.unattributed = q;
+        for (d, ev) in out {
+            self.finish_attr(d, ev);
+        }
+    }
+
+    /// Event with a placeholder GUID, for [`Self::attribute`].
+    fn unattributed_event(ts: i64, pid: u32, data: EventData) -> Event {
+        Event {
+            ts,
+            pid,
+            guid: ProcessGuid::default(),
             data,
         }
     }
@@ -652,7 +741,7 @@ impl Translator {
                 return true;
             }
         }
-        may_be_sensitive(path) || filters::is_extra_sensitive(path)
+        filters::may_be_sensitive(path) || filters::is_extra_sensitive(path)
     }
 
     pub fn handle(&mut self, r: Raw) {
@@ -696,14 +785,16 @@ impl Translator {
                     filetime_to_ms(create_ft)
                 };
                 let image = self.dos(&image_nt);
+                // `ts` (ETW clock) orders this instance against events of
+                // the other sessions; `start_ts` (wall clock) is the GUID input.
                 let guid = self
                     .s
                     .tracker
                     .write()
-                    .map(|mut t| t.on_start(pid, start_ts, &image, ppid))
+                    .map(|mut t| t.on_etw_start(pid, start_ts, ts, create_ft != 0, &image, ppid))
                     .unwrap_or_default();
                 let parent_guid = self.s.tracker.read().ok().and_then(|t| {
-                    t.at(ppid, start_ts)
+                    t.at(ppid, ts)
                         .filter(|e| e.start_ts <= start_ts)
                         .map(|e| e.guid.clone())
                 });
@@ -790,6 +881,9 @@ impl Translator {
                     }
                     self.emit(ev);
                 }
+                // Events of this pid that waited for their owner (after the
+                // start, so a held start stays ahead of its own events).
+                self.retry_attr(pid);
             }
             Raw::CmdLine { pid, cmdline } => {
                 let mut patched = false;
@@ -828,6 +922,7 @@ impl Translator {
                 if let Ok(mut t) = self.s.tracker.write() {
                     t.on_stop(pid, start, ts);
                 }
+                self.retry_attr(pid);
                 // `integrities` keeps the entry: hint processes (sc.exe,
                 // schtasks.exe) exit before their persistence event arrives.
                 self.flows.forget_pid(pid);
@@ -894,16 +989,10 @@ impl Translator {
                     self.file_objects
                         .insert((pid, file_object), (path.clone(), false, ts));
                 }
-                let key = (pid, norm_key(&path), op as u8);
-                if let Some(prev) = self.file_seen.get(&key) {
-                    if ts - prev < FILE_DEDUP_MS {
-                        return;
-                    }
-                }
-                self.file_seen.insert(key, ts);
-                self.ensure_known(pid);
-                let ev = self.base(ts, pid, EventData::FileAccess { path, op });
-                self.emit(ev);
+                // Kernel-File is its own session: attribute by event time
+                // (pid reuse), de-duplicated per instance in `finish_attr`.
+                let ev = Self::unattributed_event(ts, pid, EventData::FileAccess { path, op });
+                self.attribute(ev);
             }
             Raw::FileRead {
                 ts,
@@ -919,7 +1008,7 @@ impl Translator {
                 }
                 *reported = true;
                 let path = path.clone();
-                let ev = self.base(
+                let ev = Self::unattributed_event(
                     ts,
                     pid,
                     EventData::FileAccess {
@@ -927,7 +1016,7 @@ impl Translator {
                         op: FileOp::Read,
                     },
                 );
-                self.emit(ev);
+                self.attribute(ev);
             }
             Raw::NetConnect {
                 ts,
@@ -1155,9 +1244,8 @@ impl Translator {
                     });
                     return;
                 }
-                self.ensure_known(pid);
-                let ev = self.base(ts, pid, EventData::FileActivity(act));
-                self.emit(ev);
+                let ev = Self::unattributed_event(ts, pid, EventData::FileActivity(act));
+                self.attribute(ev);
             }
             Raw::Persist {
                 ts,
@@ -1201,8 +1289,8 @@ impl Translator {
                 if m.len() > 4096 {
                     m.clear();
                 }
-                let ev = self.base(ts, pid, EventData::DnsQuery { qname, answers });
-                self.emit(ev);
+                let ev = Self::unattributed_event(ts, pid, EventData::DnsQuery { qname, answers });
+                self.attribute(ev);
             }
             Raw::Dpapi {
                 ts,
@@ -1231,7 +1319,7 @@ impl Translator {
                     return;
                 }
                 self.hints.on_script(ts, pid, &text);
-                let ev = self.base(
+                let ev = Self::unattributed_event(
                     ts,
                     pid,
                     EventData::ScriptBlock {
@@ -1239,7 +1327,7 @@ impl Translator {
                         content: text,
                     },
                 );
-                self.emit(ev);
+                self.attribute(ev);
             }
             Raw::Sysmon(c) => {
                 if c.source_pid == self.s.self_pid {
@@ -1448,7 +1536,8 @@ impl Translator {
             .get(&pid)
             .and_then(|m| m.get(&dst))
             .map(|(q, _)| q.clone());
-        let ev = self.base(
+        // Kestrel-IO is its own session (5 s flush): attribute by event time.
+        let ev = Self::unattributed_event(
             ts,
             pid,
             EventData::NetConnect {
@@ -1460,6 +1549,6 @@ impl Translator {
                 bytes_sent: bytes,
             },
         );
-        self.emit(ev);
+        self.attribute(ev);
     }
 }

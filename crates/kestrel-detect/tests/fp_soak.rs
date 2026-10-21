@@ -133,11 +133,10 @@ fn wam_exemption_excludes_macro_eval_and_node_hosts() {
     let tbres = r"C:\Users\alice\AppData\Local\Microsoft\TokenBroker\Cache\x.tbres";
     for (img, cmd, signer) in [
         (code, "Code.exe", "Evil Ltd"),
-        (
-            r"C:\Users\alice\AppData\Local\Programs\Microsoft VS Code\Code.exe",
-            "Code.exe",
-            "Microsoft Corporation",
-        ),
+        // The per-user install (`%LOCALAPPDATA%\Programs\Microsoft VS Code`)
+        // is a Low Audit WAM reader since the owner's PC triage
+        // (2026-10-22, item 6), but its ST-04 to a non-Microsoft address
+        // keeps the full response: see `fp_workstation.rs`.
         (code, "Code.exe --inspect=9229", "Microsoft Corporation"),
         (
             code,

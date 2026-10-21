@@ -22,6 +22,12 @@ export function describeFileActivity(f: FileActivity): string {
   if (f.top_new_ext) parts.push(`new extension .${f.top_new_ext}${f.top_ext_pct ? ` (${Math.min(100, f.top_ext_pct)}%)` : ''}`)
   if (f.net_paths) parts.push(`${f.net_paths} on network shares`)
   let s = parts.join(', ')
+  if (f.self_created) {
+    // 1.1.6 agents: files the process created itself are not existing user data.
+    const own = Math.min(Math.max(f.self_created, created), f.files_touched)
+    const existing = f.files_touched - own
+    s += ` (${own} created by the process itself, ${plural(existing, 'existing file')})`
+  }
   if (f.note_name) s += `; created ${f.note_name} in ${plural(f.note_dirs ?? 0, 'folder')}`
   if (f.canary_hits?.length) s += `; touched ${plural(f.canary_hits.length, 'canary file')}${f.canary_in_place ? ' (in-place write found by polling, writer inferred)' : ''}`
   if (f.remote_writer) s += '; written by a remote client over SMB'

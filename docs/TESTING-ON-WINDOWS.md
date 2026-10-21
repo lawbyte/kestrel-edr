@@ -201,6 +201,24 @@ Record these numbers on both Pro and Enterprise if you can, and for both an idle
 
 Good targets for v1 are idle CPU under 1%, busy CPU under 5%, working set under 150 MB, and no events lost on Kestrel-Core under normal use.
 
+### Sensor fixes of 2026-10-22 (owner-PC triage): what to verify
+
+Run these in the VM with the agent installed (Audit policy), Docker Desktop running (it starts `docker-*.exe` CLI plugins every few seconds that read `%USERPROFILE%\.docker\config.json`) and a Rust toolchain plus VS Build Tools installed.
+
+1. **PID-reuse attribution under a parallel build.**
+   * Clone any large Rust workspace (or this repo) and run `cargo build -j 8` (then `cargo clippy --all-targets`) three times in a row while Docker Desktop is up.
+   * *Pass:* no ST-01 "read Docker registry credentials" alert names `rustc.exe`, `cargo.exe`, `clippy-driver.exe`, `build-script-build.exe`, `cl.exe`, `link.exe`, `lib.exe`, `conhost.exe` or `wsl.exe`. A `docker-*.exe` / `com.docker.*` reader may still appear (that is the detection team's allow-list question, not attribution).
+   * *Also check:* `kestrel-agent` log line "sensor health" every 5 min: `pid_reuse_dropped` (events whose pid was reused and whose owner at the event time was unknown; expected small, not growing without bound) and `file_prefiltered` (large during a build).
+   * *Positive control:* from a labsim-style unsigned test binary, read the dummy `.docker\config.json` while the build runs; the ST-01 alert must name the test binary.
+2. **Events lost during a large build.**
+   * Before and during the build: `logman query Kestrel-File -ets`, `logman query Kestrel-Core -ets` (Buffer Size, Buffers Written, Events Lost, number of buffers; the pool may now grow from the minimum to the maximum in `kestrel_win::consts::buffers`: Core 32 to 256, File 64 to 512, IO 128 to 256 buffers of 64 KB).
+   * Device page / heartbeat: `etw_events_lost` should stay 0, and if not, `etw_kernel_events_lost` (ETW buffers full) and `sensor_internal_dropped` (Kestrel's own queues) say which side lost them. Record both with the build's duration.
+   * Record the agent's nonpaged-pool use during the build (`poolmon` or Task Manager > Performance > Memory > Non-paged pool before/after): the worst case is +46 MB over the old fixed plan, and it should return to about 15 MB for the sessions when idle.
+3. **Store app signer.**
+   * Install WhatsApp (or any Store app with an `.exe`, e.g. Windows Terminal) from the Microsoft Store and start it.
+   * *Pass:* its ProcessStart in Hunt shows `signed: valid` and a signer. For Store-signed third-party packages the certificate subject is the Store publisher id (e.g. `24803D75-212C-471A-BC57-9EF86AB91435` for WhatsApp), not the company name; Microsoft's own packages show `Microsoft Corporation`. An app sideloaded with a self-signed certificate stays `unsigned` (catalog chain not trusted), never `valid`.
+   * Developer check without a VM (read-only): `$env:KESTREL_TEST_MSIX_EXE='<path of a packaged .exe>'; cargo test -p kestrel-win --lib msix_packaged_exe` (verified on the owner PC with WhatsApp.Root.exe: Valid, source PackageCatalog).
+
 ## 5. Known risks in the Windows layer (check these first)
 
 These parts of `kestrel-win` are implemented from documentation and manifests but have not yet been proven on real hardware. Each one has a specific check.

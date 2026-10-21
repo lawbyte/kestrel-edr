@@ -22,6 +22,56 @@ pub const SESSION_FILE: &str = "Kestrel-File";
 /// Task Scheduler / SCM / WMI-Activity persistence providers.
 pub const SESSION_PERSIST: &str = "Kestrel-Persist";
 
+/// ETW buffer plan per session: `(MinimumBuffers, MaximumBuffers)` of
+/// [`buffers::SIZE_KB`] buffers (EVENT_TRACE_PROPERTIES, Microsoft Learn).
+/// ETW reserves the minimum at start and allocates more, up to the maximum,
+/// only "if the buffers are filled more quickly than they can be processed";
+/// beyond the maximum it discards events (`EventsLost`).
+///
+/// Owner-PC triage 2026-10-22 (`ETW dropped 14241 events` during a parallel
+/// Rust build): every session used Minimum = Maximum (Core 32, File 128,
+/// IO 128 = 19 MB fixed), so a burst had no headroom. Now the sessions that
+/// see build bursts (Core: process start/stop/image load; File: opens) can
+/// grow; the idle reservation is lower than before (15 MB) and the worst
+/// case under a sustained burst is 65 MB (+46 MB), see the test below.
+/// Kernel-Network may log at DISPATCH_LEVEL where ETW cannot allocate on
+/// demand, so IO keeps its previous preallocated minimum.
+pub mod buffers {
+    pub const SIZE_KB: u32 = 64;
+    pub const CORE: (u32, u32) = (32, 256);
+    pub const FILE: (u32, u32) = (64, 512);
+    pub const IO: (u32, u32) = (128, 256);
+    pub const PERSIST: (u32, u32) = (8, 8);
+    pub const PROC_CMD: (u32, u32) = (8, 8);
+    /// All sessions, for the memory budget.
+    pub const ALL: [(u32, u32); 5] = [CORE, FILE, IO, PERSIST, PROC_CMD];
+    /// Fixed plan before 2026-10-22 (Minimum = Maximum).
+    pub const BEFORE: [u32; 5] = [32, 128, 128, 8, 8];
+    /// Documented ceiling on the extra memory a burst may take.
+    pub const MAX_EXTRA_MB: u32 = 64;
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn memory_budget() {
+            let mb = |n: u32| n * SIZE_KB / 1024;
+            let before: u32 = BEFORE.iter().sum();
+            let max: u32 = ALL.iter().map(|b| b.1).sum();
+            let min: u32 = ALL.iter().map(|b| b.0).sum();
+            assert!(ALL.iter().all(|(lo, hi)| lo <= hi && *lo >= 2));
+            assert!(
+                mb(max - before) <= MAX_EXTRA_MB,
+                "{} MB extra",
+                mb(max - before)
+            );
+            assert!(min <= before, "idle reservation must not grow");
+            assert_eq!(mb(max), 65);
+        }
+    }
+}
+
 pub mod provider {
     /// Microsoft-Windows-Kernel-Process
     pub const KERNEL_PROCESS: &str = "22FB2CD6-0E7B-422B-A0C7-2FAD1FD0E716";

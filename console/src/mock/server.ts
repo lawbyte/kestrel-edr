@@ -110,7 +110,7 @@ function findIncident(id: string) {
   return i
 }
 function findDevice(id: string) {
-  const d = db.devices.find((x) => x.id === id)
+  const d = db.devices.find((x) => x.id === id) ?? db.removedDevices.find((x) => x.id === id)
   if (!d) throw notFound('Device')
   return d
 }
@@ -273,7 +273,8 @@ route('GET', '/devices', ({ query }) => {
   me()
   db.refreshDevices()
   const status = csv(query, 'status')
-  const items = db.devices
+  const all = query.get('include_removed') === 'true' ? [...db.devices, ...db.removedDevices] : db.devices
+  const items = all
     .filter((d) => (!status.length || status.includes(d.status)) && (!query.get('group_id') || d.group_id === query.get('group_id')))
     .filter((d) => textMatch(query.get('q'), d.hostname, d.logged_on_user, d.ip_addresses.join(' '), d.os_name))
     .sort((a, b) => a.hostname.localeCompare(b.hostname))
@@ -323,6 +324,49 @@ route('PATCH', '/devices/:id', ({ params, body }) => {
   db.refreshDevices()
   emit({ kind: 'device', id: d.id, type: 'updated' })
   return d
+})
+// Remote removal ("Remove device"): same checks and order as the server.
+const removalRequests = new Map<string, number[]>()
+const REMOVE_RATE_LIMIT = 20
+const removeErr = (status: number, code: string, message: string, reason: string) => new HttpError(status, code, message, undefined, { reason })
+route('POST', '/devices/:id/remove', ({ params, body }) => {
+  const u = me()
+  requirePriv(u, 'devices.remove')
+  const d = findDevice(params.id)
+  const b = (body ?? {}) as { purge_data?: unknown; confirm_hostname?: unknown; comment?: unknown }
+  if (String(b.confirm_hostname ?? '').trim().toLowerCase() !== d.hostname.toLowerCase()) throw removeErr(400, 'bad_request', 'confirm_hostname does not match the device hostname', 'confirm_mismatch')
+  if (u.mfa_enabled && reauth.until < Date.now()) throw removeErr(403, 'forbidden', 'Re-authentication required', 'reauth_required')
+  if (d.removal?.state === 'removed') throw new HttpError(409, 'conflict', 'device is already removed')
+  if (!d.capabilities?.includes('agent.uninstall')) throw removeErr(409, 'conflict', 'the agent on this device is too old for remote removal', 'agent_too_old')
+  if (d.uninstall_token_set === false) throw removeErr(409, 'conflict', 'no uninstall token on record for this device', 'no_uninstall_token')
+  if (d.removal?.state === 'pending' || d.removal?.state === 'removing') throw removeErr(409, 'conflict', 'a removal is already queued or running', 'removal_pending')
+  const now = Date.now()
+  const recent = (removalRequests.get(u.id) ?? []).filter((t) => t > now - HOUR)
+  if (recent.length >= REMOVE_RATE_LIMIT) throw removeErr(429, 'rate_limited', 'too many removals in the last hour', 'rate_limited')
+  removalRequests.set(u.id, [...recent, now])
+  const purge = b.purge_data === true
+  const comment = typeof b.comment === 'string' ? b.comment.slice(0, 500) : ''
+  // Mock: the request stays queued (nothing "uninstalls" in mock mode).
+  const action: ResponseActionRow = { id: uuid(), device_id: d.id, hostname: d.hostname, incident_id: null, action: { type: 'uninstall_agent', purge_data: purge }, status: 'pending', requested_by: u, comment, created_at: now, completed_at: null, result_detail: '' }
+  db.actions.unshift(action)
+  d.removal = { state: 'pending', action_id: action.id, requested_at: now, requested_by: u.name, purge_data: purge, started_at: null, removed_at: null, error: null }
+  db.log(u, 'device.remove.requested', d.hostname, { hostname: d.hostname, purge_data: purge, comment, action_id: action.id })
+  emit({ kind: 'device', id: d.id, type: 'updated' })
+  return { device: d, action }
+})
+route('DELETE', '/devices/:id/remove', ({ params }) => {
+  const u = me()
+  requirePriv(u, 'devices.remove')
+  const d = findDevice(params.id)
+  const r = d.removal
+  if (r?.state === 'removing' || r?.state === 'removed') throw removeErr(409, 'conflict', 'the agent already received the removal', 'already_started')
+  if (r?.state !== 'pending') throw removeErr(404, 'not_found', 'no pending removal for this device', 'no_pending_removal')
+  const row = db.actions.find((a) => a.id === r.action_id)
+  if (row) Object.assign(row, { status: 'cancelled', completed_at: Date.now(), result_detail: `cancelled by ${u.email}` })
+  d.removal = null
+  db.log(u, 'device.remove.cancelled', d.hostname, { hostname: d.hostname, action_id: r.action_id })
+  emit({ kind: 'device', id: d.id, type: 'updated' })
+  return { device: d }
 })
 route('DELETE', '/devices/:id', ({ params }) => {
   const u = me()

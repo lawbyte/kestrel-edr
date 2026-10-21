@@ -413,7 +413,10 @@ fn launch_uninstaller() -> Result<(), String> {
         }
         let w = |s: &std::path::Path| -> Vec<u16> {
             use std::os::windows::ffi::OsStrExt;
-            s.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+            s.as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
         };
         let (file, cwd) = (w(&tool), w(&dir));
         let verb: Vec<u16> = "open\0".encode_utf16().collect();
@@ -432,7 +435,10 @@ fn launch_uninstaller() -> Result<(), String> {
         if h as isize > 32 {
             Ok(())
         } else {
-            Err(format!("The uninstall tool could not start (code {}).", h as isize))
+            Err(format!(
+                "The uninstall tool could not start (code {}).",
+                h as isize
+            ))
         }
     }
     #[cfg(not(windows))]

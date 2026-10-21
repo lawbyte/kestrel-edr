@@ -278,6 +278,7 @@ impl AgentService for Mock {
                         action: ResponseAction::Scan {
                             path: Some(r"C:\Users\j.doe\Downloads".into()),
                         },
+                        secret: None,
                     };
                     let _ = tx.send(Ok(next(cmd.clone()))).await;
                     tokio::time::sleep(Duration::from_millis(300)).await;

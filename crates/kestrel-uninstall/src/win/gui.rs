@@ -104,12 +104,12 @@ struct App {
     log_shown: bool,
 }
 
-struct WorkResult {
-    outcome: Outcome,
-    log: Option<PathBuf>,
-    purge: Option<String>,
+pub(crate) struct WorkResult {
+    pub(crate) outcome: Outcome,
+    pub(crate) log: Option<PathBuf>,
+    pub(crate) purge: Option<String>,
     /// Keeps the private work folder pinned while the window is open.
-    work: Option<system::WorkDir>,
+    pub(crate) work: Option<system::WorkDir>,
 }
 
 thread_local! {
@@ -747,7 +747,7 @@ impl App {
 }
 
 /// The worker: find the product, remove it, classify, purge.
-fn work(mut token: String, purge: bool, state_dir: Option<PathBuf>) -> WorkResult {
+pub(crate) fn work(mut token: String, purge: bool, state_dir: Option<PathBuf>) -> WorkResult {
     let done = |outcome, log, mut token: String| {
         wipe_string(&mut token);
         WorkResult {
@@ -969,6 +969,7 @@ pub fn main() -> i32 {
         }
         Mode::Run => run(false),
         Mode::Preview => run(true),
+        Mode::Quiet { purge } => super::quiet::main(purge),
     }
 }
 

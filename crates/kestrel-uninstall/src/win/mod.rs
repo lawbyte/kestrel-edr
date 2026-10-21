@@ -3,6 +3,7 @@
 
 pub mod gui;
 pub mod purge;
+pub mod quiet;
 pub mod system;
 
 /// NUL-terminated UTF-16.

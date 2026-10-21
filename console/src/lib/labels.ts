@@ -144,6 +144,12 @@ export const AUDIT_ACTION_LABEL: Record<string, string> = {
   'device.protection_on': 'Protection turned back on',
   'device.protection_off_denied': 'Wrong uninstall token for turning protection off',
   'device.protection_off_clamped': 'Protection turn-off shortened by policy',
+  'device.remove.requested': 'Device removal requested (remote uninstall)',
+  'device.remove.started': 'Agent started uninstalling itself',
+  'device.remove.completed': 'Device removed (uninstalled remotely)',
+  'device.remove.failed': 'Remote uninstall failed',
+  'device.remove.cancelled': 'Device removal cancelled',
+  'device.remove.expired': 'Device removal expired (PC did not connect in 90 days)',
 }
 
 /** Short duration label: 15 min, 1 h, 1 h 30 min, 2 d. */
@@ -158,9 +164,11 @@ export function formatMinutes(m: number): string {
 export const ACTION_STATUS_LABEL: Record<ActionStatus, string> = {
   pending: 'Pending',
   sent: 'Sent',
+  running: 'Running',
   succeeded: 'Succeeded',
   failed: 'Failed',
   expired: 'Expired',
+  cancelled: 'Cancelled',
 }
 
 export const PATH_CLASS_LABEL: Record<PathClass, string> = {
@@ -302,6 +310,7 @@ export const ACTION_LABEL: Record<ResponseAction['type'], string> = {
   collect_triage: 'Collect triage package',
   remove_autorun: 'Remove persistence entry',
   resume_protection: 'Turn protection back on',
+  uninstall_agent: 'Remove device (uninstall agent)',
 }
 
 export const AUTORUN_KIND_LABEL: Record<import('@/api/types').AutorunKind, string> = {
@@ -326,6 +335,8 @@ export function actionPrivilege(a: ResponseAction): string {
     case 'remove_autorun':
       // Writes/deletes registry values as SYSTEM: admin-only by default (V-H2).
       return 'response.persistence'
+    case 'uninstall_agent':
+      return 'devices.remove'
     case 'block_destination':
     case 'block_image_network':
     case 'unblock_network':
@@ -400,6 +411,8 @@ export function describeAction(a: ResponseAction): string {
       return a.path ? `Scan ${safeDisplay(a.path)}` : 'Scan running user-path programs'
     case 'collect_triage':
       return 'Collect triage package'
+    case 'uninstall_agent':
+      return a.purge_data ? 'Uninstall the agent and delete its quarantine and logs' : 'Uninstall the agent'
     case 'remove_autorun': {
       const loc = safeDisplay(a.location)
       const what = a.kind === 'registry_value' && a.value_name ? `${loc}\\${safeDisplay(a.value_name)}` : loc

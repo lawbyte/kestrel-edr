@@ -297,6 +297,12 @@ pub enum Mode {
     Run,
     /// Show the window without elevation and without changing anything.
     Preview,
+    /// No window (`--quiet --token-stdin [--purge]`): remote removal started
+    /// by the agent ("Remove device" in the console). The token is read from
+    /// the first line of stdin only, never from the command line.
+    Quiet {
+        purge: bool,
+    },
     Help,
     BadArgs(String),
 }
@@ -307,6 +313,9 @@ kestrel-uninstall.exe --preview\n    Shows the window for screenshots and docume
 To run it without the administrator prompt, start it with the environment\n    \
 variable __COMPAT_LAYER=RunAsInvoker.\n\n\
 kestrel-uninstall.exe /?\n    Shows this help.\n\n\
+kestrel-uninstall.exe --quiet --token-stdin [--purge]\n    No window: reads the uninstall token from the first line of standard\n    \
+input and removes Kestrel (used by the agent for Remove device in the\n    \
+console). --purge also deletes the Kestrel data folder afterwards.\n\n\
 Exit codes: 0 removed, 1 wrong uninstall token, 2 anything else.\n\n\
 For scripts without a window:\n    \
 msiexec /x <product code> /qn UNINSTALL_TOKEN=<token>";
@@ -317,14 +326,153 @@ where
     S: AsRef<str>,
 {
     let mut mode = Mode::Run;
+    let (mut quiet, mut stdin, mut purge) = (false, false, false);
+    let mut first_quiet_only: Option<String> = None;
     for a in args {
-        match a.as_ref().to_ascii_lowercase().as_str() {
+        let a = a.as_ref().to_ascii_lowercase();
+        match a.as_str() {
             "/?" | "-?" | "-h" | "--help" | "/help" | "/h" => return Mode::Help,
             "--preview" | "/preview" => mode = Mode::Preview,
+            "--quiet" | "/quiet" => quiet = true,
+            "--token-stdin" | "/token-stdin" => {
+                stdin = true;
+                first_quiet_only.get_or_insert(a.clone());
+            }
+            "--purge" | "/purge" => {
+                purge = true;
+                first_quiet_only.get_or_insert(a.clone());
+            }
             other => return Mode::BadArgs(other.to_string()),
         }
     }
+    if quiet {
+        if mode == Mode::Preview {
+            return Mode::BadArgs("--preview".into());
+        }
+        // The token only ever comes from stdin (never argv).
+        if !stdin {
+            return Mode::BadArgs("--quiet needs --token-stdin".into());
+        }
+        return Mode::Quiet { purge };
+    }
+    if let Some(a) = first_quiet_only {
+        return Mode::BadArgs(a);
+    }
     mode
+}
+
+/// Read the token from the first line of `r` (quiet mode's stdin), reading
+/// at most a little more than [`MAX_TOKEN_LEN`] bytes; trimmed and checked
+/// with [`check_token`]. The read buffer is wiped.
+pub fn read_token_line<R: std::io::Read>(mut r: R) -> Result<String, TokenError> {
+    let mut buf = Vec::with_capacity(MAX_TOKEN_LEN + 2);
+    let mut byte = [0u8; 1];
+    let mut too_long = false;
+    loop {
+        match r.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) => {
+                if byte[0] == b'\n' {
+                    break;
+                }
+                if buf.len() > MAX_TOKEN_LEN + 1 {
+                    too_long = true;
+                    break;
+                }
+                buf.push(byte[0]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    let result = if too_long {
+        Err(TokenError::TooLong)
+    } else {
+        match std::str::from_utf8(&buf) {
+            Ok(s) => {
+                let t = s.trim();
+                check_token(t).map(|_| t.to_string())
+            }
+            Err(_) => Err(TokenError::BadCharacter),
+        }
+    };
+    wipe_bytes(&mut buf);
+    result
+}
+
+/// Short machine-readable name of an outcome (quiet-mode result file).
+pub fn outcome_kind(o: &Outcome) -> &'static str {
+    match o {
+        Outcome::Removed { .. } => "removed",
+        Outcome::WrongToken => "wrong_token",
+        Outcome::NotInstalled => "not_installed",
+        Outcome::Failed { .. } => "failed",
+        Outcome::NotElevated => "not_elevated",
+    }
+}
+
+/// One-line explanation of an outcome for the console (quiet mode).
+pub fn quiet_message(o: &Outcome) -> String {
+    match o {
+        Outcome::Removed {
+            reboot_required: false,
+        } => "Kestrel was removed".into(),
+        Outcome::Removed {
+            reboot_required: true,
+        } => "Kestrel was removed; a restart finishes the removal".into(),
+        Outcome::WrongToken => {
+            "the Kestrel package refused the uninstall token (token mismatch)".into()
+        }
+        Outcome::NotInstalled => {
+            "no installed Kestrel EDR Agent package was found (installed without the MSI?)".into()
+        }
+        Outcome::Failed { code } => match *code {
+            rc::INSTALL_ALREADY_RUNNING => {
+                "another installation was in progress (Windows Installer error 1618); try again later"
+                    .into()
+            }
+            c => format!("Windows Installer error {c}"),
+        },
+        Outcome::NotElevated => "the uninstall helper did not run with administrator rights".into(),
+    }
+}
+
+fn json_str(s: &str) -> String {
+    let mut o = String::with_capacity(s.len() + 2);
+    o.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+
+/// Result file written by quiet mode after a failed removal
+/// (`%ProgramData%\Kestrel\remote-uninstall-result.json`, read and deleted by
+/// the agent, which reports it to the console):
+/// `{"exit_code":1,"outcome":"wrong_token","msi_code":1603,"message":"…","log":"…"}`.
+/// Never contains the token.
+pub fn result_json(
+    exit: i32,
+    kind: &str,
+    msi_code: Option<u32>,
+    message: &str,
+    log: Option<&str>,
+) -> String {
+    format!(
+        "{{\"exit_code\":{exit},\"outcome\":{},\"msi_code\":{},\"message\":{},\"log\":{}}}",
+        json_str(kind),
+        msi_code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "null".into()),
+        json_str(message),
+        log.map(json_str).unwrap_or_else(|| "null".into()),
+    )
 }
 
 // ------------------------------------------------------------------ purge
@@ -585,6 +733,92 @@ mod tests {
         assert_eq!(parse_args(["--preview", "-h"]), Mode::Help);
         assert_eq!(parse_args(["--purge"]), Mode::BadArgs("--purge".into()));
         assert!(USAGE.contains("--preview") && USAGE.contains("Exit codes"));
+    }
+
+    #[test]
+    fn quiet_args() {
+        assert_eq!(
+            parse_args(["--quiet", "--token-stdin"]),
+            Mode::Quiet { purge: false }
+        );
+        assert_eq!(
+            parse_args(["--token-stdin", "--purge", "--quiet"]),
+            Mode::Quiet { purge: true }
+        );
+        // The token never comes from argv; quiet needs stdin.
+        assert!(matches!(parse_args(["--quiet"]), Mode::BadArgs(_)));
+        assert!(matches!(
+            parse_args(["--quiet", "--token-stdin", "kun_x"]),
+            Mode::BadArgs(a) if a == "kun_x"
+        ));
+        assert!(matches!(
+            parse_args(["--quiet", "--token", "kun_x"]),
+            Mode::BadArgs(_)
+        ));
+        assert_eq!(
+            parse_args(["--token-stdin"]),
+            Mode::BadArgs("--token-stdin".into())
+        );
+        assert!(matches!(
+            parse_args(["--quiet", "--token-stdin", "--preview"]),
+            Mode::BadArgs(_)
+        ));
+        assert!(USAGE.contains("--quiet --token-stdin"));
+    }
+
+    #[test]
+    fn token_from_stdin() {
+        assert_eq!(
+            read_token_line(&b"kun_abc\r\nignored"[..]),
+            Ok("kun_abc".to_string())
+        );
+        assert_eq!(read_token_line(&b"  kun_abc  "[..]), Ok("kun_abc".into()));
+        assert_eq!(read_token_line(&b"\n"[..]), Err(TokenError::Empty));
+        assert_eq!(read_token_line(&b""[..]), Err(TokenError::Empty));
+        assert_eq!(
+            read_token_line(&b"kun_a|b\n"[..]),
+            Err(TokenError::BadCharacter)
+        );
+        let long = vec![b'a'; MAX_TOKEN_LEN + 50];
+        assert_eq!(read_token_line(&long[..]), Err(TokenError::TooLong));
+        assert_eq!(
+            read_token_line(&[0xffu8, 0xfe][..]),
+            Err(TokenError::BadCharacter)
+        );
+    }
+
+    #[test]
+    fn quiet_result_file() {
+        let j = result_json(
+            1,
+            outcome_kind(&Outcome::WrongToken),
+            Some(1603),
+            &quiet_message(&Outcome::WrongToken),
+            Some(r"C:\Windows\SystemTemp\k\a.log"),
+        );
+        let v: Vec<&str> = vec![
+            r#""exit_code":1"#,
+            r#""outcome":"wrong_token""#,
+            r#""msi_code":1603"#,
+            r#""log":"C:\\Windows\\SystemTemp\\k\\a.log""#,
+        ];
+        for part in v {
+            assert!(j.contains(part), "{j}");
+        }
+        let j = result_json(2, "failed", None, "a \"b\"\n", None);
+        assert!(
+            j.contains(r#""msi_code":null"#) && j.contains(r#""log":null"#),
+            "{j}"
+        );
+        assert!(j.contains(r#""message":"a \"b\"\u000a""#), "{j}");
+        assert_eq!(
+            outcome_kind(&Outcome::Removed {
+                reboot_required: true
+            }),
+            "removed"
+        );
+        assert!(quiet_message(&Outcome::Failed { code: 1618 }).contains("1618"));
+        assert!(quiet_message(&Outcome::Failed { code: 1603 }).contains("1603"));
     }
 
     #[test]

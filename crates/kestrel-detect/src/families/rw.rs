@@ -148,8 +148,51 @@ const KILL_TARGET_SUBSTRINGS: &[&str] = &[
 ];
 const KILL_TARGET_EXACT: &[&str] = &["vss", "sense", "sap"];
 
-/// RW-08 note extensions.
+/// RW-08 note extensions (the 5-folder, kill-capable name check).
 const NOTE_EXTS: &[&str] = &["txt", "hta", "html", "htm", "rtf", "url"];
+/// Further text formats that count as a note only for the 20-folder,
+/// alert-only fallback: `README.md` lands in hundreds of folders on every
+/// `npm install`, so it must never reach the kill path.
+const NOTE_FALLBACK_TEXT_EXTS: &[&str] = &["md", "pdf", "nfo"];
+/// Images some families drop as the note (wallpaper copies): only with a
+/// note-like name.
+const NOTE_IMAGE_EXTS: &[&str] = &["bmp", "jpg", "jpeg", "png"];
+/// Build artefacts compilers write once per output folder (triage
+/// 2026-10-22: rustc's `tmp.a` in 24 folders): never a note. `.tmp` only
+/// counts with a note-like name.
+const BUILD_ARTEFACT_EXTS: &[&str] = &[
+    "a",
+    "o",
+    "obj",
+    "rlib",
+    "rmeta",
+    "d",
+    "pdb",
+    "lib",
+    "exp",
+    "ilk",
+    "idb",
+    "pch",
+    "tlog",
+    "lastbuildstate",
+    "res",
+    "manifest",
+    "map",
+    "class",
+    "pyc",
+    "pyo",
+    "dll",
+    "exe",
+    "so",
+    "dylib",
+    "wasm",
+    "bin",
+    "timestamp",
+    "stamp",
+    "fingerprint",
+    "lock",
+    "json",
+];
 
 #[derive(Default)]
 pub(crate) struct Ransomware {
@@ -690,6 +733,9 @@ fn note_like(name: &str) -> bool {
             "decrypt",
             "help",
             "instruction",
+            "unlock",
+            "ransom",
+            "files",
             "!!!",
             "_info",
         ]
@@ -697,9 +743,46 @@ fn note_like(name: &str) -> bool {
         .any(|k| stem.contains(k))
 }
 
-fn note_ext(name: &str) -> bool {
+/// Extension of a note candidate (lower-case), `None` when the name has no
+/// extension.
+fn note_extension(name: &str) -> Option<&str> {
     name.rsplit_once('.')
-        .is_some_and(|(_, e)| NOTE_EXTS.contains(&e))
+        .filter(|(stem, e)| !stem.is_empty() && !e.is_empty())
+        .map(|(_, e)| e)
+}
+
+/// A note extension of the kill-capable 5-folder check.
+fn note_ext(name: &str) -> bool {
+    note_extension(name).is_some_and(|e| NOTE_EXTS.contains(&e))
+}
+
+/// A text / document note (incl. `.md`), or an image note (bmp / jpg / png)
+/// with a note-like name: the 20-folder fallback.
+fn fallback_note_ext(name: &str) -> bool {
+    match note_extension(name) {
+        Some(e) if NOTE_EXTS.contains(&e) || NOTE_FALLBACK_TEXT_EXTS.contains(&e) => true,
+        Some(e) if NOTE_IMAGE_EXTS.contains(&e) => note_like(name),
+        _ => false,
+    }
+}
+
+/// Triage 2026-10-22 item 3 (cargo's OUT_DIR "out" in 38 folders, rustc's
+/// "tmp.a" in 24): does a name newly created in many folders look like a
+/// ransom note at all? It needs an extension (the aggregator cannot tell a
+/// new directory from a new file, and directories are never notes), must
+/// not be a build artefact (`.tmp` only with a note-like name), and needs a
+/// document / text extension or a note-like name.
+fn note_characteristics(name: &str) -> bool {
+    let Some(e) = note_extension(name) else {
+        return false;
+    };
+    if e == "tmp" {
+        return note_like(name);
+    }
+    if BUILD_ARTEFACT_EXTS.contains(&e) {
+        return false;
+    }
+    fallback_note_ext(name) || (note_like(name) && !NOTE_IMAGE_EXTS.contains(&e))
 }
 
 // ---------------------------------------------------------------------------
@@ -1186,8 +1269,8 @@ impl Ransomware {
                     Severity::Critical
                 },
                 format!(
-                    "{shown} rewrote or renamed {} files in {} folders within {secs} s{ext}{net}, which looks like ransomware encryption; Kestrel works from user mode and cannot guarantee that no files were encrypted before it reacted.",
-                    fa.files_touched, fa.dirs
+                    "{shown} rewrote or renamed {} existing files in {} folders within {secs} s{ext}{net}, which looks like ransomware encryption; Kestrel works from user mode and cannot guarantee that no files were encrypted before it reacted.",
+                    preexisting_files(fa), fa.dirs
                 ),
             );
             if !allowed && !explorer {
@@ -1201,8 +1284,10 @@ impl Ransomware {
         if let Some(note) = fa.note_name.as_deref() {
             let note = note.to_lowercase();
             let name_hit = fa.note_dirs >= RW08_NOTE_DIRS && note_ext(&note) && note_like(&note);
-            let fallback =
-                fa.note_dirs >= RW08_FALLBACK_DIRS && note != "desktop.ini" && note != "thumbs.db";
+            let fallback = fa.note_dirs >= RW08_FALLBACK_DIRS
+                && note_characteristics(&note)
+                && note != "desktop.ini"
+                && note != "thumbs.db";
             if name_hit || fallback {
                 let combined = marked(&self.impact_marks, &e.guid, ctx.now, RW08_COMBINE_MS)
                     || out.iter().any(|h| {
@@ -1258,8 +1343,8 @@ impl Ransomware {
                 &e.guid,
                 Severity::Critical,
                 format!(
-                    "Process {} rewrote or renamed {} files in {} folders, which looks like ransomware encryption; Kestrel cannot guarantee that no files were encrypted.",
-                    e.pid, fa.files_touched, fa.dirs
+                    "Process {} rewrote or renamed {} existing files in {} folders, which looks like ransomware encryption; Kestrel cannot guarantee that no files were encrypted.",
+                    e.pid, preexisting_files(fa), fa.dirs
                 ),
             ));
         }
@@ -1397,16 +1482,38 @@ fn shown_name(name_lower: &str) -> String {
     }
 }
 
-/// RW-06 thresholds over one `FileActivity` summary.
+/// Triage 2026-10-22 item 2: files of a `FileActivity` summary that existed
+/// before the actor's activity. The aggregator counts files by their
+/// original path (a rename is keyed on the old name). Since 1.1.6 it also
+/// reports `self_created`: touched files this process created itself, even
+/// when the create is older than the window (a compiler writing `foo.tmp`
+/// and renaming it to `foo.rlib` 15 s later), and `new_files` counts a file
+/// only when its first operation in the window is a create of a file the
+/// process did not know before (delete-then-recreate of a document is a
+/// rewrite, not a new file). Older agents send `self_created = 0` and count
+/// every CreateNewFile in `new_files`, so the larger of the two bounds the
+/// self-made files for both. Ransomware rewrites or renames documents that
+/// were there before, or writes an encrypted copy and deletes the original
+/// (the originals remain).
+pub(crate) fn preexisting_files(fa: &FileActivity) -> u32 {
+    fa.files_touched
+        .saturating_sub(fa.new_files.max(fa.self_created))
+}
+
+/// RW-06 thresholds over one `FileActivity` summary, counted over the
+/// pre-existing files only ([`preexisting_files`]): extension changes and
+/// overwrites of files the process created in the window do not count.
 fn rw06_triggers(fa: &FileActivity, halved: bool) -> bool {
     let d = if halved { 2 } else { 1 };
-    let touched = fa.files_touched as u64 + (fa.net_paths.min(fa.files_touched)) as u64;
-    let overwrites = fa.overwrites as u64;
+    let pre = preexisting_files(fa);
+    let touched = pre as u64 + (fa.net_paths.min(pre)) as u64;
+    let overwrites = fa.overwrites.min(pre) as u64;
+    let ext = fa.ext_changes.min(pre) as u64;
     touched >= RW06_TOUCHED / d
         && fa.dirs as u64 >= (RW06_DIRS / d).max(2)
-        && (fa.ext_changes as u64 >= RW06_EXT / d
+        && (ext >= RW06_EXT / d
             || (overwrites >= RW06_OVERWRITES / d
-                && overwrites * 100 >= RW06_OVERWRITE_PCT * fa.files_touched as u64))
+                && overwrites * 100 >= RW06_OVERWRITE_PCT * pre as u64))
 }
 
 impl Family for Ransomware {
@@ -1585,11 +1692,11 @@ pub(crate) fn catalog() -> Vec<RuleMeta> {
             &[CISA_MEDUSA, CISA_AKIRA, CISA_PLAY],
             &["Patch tools and installers stopping database or backup services", "Developer scripts restarting local SQL instances", "MDM / RMM maintenance jobs", "Process managers used by administrators"]),
         meta(RW06, "Mass file encryption behaviour",
-            "The ransomware file sensor saw one process touch at least 30 user-data files (network paths count double) in at least 3 folders within its window, with at least 20 changes to unknown extensions, or at least 50 overwrites making up 80% or more of the files touched. Thresholds are halved for two hours after RW-12.",
+            "The ransomware file sensor saw one process touch at least 30 pre-existing user-data files (network paths count double) in at least 3 folders within its window, with at least 20 changes to unknown extensions, or at least 50 overwrites making up 80% or more of those files. Files the same process created in the window (new_files) are not pre-existing and never count: a compiler renaming its own temporary files is not encryption. Thresholds are halved for two hours after RW-12.",
             R, Critical, &["T1486"], true,
             "Kill the process lineage (tree), quarantine user-writable images and isolate the host when network paths were touched; validly signed sync, backup and archiver clients (OneDrive, Dropbox, Google Drive, 7-Zip, WinRAR, Veeam, Acronis…) and Explorer alert only. User mode cannot guarantee that no file is encrypted first",
             &[SIGMA_EXT, DEFEAT, SPLUNK_SPEED, S1_INTERMITTENT],
-            &["First sync or restore of OneDrive / Dropbox / Google Drive", "Bulk photo or media conversion to an uncommon format", "File encryption tools (AxCrypt, AESCrypt)", "Large git checkouts or build outputs inside user folders"]),
+            &["First sync or restore of OneDrive / Dropbox / Google Drive", "Bulk photo or media conversion to an uncommon format", "File encryption tools (AxCrypt, AESCrypt)", "Large git checkouts or build outputs inside user folders", "Not raised for (owner PC 2026-10-22): compilers renaming or rewriting files they created in the same window (rustc writing .rlib / .rmeta via temporary files: 101 alerts). A build step that renames files it created more than about 10 s earlier can still fire until the sensor reports self-created files across windows"]),
         meta(RW07, "Ransomware canary tampered",
             "A process other than the Kestrel agent overwrote, renamed or deleted one of the hidden decoy documents Kestrel planted in the Documents and Pictures folders for ransomware detection.",
             R, Critical, &["T1486", "T1485"], true,
@@ -1597,11 +1704,11 @@ pub(crate) fn catalog() -> Vec<RuleMeta> {
             &[ELASTIC_HONEYPOT, "https://arxiv.org/pdf/2508.00293"],
             &["The user deleting or moving the decoy file in Explorer (alert only; the decoys are hidden so this is rare unless hidden files are shown)", "OneDrive conflict renames", "Backup restore jobs and disk-cleanup tools"]),
         meta(RW08, "Ransom-note fan-out",
-            "One process created the same file name in at least 5 folders, with a note extension (txt, hta, html, htm, rtf, url) and a ransom-note-like name (read me, restore, recover, decrypt, how to, help, instruction, !!!, _info); or the same name in at least 20 folders regardless of name.",
+            "One process created the same file name in at least 5 folders, with a note extension (txt, hta, html, htm, rtf, url) and a ransom-note-like name (read me, restore, recover, decrypt, how to, help, instruction, unlock, ransom, files, !!!, _info); or the same name in at least 20 folders when it still looks like a note: it has an extension, is not a build artefact (.a, .o, .obj, .rlib, .rmeta, .d, .pdb, .lib, .exp and similar; .tmp only with a note-like name) and has a note extension (the list above plus md, or a bmp / jpg / png image with a note-like name) or a note-like name.",
             R, Critical, &["T1486", "T1491.001"], true,
             "Note-like name, or the same process also tripped RW-06/07: kill the lineage (tree) and quarantine user-writable images; name-agnostic fallback: alert only",
             &["https://www.elastic.co/guide/en/security/current/potential-ransomware-note-file-dropped-via-smb.html", CISA_AKIRA],
-            &["Installers dropping readme.txt into many folders", "Sync clients restoring many folders", "Scripts seeding project templates"]),
+            &["Installers dropping readme.txt into many folders", "Sync clients restoring many folders", "Scripts seeding project templates", "Not raised for (owner PC 2026-10-22): names without an extension (cargo's OUT_DIR folder \"out\" in 38 folders: the sensor cannot tell a new folder from a new file) and build artefacts (rustc's \"tmp.a\" in 24 folders)"]),
         meta(RW12, "Ransomware kill-chain correlation",
             "Two or more distinct ransomware preparation rules (RW-01 to RW-05) fired on this host within 60 minutes, in the same lineage or not (affiliates run tools from separate shells and PsExec).",
             R, Critical, &["T1486", "T1490"], true,

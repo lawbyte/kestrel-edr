@@ -37,7 +37,9 @@ import {
   PRIYA,
   USERS,
   buildDevices,
+  capabilitiesFor,
   computeStatus,
+  DOMAIN,
   ruleModes,
 } from './fleet'
 import { buildIncidents, type Ctx } from './scenarios'
@@ -60,6 +62,8 @@ export class MockDb {
   groups: Group[] = structuredClone(GROUPS)
   policies: Policy[] = structuredClone(POLICIES)
   devices: Device[] = buildDevices()
+  /** Devices uninstalled remotely: hidden from `GET /devices` unless `include_removed=true`. */
+  removedDevices: Device[] = []
   incidents: IncidentDetail[] = []
   alerts: AlertDetail[] = []
   actions: ResponseActionRow[] = []
@@ -94,6 +98,7 @@ export class MockDb {
       mkt.pause = pause
       mkt.last_seen = NOW - 20_000
     }
+    this.seedRemovals()
     for (const r of [...BUILTIN_RULES, ...FAMILY_RULES]) this.rules.set(r.id, r)
     for (const r of [...CUSTOM_RULES, ...PACK_RULES]) {
       const { source, enabled_custom, ...meta } = r
@@ -198,6 +203,7 @@ export class MockDb {
         this.log(null, 'device.protection_on', d.hostname, { hostname: d.hostname, mode: p.mode, since_ms: p.since_ms, until_ms: p.until_ms, by_user: '', reason: 'expired' })
       }
       d.pause = d.health.pause ?? null
+      d.capabilities = capabilitiesFor(d.agent_version)
       d.status = computeStatus(d)
       d.open_incidents = this.incidents.filter((i) => i.device_id === d.id && (i.status === 'open' || i.status === 'in_progress')).length
     }
@@ -357,6 +363,44 @@ export class MockDb {
     ]
   }
 
+  /**
+   * Remote removal ("Remove device"): MKT-DT-001 is offline with a removal
+   * queued two days ago; MKT-LT-014 was uninstalled remotely 12 days ago and
+   * is hidden from the list by default. Fixed ids, no rng draws.
+   */
+  private seedRemovals() {
+    const pending = this.devices.find((d) => d.hostname === 'MKT-DT-001')
+    if (pending) {
+      pending.last_seen = Math.min(pending.last_seen, NOW - 2 * DAY - 3 * HOUR)
+      const action_id = '5c0e7a51-3d2b-4f7e-9a61-0b9d4e2c7a10'
+      pending.removal = { state: 'pending', action_id, requested_at: NOW - 2 * DAY, requested_by: MARCUS.name, purge_data: false, started_at: null, removed_at: null, error: null }
+      this.actions.push({ id: action_id, device_id: pending.id, hostname: pending.hostname, incident_id: null, action: { type: 'uninstall_agent', purge_data: false }, status: 'pending', requested_by: MARCUS, comment: 'Desktop replaced, ticket IT-4471', created_at: NOW - 2 * DAY, completed_at: null, result_detail: '' })
+    }
+    const tpl = this.devices.find((d) => d.hostname === 'MKT-LT-005')
+    if (tpl) {
+      const gone: Device = structuredClone(tpl)
+      const removedAt = NOW - 12 * DAY + 40 * MIN
+      const action_id = '9b4d2f63-71ae-4c08-8e5b-3f6a1c0d2e94'
+      Object.assign(gone, {
+        id: '2f7c9e14-8a3b-4d61-b0c5-6e1d9a7f3b28',
+        hostname: 'MKT-LT-014',
+        logged_on_user: `${DOMAIN}\\rina.hartono`,
+        ip_addresses: ['10.24.18.77'],
+        agent_version: '1.0.1',
+        last_seen: removedAt - 12 * MIN,
+        first_seen: NOW - 190 * DAY,
+        status: 'offline',
+        open_incidents: 0,
+        pause: null,
+        capabilities: capabilitiesFor('1.0.1'),
+        removal: { state: 'removed', action_id, requested_at: NOW - 12 * DAY, requested_by: PRIYA.name, purge_data: true, started_at: NOW - 12 * DAY + 25 * MIN, removed_at: removedAt, error: null },
+      } satisfies Partial<Device>)
+      gone.health = { ...gone.health, pause: null, logged_on_user: gone.logged_on_user, ip_addresses: gone.ip_addresses }
+      this.removedDevices.push(gone)
+      this.actions.push({ id: action_id, device_id: gone.id, hostname: gone.hostname, incident_id: null, action: { type: 'uninstall_agent', purge_data: true }, status: 'succeeded', requested_by: PRIYA, comment: 'Laptop returned, user left the company', created_at: NOW - 12 * DAY, completed_at: NOW - 12 * DAY + 25 * MIN, result_detail: 'Uninstall started; device disconnected and was marked removed' })
+    }
+  }
+
   private seedAudit() {
     const evs: [number, User | null, string, string, Record<string, unknown>][] = [
       [NOW - 60 * DAY, PRIYA, 'auth.setup', 'org', { org_name: ORG }],
@@ -382,8 +426,16 @@ export class MockDb {
         [p.since_ms - 3 * MIN, null, 'device.protection_off_denied', mkt.hostname, { hostname: mkt.hostname, by_user: p.by_user, failures: 1, locked_until_ms: null }],
         [p.since_ms, null, 'device.protection_off', mkt.hostname, { hostname: mkt.hostname, mode: p.mode, since_ms: p.since_ms, until_ms: p.until_ms, by_user: p.by_user }],
       )
-      evs.sort((x, y) => x[0] - y[0])
     }
+    for (const d of [...this.devices, ...this.removedDevices]) {
+      const r = d.removal
+      if (!r) continue
+      const by = USERS.find((u) => u.name === r.requested_by) ?? null
+      evs.push([r.requested_at, by, 'device.remove.requested', d.hostname, { hostname: d.hostname, purge_data: r.purge_data, action_id: r.action_id }])
+      if (r.started_at) evs.push([r.started_at, null, 'device.remove.started', d.hostname, { hostname: d.hostname, action_id: r.action_id }])
+      if (r.removed_at) evs.push([r.removed_at, null, 'device.remove.completed', d.hostname, { hostname: d.hostname, action_id: r.action_id }])
+    }
+    evs.sort((x, y) => x[0] - y[0])
     for (const [ts, a, act, tgt, det] of evs) this.log(a, act, tgt, det, ts)
   }
 

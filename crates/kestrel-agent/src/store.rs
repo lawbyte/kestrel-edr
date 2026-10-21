@@ -106,6 +106,9 @@ pub const KV_OUTBOX_EPOCH: &str = "outbox_epoch";
 pub const KV_LAST_CONNECTED: &str = "last_connected";
 /// Review requests per user (tray rate limit), JSON map.
 pub const KV_TRAY_LIMITS: &str = "tray_limits";
+/// ST-12 first-seen memory of the detection engine (JSON, see
+/// `kestrel_detect::Engine::st12_seen_export`).
+pub const KV_ST12_SEEN: &str = "st12_seen";
 
 impl Store {
     pub fn open(state_dir: &Path) -> Result<Store> {
@@ -227,6 +230,15 @@ impl Store {
         Ok(self
             .db()
             .execute("DELETE FROM outbox WHERE seq <= ?1", params![seq as i64])?)
+    }
+
+    /// Is outbox row `seq` still waiting for the server's ack?
+    pub fn is_pending(&self, seq: u64) -> Result<bool> {
+        Ok(self.db().query_row(
+            "SELECT COUNT(*) FROM outbox WHERE seq = ?1",
+            params![seq as i64],
+            |r| r.get::<_, i64>(0),
+        )? > 0)
     }
 
     pub fn depth(&self) -> Result<u64> {

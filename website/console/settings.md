@@ -36,6 +36,7 @@ Other privileges, held by `admin` through `*`:
 | `updates.write` | Register, promote and halt agent releases; set a group's update ring |
 | `response.persistence` | Remove or restore persistence entries as SYSTEM on endpoints |
 | `remote.desktop`, `remote.files` | Remote desktop and remote file manager, from an interactive console session only |
+| `devices.remove` | [Remove device](./devices#remove-device): uninstall the agent remotely, from an interactive console session only (API tokens are refused) |
 
 ## API tokens
 

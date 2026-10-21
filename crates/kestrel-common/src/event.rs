@@ -350,11 +350,24 @@ pub struct FileActivity {
     /// not a well-known document, archive or temp extension.
     #[serde(default)]
     pub ext_changes: u32,
-    /// Existing files opened for overwrite / supersede.
+    /// Existing files opened for overwrite / supersede, or (since 1.1.6)
+    /// deleted and then re-created by the same process in the window.
     #[serde(default)]
     pub overwrites: u32,
+    /// Files whose first operation in the window is a create by this
+    /// process. Since 1.1.6 a file that existed before (deleted and then
+    /// re-created, or first opened otherwise) is not new; directories are
+    /// never counted (older agents counted CreateNewFile in any order,
+    /// directories included).
     #[serde(default)]
     pub new_files: u32,
+    /// Distinct touched files that this process created itself, including
+    /// creates older than the window that the sensor still remembers
+    /// (bounded per process). A file renamed after its creation keeps the
+    /// mark. 0 from agents before 1.1.6. Pre-existing files touched are at
+    /// most `files_touched - max(new_files, self_created)`.
+    #[serde(default)]
+    pub self_created: u32,
     #[serde(default)]
     pub deletes: u32,
     /// Touched files on network paths (UNC or mapped drives).

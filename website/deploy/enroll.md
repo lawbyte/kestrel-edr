@@ -106,7 +106,17 @@ Add-MpPreference -ExclusionPath 'C:\Program Files\Kestrel'
 
 Every device gets its own **uninstall token**, issued by the server at enrollment. The agent stores only an Argon2id hash of it. Find it on the device page under **Uninstall token > Reveal** (each reveal is written to the audit log). **Rotate** sends a new token to the agent; the old token keeps working until the agent confirms.
 
-On the PC:
+There are three ways to uninstall, in order of preference:
+
+1. **Remove device in the console** (remote, nobody has to handle the token).
+2. **The Uninstall Kestrel EDR tool** on the PC (needs the token).
+3. **The command line** with `msiexec` (needs the token; for scripts and deployment tools).
+
+### 1. Remove device from the console
+
+On the device page, click **Remove device** in the danger zone, type the hostname to confirm and choose whether to also delete quarantined files and logs. The server sends the uninstall token to the agent with the command, so nobody has to copy it. An offline PC uninstalls the next time it connects; the request stays queued for 90 days and can be cancelled until the agent receives it. Afterwards the device leaves the device list and its certificates are revoked. Admins only, with an MFA re-check when the admin has two-factor authentication. Needs a recent agent; for older agents the button is disabled. See [Remove device](../console/devices#remove-device).
+
+### 2. The uninstall tool on the PC
 
 1. Open the Start menu and choose **Kestrel EDR > Uninstall Kestrel EDR**. Accept the Windows administrator prompt. IT staff can also open it from the tray app: **Help & privacy > Uninstall Kestrel...**.
 2. Paste the token and click **Uninstall**.
@@ -118,11 +128,24 @@ On the PC:
 
 Removing Kestrel from **Settings > Apps** (or Programs and Features) stops with a message that points to the Start menu tool, because Windows has no way to ask for the token there.
 
-For scripts and deployment tools, use the command line:
+### 3. Command line
+
+For scripts and deployment tools, use `msiexec` with the MSI file or the product code:
 
 ```powershell
 msiexec /x KestrelAgent.msi /qn UNINSTALL_TOKEN=<token>
+msiexec /x <product code> /qn UNINSTALL_TOKEN=<token>
 ```
+
+The product code is the key name of the **Kestrel EDR Agent** entry under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall`:
+
+```powershell
+Get-ChildItem HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall |
+  Where-Object { $_.GetValue('DisplayName') -eq 'Kestrel EDR Agent' } |
+  Select-Object -ExpandProperty PSChildName
+```
+
+After an uninstall with the tool or the command line, use **Decommission device** on the device page to take the device off the device list.
 
 A wrong or missing token aborts the uninstall. Removing only part of the product is refused. A successful uninstall removes the service, the ETW sessions, Kestrel's WFP filters (so an isolated host does not stay isolated) and the files, and retires the device identity.
 

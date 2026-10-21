@@ -338,7 +338,9 @@ async fn full_agent_session() {
         .recv_until(|p| matches!(p, ServerPayload::Command { .. }))
         .await;
     let (command_id, action) = match cmd {
-        ServerPayload::Command { command_id, action } => (command_id, action),
+        ServerPayload::Command {
+            command_id, action, ..
+        } => (command_id, action),
         _ => unreachable!(),
     };
     assert_eq!(

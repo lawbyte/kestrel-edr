@@ -1,0 +1,3 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 0, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "LAWBYTE\\azka", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 52000, "guid": "fake-wsl", "type": "process_start", "ppid": 4000, "image": "C:\\Users\\azka\\AppData\\Local\\Temp\\wslservice.exe", "cmdline": "wslservice.exe", "user": "LAWBYTE\\azka", "integrity": "medium", "signed": "unsigned", "parent_guid": "explorer", "sha256": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"}
+{"ts": 1760000000100, "pid": 52000, "guid": "fake-wsl", "type": "dns_query", "qname": "discord.com", "answers": ["162.159.136.232"]}

@@ -149,8 +149,10 @@ pub fn new_uninstall_token() -> String {
 
 /// Validate the presented certificate; returns its `not_after`.
 async fn cert_valid(state: &AppState, device_id: Uuid, serial: &str) -> Result<i64, Status> {
-    let row: Option<(Option<i64>, i64, Option<i64>)> = sqlx::query_as(
-        "SELECT c.revoked_at, c.not_after, d.decommissioned_at FROM agent_certs c JOIN devices d ON d.id = c.device_id \
+    // revoked_at, not_after, decommissioned_at, removed_at
+    type CertRow = (Option<i64>, i64, Option<i64>, Option<i64>);
+    let row: Option<CertRow> = sqlx::query_as(
+        "SELECT c.revoked_at, c.not_after, d.decommissioned_at, d.removed_at FROM agent_certs c JOIN devices d ON d.id = c.device_id \
          WHERE c.serial = $1 AND c.device_id = $2",
     )
     .bind(serial)
@@ -158,6 +160,16 @@ async fn cert_valid(state: &AppState, device_id: Uuid, serial: &str) -> Result<i
     .fetch_optional(&state.db)
     .await
     .map_err(|_| Status::unavailable("database unavailable"))?;
+    // A device removed remotely whose certificate is not revoked yet (grace
+    // period): Kestrel is evidently still installed; let it in so the
+    // removal is undone (`removal::reappeared`) instead of locking it out.
+    let row = row.map(|(rev, na, decom, removed)| {
+        if rev.is_none() && crate::removal::may_reappear(removed, decom) {
+            (rev, na, None)
+        } else {
+            (rev, na, decom)
+        }
+    });
     match row {
         None => Err(Status::permission_denied("unknown client certificate")),
         Some((Some(_), _, _)) => Err(Status::permission_denied("client certificate revoked")),
@@ -484,6 +496,10 @@ impl AgentService for AgentSvc {
         {
             tracing::warn!(%device_id, error = %e, "recording the agent's remote-access ceiling failed");
         }
+        if let Err(e) = crate::removal::reappeared(&state, device_id).await {
+            tracing::warn!(%device_id, error = %e, "undoing a remote removal failed");
+            return Err(Status::unavailable("database unavailable"));
+        }
         let mut initial = ingest::hello(&state, device_id, &hello, peer_ip)
             .await
             .map_err(|e| Status::internal(format!("hello: {e}")))?;
@@ -507,6 +523,7 @@ impl AgentService for AgentSvc {
                 .map(|c| c.chars().take(64).collect())
                 .collect(),
             remote_ceiling: hello.remote_ceiling.clone(),
+            agent_version: hello.agent_version.chars().take(64).collect(),
         });
         if let Some(old) = state.agents.register(device_id, conn.clone()) {
             old.kill.notify_one();

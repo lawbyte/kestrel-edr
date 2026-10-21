@@ -77,15 +77,36 @@ pub async fn fast_jobs(st: &AppState) -> anyhow::Result<()> {
         }
     }
 
-    let expired: Vec<(Uuid,)> = sqlx::query_as(
-        "UPDATE response_actions SET status = 'expired', completed_at = $1, result_detail = 'not delivered within 7 days' \
-         WHERE status IN ('pending','sent') AND completed_at IS NULL AND expires_at < $1 RETURNING id",
+    let expired: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
+        "UPDATE response_actions SET status = 'expired', completed_at = $1, \
+         result_detail = CASE WHEN action_type = 'uninstall_agent' THEN 'not delivered within 90 days (the PC did not connect)' ELSE 'not delivered within 7 days' END \
+         WHERE status IN ('pending','sent') AND completed_at IS NULL AND expires_at < $1 RETURNING id, device_id, action_type",
     )
     .bind(now)
     .fetch_all(&st.db)
     .await?;
-    for (id,) in expired {
+    for (id, device_id, kind) in expired {
         st.publish("action", id, "updated");
+        if kind == "uninstall_agent" {
+            crate::audit::log(
+                &st.db,
+                &crate::audit::Actor::system(),
+                "device.remove.expired",
+                device_id.to_string(),
+                serde_json::json!({"action_id": id}),
+            )
+            .await;
+            st.publish("device", device_id, "updated");
+        }
+    }
+    // "Remove device": uninstall started and the PC stayed away → removed.
+    let removed = crate::removal::finalize_silent(st).await?;
+    if removed > 0 {
+        tracing::info!(removed, "devices removed after their remote uninstall");
+    }
+    let revoked = crate::removal::revoke_removed(st).await?;
+    if revoked > 0 {
+        tracing::info!(revoked, "certificates of removed devices revoked");
     }
     Ok(())
 }
@@ -136,7 +157,7 @@ pub async fn retention(st: &AppState) -> anyhow::Result<()> {
     .execute(&st.db)
     .await?
     .rows_affected();
-    sqlx::query("DELETE FROM response_actions WHERE created_at < $1 AND status IN ('succeeded','failed','expired')").bind(alert_cutoff).execute(&st.db).await?;
+    sqlx::query("DELETE FROM response_actions WHERE created_at < $1 AND status IN ('succeeded','failed','expired','cancelled')").bind(alert_cutoff).execute(&st.db).await?;
     let audit_cutoff = now - s.retention_days.audit as i64 * 86_400_000;
     let au = sqlx::query("DELETE FROM audit_log WHERE ts < $1")
         .bind(audit_cutoff)

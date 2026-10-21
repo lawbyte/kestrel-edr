@@ -29,6 +29,9 @@ pub const ALL_PRIVILEGES: &[&str] = &[
     // from an interactive console session (never API tokens).
     "remote.desktop",
     "remote.files",
+    // "Remove device" (remote uninstall): admin only (via `*`), interactive
+    // console session only.
+    "devices.remove",
 ];
 
 pub const DEFAULT_POLICY_ID: &str = "default";

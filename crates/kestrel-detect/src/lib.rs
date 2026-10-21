@@ -209,6 +209,20 @@ impl Engine {
         let outs = self.inner.enrich_process(guid, facts, now);
         self.inner.gate(outs)
     }
+
+    /// ST-12 first-seen memory (one alert per unsigned user-path binary per
+    /// device per 7 days), as JSON, for the agent to persist across
+    /// restarts. Optional: without it the memory lives as long as the
+    /// engine, like all other engine state.
+    pub fn st12_seen_export(&self, now: TimestampMs) -> String {
+        self.inner.st12_seen_export(now)
+    }
+
+    /// Restore [`Engine::st12_seen_export`] output (malformed input ignored;
+    /// rows expired at `now` or stamped more than a day after it dropped).
+    pub fn st12_seen_import(&mut self, json: &str, now: TimestampMs) {
+        self.inner.st12_seen_import(json, now)
+    }
 }
 
 mod engine;

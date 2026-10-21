@@ -38,6 +38,10 @@ pub struct Tuning {
     pub housekeeping: Duration,
     pub hardening_recheck: Duration,
     pub action_timeout: Duration,
+    /// Remote removal: how long to wait for the server to ack the
+    /// "uninstall started" outcome; without the ack the removal is not
+    /// started (reported as failed).
+    pub removal_ack_wait: Duration,
 }
 
 impl Default for Tuning {
@@ -52,6 +56,7 @@ impl Default for Tuning {
             housekeeping: Duration::from_secs(60),
             hardening_recheck: Duration::from_secs(15 * 60),
             action_timeout: Duration::from_secs(30),
+            removal_ack_wait: Duration::from_secs(5 * 60),
         }
     }
 }
@@ -273,6 +278,17 @@ impl Core {
             };
         }
         let action = match action {
+            // Remote removal needs the token the server attaches to the
+            // command at delivery: only `run_command_with` can run it.
+            ResponseAction::UninstallAgent { .. } => {
+                return ActionOutcome {
+                    action: action.clone(),
+                    ok: false,
+                    detail: "refused: uninstall_agent only runs as a server command with its uninstall token".into(),
+                    ts: now,
+                    artifact: Some(kestrel_common::UNINSTALL_FAILED.into()),
+                };
+            }
             // Turning protection back on is handled here, not by the platform.
             ResponseAction::ResumeProtection => {
                 if origin == ActionOrigin::Engine {
@@ -401,6 +417,18 @@ impl Core {
 
     /// Run a server command once per `command_id` and queue its result.
     pub async fn run_command(self: &Arc<Self>, command_id: Uuid, action: ResponseAction) {
+        self.run_command_with(command_id, action, None).await
+    }
+
+    /// [`Core::run_command`] with the command's delivery-time secret
+    /// (`ServerPayload::Command.secret`, today only the uninstall token of
+    /// `UninstallAgent`). Only the server stream calls this.
+    pub async fn run_command_with(
+        self: &Arc<Self>,
+        command_id: Uuid,
+        action: ResponseAction,
+        secret: Option<kestrel_common::wire::CommandSecret>,
+    ) {
         if let Ok(Some(prev)) = self.store.command_outcome(command_id) {
             tracing::info!(%command_id, "duplicate command; re-sending stored result");
             self.enqueue(&AgentPayload::ActionResult {
@@ -414,6 +442,13 @@ impl Core {
             return;
         }
         tracing::info!(%command_id, action = action.name(), "executing server command");
+        if let ResponseAction::UninstallAgent { purge_data } = action {
+            // Records and reports its own outcome(s).
+            crate::remote_uninstall::run(self, command_id, purge_data, secret).await;
+            lock(&self.inflight_cmds).remove(&command_id);
+            return;
+        }
+        drop(secret);
         let outcome = self
             .execute_action_as(&action, ActionOrigin::ServerCommand)
             .await;
@@ -628,6 +663,8 @@ impl Core {
             etw_ok: stats.etw_ok,
             etw_events_lost: stats.events_lost,
             etw_buffers_lost: stats.buffers_lost,
+            etw_kernel_events_lost: Some(stats.kernel_events_lost),
+            sensor_internal_dropped: Some(stats.internal_dropped),
             events_per_min: self.stats.events_per_min.load(Ordering::Relaxed),
             outbox_depth: self.outbox_depth(),
             sysmon_present: stats.sysmon_present,
@@ -951,6 +988,10 @@ pub async fn start(
             c.apply_hardening_auto().await;
         });
     }
+
+    // A remote removal that began before this start (installer rollback):
+    // report its result.
+    tokio::spawn(crate::remote_uninstall::resume_after_restart(core.clone()));
 
     let mut tasks = vec![];
     tasks.push(tokio::spawn(crate::transport::run(core.clone())));

@@ -19,11 +19,15 @@ export const api = {
   dashboard: () => http.get<T.Dashboard>('/dashboard'),
 
   // devices
-  devices: (q: { q?: string; status?: string; group_id?: string; limit?: number; cursor?: string } = {}) =>
+  devices: (q: { q?: string; status?: string; group_id?: string; include_removed?: boolean; limit?: number; cursor?: string } = {}) =>
     http.get<T.Page<T.Device>>('/devices', { limit: 500, ...q }),
   device: (id: string) => http.get<T.DeviceDetail>(`/devices/${id}`),
   patchDevice: (id: string, b: { group_id?: string; tags?: string[] }) => http.patch<T.Device>(`/devices/${id}`, b),
   deleteDevice: (id: string) => http.del(`/devices/${id}`),
+  /** Remote uninstall (admins, interactive session; 403 `reauth_required` asks for an MFA step-up). */
+  removeDevice: (id: string, b: T.RemoveDeviceRequest) => http.post<T.RemoveDeviceResponse>(`/devices/${id}/remove`, b),
+  /** Cancel a removal the agent has not received yet. */
+  cancelDeviceRemoval: (id: string) => http.del<{ device: T.Device }>(`/devices/${id}/remove`),
   deviceEvents: (id: string, q: { kinds?: string[]; q?: string; from?: number; to?: number; limit?: number } = {}) =>
     http.get<{ items: T.DeviceEvent[] }>(`/devices/${id}/events`, { limit: 200, ...q }),
   deviceProcesses: (id: string, at?: number) => http.get<{ items: T.ProcessInfo[] }>(`/devices/${id}/processes`, { at }),

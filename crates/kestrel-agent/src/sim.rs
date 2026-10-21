@@ -105,6 +105,19 @@ pub struct SimPlatform {
     blocks: Mutex<Vec<SimBlock>>,
     /// Quarantine id → original path (restore lifts that image's blocks).
     quarantined: Mutex<BTreeMap<String, String>>,
+    /// Remote removals started (`purge_data` of each); the token is never kept.
+    uninstalls: Mutex<Vec<bool>>,
+    /// Exit code the simulated uninstall helper reports (`None` = it keeps
+    /// running, like a real removal that stops the agent first).
+    uninstall_exit: Arc<Mutex<Option<i32>>>,
+}
+
+struct SimUninstallHelper(Arc<Mutex<Option<i32>>>);
+
+impl kestrel_platform::UninstallHelper for SimUninstallHelper {
+    fn try_exit_code(&mut self) -> Option<i32> {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -128,7 +141,25 @@ impl SimPlatform {
             qid: AtomicU64::new(0),
             blocks: Mutex::default(),
             quarantined: Mutex::default(),
+            uninstalls: Mutex::default(),
+            uninstall_exit: Arc::default(),
         }
+    }
+
+    /// Remote removals started so far (`purge_data` of each).
+    pub fn uninstalls(&self) -> Vec<bool> {
+        self.uninstalls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Make the simulated uninstall helper exit with `code` (tests).
+    pub fn set_uninstall_exit(&self, code: Option<i32>) {
+        *self
+            .uninstall_exit
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = code;
     }
 
     /// How the simulated employee answers consent prompts.
@@ -439,6 +470,8 @@ impl SensorHandle for SimSensors {
         SensorStats {
             etw_ok: true,
             events_lost: self.shared.lost.load(Ordering::Relaxed),
+            kernel_events_lost: 0,
+            internal_dropped: self.shared.lost.load(Ordering::Relaxed),
             buffers_lost: 0,
             events_total: self.shared.sent.load(Ordering::Relaxed),
             sysmon_present: false,
@@ -682,6 +715,29 @@ impl Platform for SimPlatform {
             let _ = std::fs::write(&reg_path, b);
         }
         ok
+    }
+
+    fn supports_remote_uninstall(&self) -> bool {
+        true
+    }
+
+    fn start_uninstall_helper(
+        &self,
+        token: &str,
+        purge_data: bool,
+    ) -> Result<Box<dyn kestrel_platform::UninstallHelper>, String> {
+        if token.trim().is_empty() {
+            return Err("no token".into());
+        }
+        tracing::warn!(
+            purge_data,
+            "SIMULATED remote removal: a real agent would now uninstall itself"
+        );
+        self.uninstalls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(purge_data);
+        Ok(Box::new(SimUninstallHelper(self.uninstall_exit.clone())))
     }
 
     fn remote_fs(&self) -> Option<Arc<dyn kestrel_platform::RemoteFs>> {

@@ -22,6 +22,7 @@ pub mod pki;
 pub mod platform_win;
 pub mod privacy;
 pub mod remote_fs;
+pub mod remote_uninstall;
 pub mod sim;
 pub mod sim_remote;
 pub mod store;

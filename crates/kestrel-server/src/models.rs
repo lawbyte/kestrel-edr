@@ -105,7 +105,9 @@ pub(crate) use joined_user;
 
 // ---------------------------------------------------------------- devices
 
-pub const DEVICE_SELECT: &str = "SELECT d.id, d.hostname, d.os_name, d.os_build, d.arch, d.domain, d.agent_version, \
+macro_rules! device_select_base {
+    () => {
+        "SELECT d.id, d.hostname, d.os_name, d.os_build, d.arch, d.domain, d.agent_version, \
     device_status(d.health, d.last_seen, d.etw_lost_increased_at) AS status, \
     d.last_seen, d.first_seen, d.ip_addresses, d.logged_on_user, d.group_id, g.name AS group_name, \
     p.id AS policy_id, p.name AS policy_name, d.policy_version_applied, d.tags, d.health, \
@@ -113,11 +115,29 @@ pub const DEVICE_SELECT: &str = "SELECT d.id, d.hostname, d.os_name, d.os_build,
     (SELECT c.not_after FROM agent_certs c WHERE c.device_id = d.id AND c.revoked_at IS NULL \
        ORDER BY c.last_used_at DESC NULLS LAST, c.issued_at DESC LIMIT 1) AS cert_expires_at, \
     d.possible_duplicate_ids, (d.uninstall_token_enc IS NOT NULL) AS uninstall_token_set, \
-    (d.uninstall_token_pending_enc IS NOT NULL) AS uninstall_token_pending \
+    (d.uninstall_token_pending_enc IS NOT NULL) AS uninstall_token_pending, \
+    d.capabilities, d.removal_action_id, ra.status AS removal_status, ra.created_at AS removal_requested_at, \
+    COALESCE(NULLIF(ru.name, ''), ru.email) AS removal_requested_by, \
+    COALESCE((ra.action->>'purge_data')::boolean, false) AS removal_purge, ra.delivered_at AS removal_started_at, \
+    ra.result_detail AS removal_detail, d.removed_at, COALESCE(NULLIF(rb.name, ''), rb.email) AS removed_by_name \
     FROM devices d \
     LEFT JOIN groups g ON g.id = d.group_id \
     LEFT JOIN policies p ON p.id = COALESCE(g.policy_id, (SELECT policy_id FROM groups WHERE is_default LIMIT 1)) \
-    WHERE d.decommissioned_at IS NULL";
+    LEFT JOIN response_actions ra ON ra.id = d.removal_action_id \
+    LEFT JOIN users ru ON ru.id = ra.requested_by \
+    LEFT JOIN users rb ON rb.id = d.removed_by"
+    };
+}
+
+/// Devices in the fleet (not decommissioned, not removed).
+pub const DEVICE_SELECT: &str =
+    concat!(device_select_base!(), " WHERE d.decommissioned_at IS NULL");
+/// Also devices removed remotely ("Show removed devices"; history kept).
+/// Plain decommissioned devices stay hidden.
+pub const DEVICE_SELECT_WITH_REMOVED: &str = concat!(
+    device_select_base!(),
+    " WHERE (d.decommissioned_at IS NULL OR d.removed_at IS NOT NULL)"
+);
 
 #[derive(sqlx::FromRow, Clone, Debug)]
 pub struct DeviceRow {
@@ -146,6 +166,17 @@ pub struct DeviceRow {
     pub uninstall_token_set: bool,
     /// A rotated token was not yet confirmed by the agent.
     pub uninstall_token_pending: bool,
+    /// `Hello.capabilities` of the last connect.
+    pub capabilities: Vec<String>,
+    pub removal_action_id: Option<Uuid>,
+    pub removal_status: Option<String>,
+    pub removal_requested_at: Option<i64>,
+    pub removal_requested_by: Option<String>,
+    pub removal_purge: bool,
+    pub removal_started_at: Option<i64>,
+    pub removal_detail: Option<String>,
+    pub removed_at: Option<i64>,
+    pub removed_by_name: Option<String>,
 }
 
 impl DeviceRow {
@@ -183,6 +214,50 @@ impl DeviceRow {
                 .health
                 .get("pause")
                 .and_then(|p| serde_json::from_value::<kestrel_common::PauseState>(p.clone()).ok()),
+            "capabilities": self.capabilities,
+            "removal": self.removal_json(),
+        })
+    }
+
+    /// Remote-removal state ("Remove device"): `None` when no removal is
+    /// queued, running, failed or done. Never contains the uninstall token.
+    pub fn removal_state(&self) -> Option<&'static str> {
+        if self.removed_at.is_some() {
+            return Some("removed");
+        }
+        self.removal_action_id?;
+        match self.removal_status.as_deref()? {
+            "pending" | "sent" => Some("pending"),
+            "running" => Some("removing"),
+            "failed" => Some("failed"),
+            "expired" => Some("expired"),
+            "succeeded" => Some("removed"),
+            _ => None,
+        }
+    }
+
+    fn removal_json(&self) -> Value {
+        let Some(state) = self.removal_state() else {
+            return Value::Null;
+        };
+        let started = matches!(state, "removing" | "removed" | "failed");
+        json!({
+            "state": state,
+            "action_id": self.removal_action_id,
+            "requested_at": self.removal_requested_at,
+            "requested_by": if state == "removed" {
+                self.removed_by_name.clone().or_else(|| self.removal_requested_by.clone())
+            } else {
+                self.removal_requested_by.clone()
+            },
+            "purge_data": self.removal_purge,
+            "started_at": if started { self.removal_started_at } else { None },
+            "removed_at": self.removed_at,
+            "error": if matches!(state, "failed" | "expired") {
+                self.removal_detail.clone().filter(|d| !d.is_empty())
+            } else {
+                None
+            },
         })
     }
 }
@@ -371,6 +446,18 @@ pub async fn load_action(db: &sqlx::PgPool, id: Uuid) -> Result<ActionRow, sqlx:
 
 pub async fn load_incident(db: &sqlx::PgPool, id: Uuid) -> Result<IncidentRow, sqlx::Error> {
     sqlx::query_as::<_, IncidentRow>(&format!("{} WHERE i.id = $1", incident_select()))
+        .bind(id)
+        .fetch_one(db)
+        .await
+}
+
+/// Like [`load_device`], but also finds devices removed remotely (their
+/// page stays readable; every action on them is refused elsewhere).
+pub async fn load_device_with_removed(
+    db: &sqlx::PgPool,
+    id: Uuid,
+) -> Result<DeviceRow, sqlx::Error> {
+    sqlx::query_as::<_, DeviceRow>(&format!("{DEVICE_SELECT_WITH_REMOVED} AND d.id = $1"))
         .bind(id)
         .fetch_one(db)
         .await

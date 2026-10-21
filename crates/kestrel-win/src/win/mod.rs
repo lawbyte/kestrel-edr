@@ -26,5 +26,6 @@ pub(crate) mod statedir;
 pub(crate) mod translate;
 pub(crate) mod tray_server;
 pub(crate) mod triage;
+pub(crate) mod uninstall_helper;
 pub(crate) mod util;
 pub(crate) mod wfp;

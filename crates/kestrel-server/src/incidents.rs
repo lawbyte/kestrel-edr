@@ -122,6 +122,13 @@ pub fn describe_action(a: &ResponseAction) -> String {
         },
         ResponseAction::IsolateHost { .. } => "isolated the host from the network".into(),
         ResponseAction::ReleaseHost => "released host isolation".into(),
+        ResponseAction::UninstallAgent { purge_data } => {
+            if *purge_data {
+                "removed Kestrel from the PC (and its data)".into()
+            } else {
+                "removed Kestrel from the PC".into()
+            }
+        }
         ResponseAction::ApplyHardening => "re-applied the hardening pack".into(),
         ResponseAction::Scan { path } => match path {
             Some(path) => format!("scanned {}", p(path)),
@@ -597,6 +604,16 @@ pub fn describe_file_activity(f: &FileActivity) -> String {
     }
     if f.net_paths > 0 {
         out.push_str(&format!(", {} on network shares", f.net_paths));
+    }
+    // 1.1.6 agents: files the process had created itself are not existing
+    // user data (a build tool renaming its own outputs).
+    let own = f.self_created.max(f.new_files).min(f.files_touched);
+    if f.self_created > 0 {
+        let existing = f.files_touched - own;
+        out.push_str(&format!(
+            " ({own} created by the process itself, {existing} existing file{})",
+            if existing == 1 { "" } else { "s" }
+        ));
     }
     if let Some(note) = f.note_name.as_deref().filter(|n| !n.is_empty()) {
         out.push_str(&format!(
@@ -2111,6 +2128,32 @@ mod tests {
             guid: ProcessGuid("p3".into()),
             data,
         }
+    }
+
+    #[test]
+    fn file_activity_names_files_the_process_created_itself() {
+        let f = kestrel_common::FileActivity {
+            window_ms: 8_000,
+            files_touched: 160,
+            dirs: 8,
+            renames: 160,
+            new_files: 20,
+            self_created: 120,
+            ..Default::default()
+        };
+        assert_eq!(
+            describe_file_activity(&f),
+            "renamed 160 files in 8 folders within 8 s (120 created by the process itself, 40 existing files)"
+        );
+        // Older agents (no self_created): unchanged wording.
+        let old = kestrel_common::FileActivity {
+            self_created: 0,
+            ..f
+        };
+        assert_eq!(
+            describe_file_activity(&old),
+            "renamed 160 files in 8 folders within 8 s"
+        );
     }
 
     #[test]

@@ -5,7 +5,10 @@ use crate::{
     auth::Principal,
     error::{ApiError, ApiResult},
     ingest,
-    models::{self, load_device, AlertRow, DeviceRow, ALERT_SELECT, DEVICE_SELECT},
+    models::{
+        self, load_device, load_device_with_removed, AlertRow, DeviceRow, ALERT_SELECT,
+        DEVICE_SELECT, DEVICE_SELECT_WITH_REMOVED,
+    },
     policy_svc,
     state::AppState,
     telemetry::{reconstruct_processes, EventQuery},
@@ -23,6 +26,9 @@ pub struct ListQuery {
     group_id: Option<String>,
     limit: Option<i64>,
     cursor: Option<String>,
+    /// Also list devices removed remotely ("Show removed devices").
+    #[serde(default)]
+    include_removed: Option<bool>,
 }
 
 pub async fn list(
@@ -52,15 +58,20 @@ pub async fn list(
         f.push("d.group_id = ?", vec![Arg::Uuid(parse_uuid(g)?)]);
     }
     let w = f.where_sql();
+    let base = if q.include_removed.unwrap_or(false) {
+        DEVICE_SELECT_WITH_REMOVED
+    } else {
+        DEVICE_SELECT
+    };
     let total: i64 = f
         .bind_scalar(sqlx::query_scalar(&format!(
-            "SELECT count(*) FROM ({DEVICE_SELECT} AND {w}) x"
+            "SELECT count(*) FROM ({base} AND {w}) x"
         )))
         .fetch_one(&st.db)
         .await?;
     let rows: Vec<DeviceRow> = f
         .bind(sqlx::query_as(&format!(
-            "{DEVICE_SELECT} AND {w} ORDER BY d.hostname, d.id LIMIT {} OFFSET {}",
+            "{base} AND {w} ORDER BY (d.removed_at IS NOT NULL), d.hostname, d.id LIMIT {} OFFSET {}",
             pg.limit, pg.offset
         )))
         .fetch_all(&st.db)
@@ -85,7 +96,8 @@ pub async fn detail(
 ) -> ApiResult<Json<Value>> {
     p.require("read")?;
     let id = parse_uuid(&id)?;
-    let d = load_device(&st.db, id).await?;
+    // Devices removed remotely keep a readable page (history).
+    let d = load_device_with_removed(&st.db, id).await?;
     let (inventory,): (Value,) = sqlx::query_as("SELECT inventory FROM devices WHERE id = $1")
         .bind(id)
         .fetch_one(&st.db)
@@ -241,7 +253,7 @@ pub async fn decommission(
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("UPDATE response_actions SET status = 'expired', completed_at = $2, result_detail = 'device decommissioned' WHERE device_id = $1 AND status IN ('pending','sent')")
+    sqlx::query("UPDATE response_actions SET status = 'expired', completed_at = $2, result_detail = 'device decommissioned' WHERE device_id = $1 AND status IN ('pending','sent','running')")
         .bind(id)
         .bind(now)
         .execute(&mut *tx)
@@ -390,6 +402,13 @@ pub fn validate_manual_action(a: &ResponseAction) -> ApiResult<()> {
         ResponseAction::UnblockNetwork { image, block_id } => {
             validate_unblock(image.as_deref(), block_id.as_deref())?
         }
+        // Only through `POST /devices/:id/remove` (typed confirmation, MFA
+        // step-up, rate limit, delivery-time token).
+        ResponseAction::UninstallAgent { .. } => {
+            return Err(ApiError::bad_request(
+                "uninstall_agent is only available as Remove device (POST /api/devices/:id/remove)",
+            ));
+        }
         ResponseAction::RemoveAutorun {
             kind,
             location,
@@ -465,6 +484,63 @@ fn validate_remove_autorun(
 ) -> ApiResult<()> {
     crate::autorun_policy::validate(kind, location, value_name, restore_data)
         .map_err(ApiError::bad_request)
+}
+
+// ---------------------------------------------------------------- remove device
+
+#[derive(Deserialize)]
+pub struct RemoveBody {
+    #[serde(default)]
+    purge_data: bool,
+    #[serde(default)]
+    confirm_hostname: String,
+    #[serde(default)]
+    comment: Option<String>,
+}
+
+/// `POST /devices/:id/remove {purge_data, confirm_hostname, comment?}` —
+/// uninstall Kestrel from the PC remotely, then drop the device from the
+/// list (see [`crate::removal`]). Admin only (`devices.remove`), interactive
+/// console session only, MFA step-up when the admin has MFA.
+pub async fn request_removal(
+    State(st): State<AppState>,
+    p: Principal,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(b): ApiJson<RemoveBody>,
+) -> ApiResult<Json<Value>> {
+    p.require("devices.remove")?;
+    crate::removal::require_interactive(&p)?;
+    let id = parse_uuid(&id)?;
+    let d = load_device(&st.db, id).await?;
+    let aid = crate::removal::request(
+        &st,
+        &p,
+        &d,
+        b.purge_data,
+        &b.confirm_hostname,
+        b.comment.as_deref().unwrap_or(""),
+    )
+    .await?;
+    Ok(Json(json!({
+        "device": load_device_with_removed(&st.db, id).await?.to_api(),
+        "action": models::load_action(&st.db, aid).await?.to_api(),
+    })))
+}
+
+/// `DELETE /devices/:id/remove` — cancel a removal the agent has not received.
+pub async fn cancel_removal(
+    State(st): State<AppState>,
+    p: Principal,
+    ApiPath(id): ApiPath<String>,
+) -> ApiResult<Json<Value>> {
+    p.require("devices.remove")?;
+    crate::removal::require_interactive(&p)?;
+    let id = parse_uuid(&id)?;
+    let d = load_device(&st.db, id).await?;
+    crate::removal::cancel(&st, &p, &d).await?;
+    Ok(Json(
+        json!({"device": load_device_with_removed(&st.db, id).await?.to_api()}),
+    ))
 }
 
 // ---------------------------------------------------------------- uninstall token (M5)

@@ -25,6 +25,7 @@ pub mod pki;
 pub mod policy_svc;
 pub mod registry;
 pub mod remote;
+pub mod removal;
 pub mod scrub;
 pub mod settings;
 pub mod sigmapack;
