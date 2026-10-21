@@ -19,7 +19,16 @@ pub struct TaskInfo {
     /// Principal `UserId` (SID or account), else `GroupId`.
     pub user: Option<String>,
     pub author: Option<String>,
+    /// FNV-1a of the decoded XML text (de-duplication key, V-M8).
+    pub xml_hash: u64,
+    /// The task file was larger than [`MAX_TASK_XML_BYTES`] (V-M9); the
+    /// fields then come from the Task Scheduler COM API when possible.
+    pub oversized: bool,
 }
+
+/// Trigger marker added to `TaskChange::triggers` when the task XML was
+/// oversized or unreadable (no dedicated contract field yet).
+pub const TRIGGER_XML_OVERSIZED: &str = "xml_oversized";
 
 /// Decode task-file bytes (UTF-16LE/BE with BOM, or UTF-8 with / without BOM).
 pub fn decode_task_bytes(b: &[u8]) -> Option<String> {
@@ -100,7 +109,10 @@ pub fn parse_task_xml(xml: &str) -> Option<TaskInfo> {
     if root.tag_name().name() != "Task" {
         return None;
     }
-    let mut info = TaskInfo::default();
+    let mut info = TaskInfo {
+        xml_hash: crate::regdiff::fnv1a(xml.as_bytes()),
+        ..Default::default()
+    };
     let child = |n: roxmltree::Node<'_, '_>, name: &str| -> Option<String> {
         n.children()
             .find(|c| c.is_element() && c.tag_name().name() == name)

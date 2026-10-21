@@ -133,28 +133,58 @@ pub fn parse_response(b: &[u8], id: u16, name: &str, qtype: u16) -> Result<Vec<I
         return Err("DNS question mismatch".into());
     }
     pos += 4;
-    let mut out = Vec::new();
+    // V-L17: answers count only for the queried name or a name reached from
+    // it through a CNAME chain in this same answer section (out-of-order
+    // records handled; chain length bounded).
+    let mut cnames: Vec<(String, String)> = Vec::new();
+    let mut addrs: Vec<(String, IpAddr)> = Vec::new();
     for _ in 0..an.min(64) {
-        let (_, p) = read_name(b, pos).ok_or("bad answer name")?;
+        let (owner, p) = read_name(b, pos).ok_or("bad answer name")?;
         let ty = u16_at(b, p).ok_or("truncated answer")?;
         let class = u16_at(b, p + 2).ok_or("truncated answer")?;
         let rdlen = u16_at(b, p + 8).ok_or("truncated answer")? as usize;
         let rd = b.get(p + 10..p + 10 + rdlen).ok_or("truncated rdata")?;
-        if class == CLASS_IN && ty == qtype {
+        if class == CLASS_IN {
             match (ty, rd.len()) {
-                (TYPE_A, 4) => out.push(IpAddr::V4(Ipv4Addr::new(rd[0], rd[1], rd[2], rd[3]))),
-                (TYPE_AAAA, 16) => {
+                (TYPE_CNAME, _) => {
+                    if let Some((target, _)) = read_name(b, p + 10) {
+                        cnames.push((owner, target));
+                    }
+                }
+                (t, 4) if t == qtype && t == TYPE_A => {
+                    addrs.push((owner, IpAddr::V4(Ipv4Addr::new(rd[0], rd[1], rd[2], rd[3]))))
+                }
+                (t, 16) if t == qtype && t == TYPE_AAAA => {
                     let mut a = [0u8; 16];
                     a.copy_from_slice(rd);
-                    out.push(IpAddr::V6(Ipv6Addr::from(a)));
+                    addrs.push((owner, IpAddr::V6(Ipv6Addr::from(a))));
                 }
                 _ => {}
             }
         }
         pos = p + 10 + rdlen;
     }
-    Ok(out)
+    let mut names = vec![want];
+    for _ in 0..MAX_CNAME_CHAIN {
+        let next: Vec<String> = cnames
+            .iter()
+            .filter(|(o, t)| names.contains(o) && !names.contains(t))
+            .map(|(_, t)| t.clone())
+            .collect();
+        if next.is_empty() {
+            break;
+        }
+        names.extend(next);
+    }
+    Ok(addrs
+        .into_iter()
+        .filter(|(o, _)| names.contains(o))
+        .map(|(_, ip)| ip)
+        .collect())
 }
+
+const TYPE_CNAME: u16 = 5;
+const MAX_CNAME_CHAIN: usize = 8;
 
 fn query_one(dest: SocketAddr, name: &str, qtype: u16, timeout: Duration) -> Vec<IpAddr> {
     let bind: SocketAddr = if dest.is_ipv4() {
@@ -315,6 +345,36 @@ mod tests {
         lp[n - 15] = (n - 16) as u8;
         let _ = parse_response(&lp, 7, "edr.example.com", TYPE_A);
         assert!(read_name(&[0xC0, 0], 0).is_none());
+    }
+
+    /// V-L17: an A record whose owner is neither the queried name nor on its
+    /// CNAME chain is ignored.
+    #[test]
+    fn foreign_owner_answers_are_ignored() {
+        let mut b = Vec::new();
+        b.extend_from_slice(&7u16.to_be_bytes());
+        b.extend_from_slice(&0x8180u16.to_be_bytes());
+        b.extend_from_slice(&1u16.to_be_bytes());
+        b.extend_from_slice(&2u16.to_be_bytes());
+        b.extend_from_slice(&[0, 0, 0, 0]);
+        b.extend(encode_name("edr.example.com").unwrap());
+        b.extend_from_slice(&TYPE_A.to_be_bytes());
+        b.extend_from_slice(&1u16.to_be_bytes());
+        for (owner, ip) in [
+            ("attacker.example.org", [6, 6, 6, 6]),
+            ("edr.example.com", [192, 0, 2, 9]),
+        ] {
+            b.extend(encode_name(owner).unwrap());
+            b.extend_from_slice(&TYPE_A.to_be_bytes());
+            b.extend_from_slice(&1u16.to_be_bytes());
+            b.extend_from_slice(&60u32.to_be_bytes());
+            b.extend_from_slice(&4u16.to_be_bytes());
+            b.extend_from_slice(&ip);
+        }
+        assert_eq!(
+            parse_response(&b, 7, "edr.example.com", TYPE_A).unwrap(),
+            vec!["192.0.2.9".parse::<IpAddr>().unwrap()]
+        );
     }
 
     #[test]

@@ -65,6 +65,7 @@ struct PendingReg {
     op: RegistryOp,
     ty: u32,
     data: Option<Vec<u8>>,
+    reopened: bool,
 }
 
 struct PendingPersist {
@@ -111,6 +112,11 @@ pub struct Translator {
     hints: Hints,
     persist_dedup: Dedup,
     pending_persist: VecDeque<PendingPersist>,
+    /// Direct children of the agent with an unspoofed creator, pending the
+    /// spawn-registry check at send time: pid → (create FILETIME, creator, seen).
+    agent_child_candidates: HashMap<u32, (u64, u32, i64)>,
+    /// Integrity level of live processes from their ProcessStart (V-H5).
+    integrities: HashMap<u32, Integrity>,
 }
 
 /// `kestrel_detect::paths::may_be_sensitive`, guarded: if the detection crate
@@ -177,6 +183,8 @@ impl Translator {
             hints: Hints::new(),
             persist_dedup: Dedup::default(),
             pending_persist: VecDeque::new(),
+            agent_child_candidates: HashMap::new(),
+            integrities: HashMap::new(),
         }
     }
 
@@ -210,7 +218,18 @@ impl Translator {
         self.flush_persist(i64::MAX, true);
     }
 
-    fn send(&mut self, ev: Event) {
+    fn send(&mut self, mut ev: Event) {
+        if let EventData::ProcessStart(p) = &mut ev.data {
+            if let Some((create_ft, creator, _)) = self.agent_child_candidates.remove(&ev.pid) {
+                p.agent_spawned = crate::spawnreg::is_agent_spawned(
+                    ev.pid,
+                    create_ft,
+                    p.ppid,
+                    creator,
+                    self.s.self_pid,
+                );
+            }
+        }
         match self.out.try_send(ev) {
             Ok(()) => {
                 self.s.counters.emitted.fetch_add(1, Ordering::Relaxed);
@@ -380,6 +399,8 @@ impl Translator {
         self.thread_opens
             .retain(|_, (_, ts)| now - *ts < THREAD_OPEN_WINDOW_MS);
         self.cmdlines.retain(|_, (_, ts)| now - *ts < 30_000);
+        self.agent_child_candidates
+            .retain(|_, (_, _, seen)| now - *seen < 60_000);
         self.reg_join.expire(now);
         self.hints.expire(now);
         while self
@@ -463,6 +484,18 @@ impl Translator {
         }
     }
 
+    /// Integrity of a live process: from its ProcessStart, else its token.
+    fn integrity_of(&self, pid: u32) -> Option<Integrity> {
+        if pid == 4 {
+            return Some(Integrity::System);
+        }
+        if let Some(i) = self.integrities.get(&pid) {
+            return Some(*i);
+        }
+        let h = open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)?;
+        process_token_info(&h).1
+    }
+
     fn base(&self, ts: i64, pid: u32, data: EventData) -> Event {
         Event {
             ts,
@@ -541,6 +574,7 @@ impl Translator {
                 ts,
                 pid,
                 ppid,
+                creator_pid,
                 create_ft,
                 session,
                 label_sid,
@@ -554,6 +588,20 @@ impl Translator {
                 } else {
                     create_ft
                 };
+                // V-H1: a direct child of the agent whose real creator (event
+                // header) is the agent too. Whether the agent recorded it is
+                // checked when the start is sent (the spawning thread records
+                // it right after CreateProcess returns, possibly after the
+                // ETW event got here).
+                let agent_child =
+                    pid != self.s.self_pid && ppid == self.s.self_pid && creator_pid == ppid;
+                if agent_child {
+                    if self.agent_child_candidates.len() > 1024 {
+                        self.agent_child_candidates.clear();
+                    }
+                    self.agent_child_candidates
+                        .insert(pid, (create_ft, creator_pid, now));
+                }
                 let start_ts = if create_ft == 0 {
                     ts
                 } else {
@@ -591,6 +639,12 @@ impl Translator {
                     .as_deref()
                     .and_then(integrity_from_label_sid)
                     .or(token_integrity);
+                if let Some(i) = integrity {
+                    if self.integrities.len() > 65_536 {
+                        self.integrities.clear();
+                    }
+                    self.integrities.insert(pid, i);
+                }
                 let waiting = cmdline.is_none();
                 let guid_for_watch = guid.clone();
                 self.hints.on_process_start(
@@ -627,8 +681,16 @@ impl Translator {
                 if pid == self.s.self_pid {
                     return;
                 }
-                if waiting || wait_facts {
-                    self.hold_start(ev, now, waiting, wait_facts.then(|| image.clone()));
+                // Not recorded yet: hold briefly (as if waiting for the
+                // command line) so the registry check at send time sees it.
+                let wait_registry = agent_child && !crate::spawnreg::is_recorded(pid, create_ft);
+                if waiting || wait_facts || wait_registry {
+                    self.hold_start(
+                        ev,
+                        now,
+                        waiting || wait_registry,
+                        wait_facts.then(|| image.clone()),
+                    );
                 } else {
                     if let Some(f) = cached.filter(|f| f.revocation_pending || f.sha256.is_none()) {
                         self.s.enricher.watch(&image, guid_for_watch, pid, Some(f));
@@ -673,6 +735,8 @@ impl Translator {
                 if let Ok(mut t) = self.s.tracker.write() {
                     t.on_stop(pid, start, ts);
                 }
+                // `integrities` keeps the entry: hint processes (sc.exe,
+                // schtasks.exe) exit before their persistence event arrives.
                 self.flows.forget_pid(pid);
                 self.dns.remove(&pid);
                 self.thread_opens.remove(&pid);
@@ -732,7 +796,7 @@ impl Translator {
                 if !self.sensitive(&path) {
                     return;
                 }
-                let op = file_op_from_create_options(create_options);
+                let op = file_op_for_path(create_options, filters::is_persistence_drop_path(&path));
                 if file_object != 0 {
                     self.file_objects
                         .insert((pid, file_object), (path.clone(), false, ts));
@@ -918,7 +982,7 @@ impl Translator {
                     op == RegistryOp::DeleteValue,
                 );
                 self.flush_reg(now, false);
-                if key.is_empty() || pid == self.s.self_pid {
+                if key.is_empty() {
                     return;
                 }
                 // Older builds: the event names the key; emit it directly.
@@ -955,6 +1019,7 @@ impl Translator {
                 op,
                 ty,
                 data,
+                reopened,
             } => {
                 if self.pending_reg.len() >= MAX_PENDING_REG {
                     // Bounded: emit everything pending instead of growing.
@@ -968,6 +1033,7 @@ impl Translator {
                     op,
                     ty,
                     data,
+                    reopened,
                 });
                 self.flush_reg(now, false);
             }
@@ -977,8 +1043,14 @@ impl Translator {
                 }
                 act.sample_paths = act.sample_paths.iter().map(|p| self.dos(p)).collect();
                 act.canary_hits = act.canary_hits.iter().map(|p| self.dos(p)).collect();
-                if pid == 0 {
-                    // Decoy modified with no known opener: telemetry only.
+                if pid == 4 {
+                    // System process: a remote SMB client wrote these files.
+                    // No local process may be blamed (V-H9).
+                    act.remote_writer = true;
+                }
+                if pid == 0 || pid == 4 {
+                    // Decoy modified with no attributable local writer, or a
+                    // remote writer: telemetry only.
                     self.send(Event {
                         ts,
                         pid: 0,
@@ -997,7 +1069,10 @@ impl Translator {
                 record,
                 task,
             } => {
-                if self.persist_dedup.seen(&record.dedup_key(), ts) {
+                if self
+                    .persist_dedup
+                    .seen(&record.dedup_key_with(task.as_ref()), ts)
+                {
                     return;
                 }
                 if self.pending_persist.len() >= MAX_PENDING_PERSIST {
@@ -1113,32 +1188,46 @@ impl Translator {
             {
                 continue; // already emitted from ETW with the full key
             }
-            let writer = self.reg_join.attribute(&p.key, &p.value_name, p.op, p.ts);
-            if writer.is_none() && !force && p.deadline > now {
+            // V-H6: all candidates in the window are ranked; a value-name-only
+            // match is Heuristic. Wait for the deadline before settling for a
+            // heuristic answer (a KeyObject-exact write may still arrive).
+            // V-H7: a re-created / renamed watched key joins exact-only.
+            let settled = self.reg_join.has_exact(&p.key, &p.value_name, p.op, p.ts);
+            if !settled && !force && p.deadline > now {
                 keep.push_back(p);
                 continue;
             }
+            let writer = self
+                .reg_join
+                .attribute(&p.key, &p.value_name, p.op, p.ts, p.reopened);
             let data = match p.op {
                 RegistryOp::Set => p.data.as_deref().and_then(|d| render_sysmon(p.ty, d)),
                 _ => None,
             };
+            let attribution = writer.map_or(Attribution::None, |w| w.attribution);
             let ev_data = EventData::RegistrySet {
-                attribution: Default::default(),
+                attribution,
                 key: p.key,
                 value_name: p.value_name,
                 data,
                 op: p.op,
             };
             match writer {
-                Some(pid) if pid == self.s.self_pid => {}
-                Some(pid) => {
+                // Never dropped, even when the agent wrote it (hardening):
+                // emitted as telemetry with the agent as the writer, so a
+                // spoofed join can no longer hide a change (V-H6).
+                Some(w) => {
                     self.s
                         .counters
                         .reg_attributed
                         .fetch_add(1, Ordering::Relaxed);
-                    self.ensure_known(pid);
-                    let ev = self.base(p.ts, pid, ev_data);
-                    self.emit(ev);
+                    self.ensure_known(w.pid);
+                    let ev = self.base(p.ts, w.pid, ev_data);
+                    if w.pid == self.s.self_pid {
+                        self.send(ev);
+                    } else {
+                        self.emit(ev);
+                    }
                 }
                 None => {
                     self.reg_join.note_unattributed();
@@ -1146,8 +1235,9 @@ impl Translator {
                         .counters
                         .reg_unattributed
                         .fetch_add(1, Ordering::Relaxed);
-                    // Unknown writer: pid 0 / empty guid -- telemetry only
-                    // (the engine never alerts on pid 0 as a subject).
+                    // Unknown writer: pid 0 / empty guid, Attribution::None.
+                    // The engine may remediate the value but never blames a
+                    // process for it.
                     self.send(Event {
                         ts: p.ts,
                         pid: 0,
@@ -1172,18 +1262,37 @@ impl Translator {
             let Some(p) = self.pending_persist.pop_front() else {
                 break;
             };
-            let pid = self
-                .hints
-                .creator(p.record.kind(), p.ts)
-                .unwrap_or(p.logger_pid);
-            if pid == self.s.self_pid {
-                continue;
-            }
+            // V-H5: the creator is a correlation (most recent plausible
+            // hint), so it is Heuristic. A service install needs High or
+            // System integrity: hints from lower-integrity processes are
+            // skipped. Without a hint the event stays on the logging
+            // service (Task Scheduler / services.exe / WMI host) and the
+            // creator is unknown (`Attribution::None`). None of these events
+            // names the creating pid itself, so nothing here is Exact.
+            let kind = p.record.kind();
+            let hint = match kind {
+                crate::persist::HintKind::Service => {
+                    let hints = std::mem::take(&mut self.hints);
+                    let r = hints.creator_where(kind, p.ts, |pid| {
+                        matches!(
+                            self.integrity_of(pid),
+                            Some(Integrity::High | Integrity::System)
+                        )
+                    });
+                    self.hints = hints;
+                    r
+                }
+                _ => self.hints.creator(kind, p.ts),
+            };
+            let (pid, attribution) = match hint {
+                Some(pid) => (pid, Attribution::Heuristic),
+                None => (p.logger_pid, Attribution::None),
+            };
             let data = match p.record {
                 PersistRecord::Task { name, op, user } => {
                     let t = p.task.unwrap_or_default();
                     EventData::TaskRegistered(TaskChange {
-                        attribution: Default::default(),
+                        attribution,
                         name,
                         op,
                         user: user.or(t.user),
@@ -1192,9 +1301,21 @@ impl Translator {
                         triggers: t.triggers,
                     })
                 }
-                PersistRecord::Service(s) => EventData::ServiceInstalled(s),
-                PersistRecord::Wmi(w) => EventData::WmiSubscription(w),
+                PersistRecord::Service(mut s) => {
+                    s.attribution = attribution;
+                    EventData::ServiceInstalled(s)
+                }
+                PersistRecord::Wmi(mut w) => {
+                    w.attribution = attribution;
+                    EventData::WmiSubscription(w)
+                }
             };
+            if pid == self.s.self_pid {
+                // The agent's own change (hardening): telemetry, never held.
+                let ev = self.base(p.ts, pid, data);
+                self.send(ev);
+                continue;
+            }
             self.s
                 .counters
                 .persist_events

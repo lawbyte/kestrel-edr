@@ -330,6 +330,37 @@ enum Kind {
     Delete,
 }
 
+impl PidState {
+    fn push(&mut self, op: Op) {
+        *self.files.entry(op.file).or_default() += 1;
+        self.ops.push_back(op);
+    }
+
+    /// Remove the oldest op; true when one was removed.
+    fn pop_front(&mut self) -> bool {
+        let Some(o) = self.ops.pop_front() else {
+            return false;
+        };
+        if let Some(c) = self.files.get_mut(&o.file) {
+            *c -= 1;
+            if *c == 0 {
+                self.files.remove(&o.file);
+            }
+        }
+        true
+    }
+
+    /// Drop ops older than the window; returns how many were removed.
+    fn slide(&mut self, now: i64) -> usize {
+        let mut n = 0;
+        while self.ops.front().is_some_and(|o| now - o.ts > WINDOW_MS) {
+            self.pop_front();
+            n += 1;
+        }
+        n
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Op {
     ts: i64,
@@ -346,6 +377,9 @@ struct Op {
 #[derive(Debug, Default)]
 struct PidState {
     ops: VecDeque<Op>,
+    /// Distinct files among `ops` (file hash → ops on it), kept in step with
+    /// `ops` so the emission decision never needs a full [`summarise`].
+    files: HashMap<u64, u32>,
     last_emit: Option<i64>,
     last_emit_files: u32,
     samples: VecDeque<String>,
@@ -505,26 +539,27 @@ impl FileAgg {
                 return None;
             }
         }
-        if self.total_ops >= MAX_TOTAL_OPS && !canary {
+        if self.total_ops >= MAX_TOTAL_OPS {
             self.gc(ts);
             if self.total_ops >= MAX_TOTAL_OPS {
-                self.dropped += 1;
-                return None;
+                // V-M10: share the global cap fairly. A process below its fair
+                // share takes the oldest op of the largest process; one at or
+                // above it loses its own oldest op. Helpers flooding the cap
+                // can no longer blind the aggregator to another process.
+                self.make_room(pid);
             }
         }
         let st = self.pids.entry(pid).or_default();
         st.last_ts = ts;
         // Slide the window.
-        while st.ops.front().is_some_and(|o| ts - o.ts > WINDOW_MS) {
-            st.ops.pop_front();
-            self.total_ops -= 1;
-        }
+        let slid = st.slide(ts);
+        self.total_ops -= slid;
         if st.ops.len() >= MAX_OPS_PER_PID {
-            st.ops.pop_front();
+            st.pop_front();
             self.total_ops -= 1;
             self.dropped += 1;
         }
-        st.ops.push_back(Op {
+        st.push(Op {
             ts,
             kind,
             file: h64(old.unwrap_or(path)),
@@ -553,20 +588,21 @@ impl FileAgg {
         // Re-emit when REEMIT_MS passed, or at once when the burst crosses the
         // next milestone: a burst that finishes inside REEMIT_MS (80 files in
         // under 2 s in the lab VM) otherwise never gets past its first summary
-        // and RW-06's thresholds are never seen.
+        // and RW-06's thresholds are never seen. Both sides of every
+        // comparison count distinct files (lab VM: comparing ops, ~2 per
+        // file, with a file milestone emitted on every op after 30 files),
+        // and the count is maintained incrementally, so `summarise` runs only
+        // when a summary is actually emitted (V-M10).
+        let files = st.files.len() as u32;
         let due = st.canary_pending
-            || (st.ops.len() >= EMIT_MIN_FILES as usize
+            || (files >= EMIT_MIN_FILES
+                && files != st.last_emit_files
                 && (st.last_emit.is_none_or(|t| ts - t >= REEMIT_MS)
-                    || st.ops.len() as u32 >= next_milestone(st.last_emit_files)));
+                    || files >= next_milestone(st.last_emit_files)));
         if !due {
             return None;
         }
         let act = summarise(st);
-        let emit = st.canary_pending
-            || (act.files_touched >= EMIT_MIN_FILES && act.files_touched != st.last_emit_files);
-        if !emit {
-            return None;
-        }
         st.canary_pending = false;
         st.last_emit = Some(ts);
         st.last_emit_files = act.files_touched;
@@ -587,6 +623,8 @@ impl FileAgg {
         }
         let mut act = summarise(st);
         act.canary_hits = st.canary_hits.clone();
+        // Found by content polling: the actor is inferred (V-H9).
+        act.canary_in_place = true;
         self.emitted += 1;
         AggEmit {
             ts,
@@ -599,10 +637,7 @@ impl FileAgg {
     pub fn gc(&mut self, now: i64) {
         let mut freed = 0usize;
         self.pids.retain(|_, st| {
-            while st.ops.front().is_some_and(|o| now - o.ts > WINDOW_MS) {
-                st.ops.pop_front();
-                freed += 1;
-            }
+            freed += st.slide(now);
             let keep = now - st.last_ts < 30_000 || !st.ops.is_empty();
             if !keep {
                 freed += st.ops.len();
@@ -610,6 +645,28 @@ impl FileAgg {
             keep
         });
         self.total_ops = self.total_ops.saturating_sub(freed);
+    }
+
+    /// At the global op cap: free one op slot for `pid` (see `record`).
+    fn make_room(&mut self, pid: u32) {
+        let n = self.pids.len().max(1) + usize::from(!self.pids.contains_key(&pid));
+        let fair = MAX_TOTAL_OPS / n;
+        let mine = self.pids.get(&pid).map_or(0, |s| s.ops.len());
+        let victim = if mine < fair {
+            self.pids
+                .iter()
+                .filter(|(p, _)| **p != pid)
+                .max_by_key(|(_, s)| s.ops.len())
+                .map(|(p, _)| *p)
+        } else {
+            Some(pid)
+        };
+        if let Some(st) = victim.and_then(|v| self.pids.get_mut(&v)) {
+            if st.pop_front() {
+                self.total_ops -= 1;
+                self.dropped += 1;
+            }
+        }
     }
 
     fn evict(&mut self, now: i64) {
@@ -629,6 +686,83 @@ impl FileAgg {
             self.total_ops = self.total_ops.saturating_sub(st.ops.len());
         }
         self.file_objects.retain(|(p, _), _| *p != pid);
+    }
+}
+
+/// How recently a decoy must have been opened for an in-place change found
+/// by the poller (every 2 s) to be blamed on the opener.
+pub const IN_PLACE_WINDOW_MS: i64 = 5_000;
+const OPENERS_PER_DECOY: usize = 8;
+
+/// Who opened each ransomware decoy recently (V-H9).
+///
+/// Kernel-File Create (12) carries no `DesiredAccess` (manifest checked on
+/// build 26200: Irp, FileObject, IssuingThreadId, CreateOptions,
+/// CreateAttributes, ShareAccess, FileName), so "opened for writing" can
+/// only be known from the create disposition (supersede / overwrite /
+/// create = write-capable). An in-place change found by the poller is
+/// attributed only when exactly one local process opened the decoy within
+/// [`IN_PLACE_WINDOW_MS`] — preferring a write-capable open — and never to
+/// a process that merely opened it after (ShellExecute framing) alongside
+/// another one: two distinct openers in the window = ambiguous = nobody.
+/// Opens by the System process (pid 4: SMB server, i.e. a remote client)
+/// make the change a remote write that no local process is blamed for.
+#[derive(Debug, Default)]
+pub struct DecoyOpeners {
+    by_decoy: HashMap<String, VecDeque<(u32, i64, bool)>>,
+}
+
+/// Outcome of [`DecoyOpeners::in_place_writer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InPlaceWriter {
+    /// One local process opened the decoy in the window.
+    Local(u32),
+    /// The System process (remote SMB client) opened it in the window.
+    Remote,
+    /// No opener, or several candidates: no attribution.
+    Unknown,
+}
+
+impl DecoyOpeners {
+    /// Record an open of decoy `nt` (lower-cased NT path). `write_capable`:
+    /// the disposition truncates / creates the file.
+    pub fn note(&mut self, nt: &str, pid: u32, ts: i64, write_capable: bool) {
+        if self.by_decoy.len() > 4096 && !self.by_decoy.contains_key(nt) {
+            self.by_decoy.clear();
+        }
+        let q = self.by_decoy.entry(nt.to_string()).or_default();
+        if q.len() >= OPENERS_PER_DECOY {
+            q.pop_front();
+        }
+        q.push_back((pid, ts, write_capable));
+    }
+
+    /// Who changed decoy `nt` in place, detected at `ts`.
+    pub fn in_place_writer(&self, nt: &str, ts: i64) -> InPlaceWriter {
+        let Some(q) = self.by_decoy.get(nt) else {
+            return InPlaceWriter::Unknown;
+        };
+        let recent: Vec<&(u32, i64, bool)> = q
+            .iter()
+            .filter(|(_, t, _)| ts - *t <= IN_PLACE_WINDOW_MS && *t <= ts + 1_000)
+            .collect();
+        if recent.iter().any(|(p, _, _)| *p == 4) {
+            return InPlaceWriter::Remote;
+        }
+        let writers: HashSet<u32> = recent
+            .iter()
+            .filter(|(_, _, w)| *w)
+            .map(|(p, _, _)| *p)
+            .collect();
+        let all: HashSet<u32> = recent.iter().map(|(p, _, _)| *p).collect();
+        let pick = if writers.len() == 1 { &writers } else { &all };
+        if pick.len() == 1 {
+            pick.iter()
+                .next()
+                .map_or(InPlaceWriter::Unknown, |p| InPlaceWriter::Local(*p))
+        } else {
+            InPlaceWriter::Unknown
+        }
     }
 }
 
@@ -972,6 +1106,86 @@ mod tests {
         assert!(a.dropped >= 100);
         a.forget_pid(1);
         assert_eq!(a.total_ops, 0);
+    }
+
+    /// Lab VM: an 80-file overwrite + rename burst (2 ops per file) emitted
+    /// 50 summaries (one per op after 30 files). Milestones now count files.
+    #[test]
+    fn burst_with_two_ops_per_file_emits_few_summaries() {
+        let mut a = agg();
+        let mut out = Vec::new();
+        for i in 0..80 {
+            let ts = 1_000 + i as i64 * 10;
+            let old = doc(i, i % 4);
+            let fo = 0x3000 + i as u64;
+            out.extend(a.on_create(ts, 78, fo, &old, 5, false)); // overwrite
+            out.extend(a.on_rename(ts + 1, 78, fo, &format!("{old}.k3str")));
+        }
+        assert!(out.len() <= 6, "{} summaries", out.len());
+        let files: Vec<u32> = out.iter().map(|e| e.activity.files_touched).collect();
+        assert_eq!(files, vec![10, 20, 30, 50], "{files:?}");
+        // After the re-emit interval the grown count is reported once.
+        let e = a
+            .on_create(5_000, 78, 0x9999, &doc(500, 0), 5, false)
+            .expect("re-emit after REEMIT_MS");
+        assert_eq!(e.activity.files_touched, 81);
+        assert!(a
+            .on_create(5_010, 78, 0x9998, &doc(500, 0), 5, false)
+            .is_none());
+    }
+
+    /// V-M10: helpers filling the global cap cannot blind the aggregator to
+    /// another process.
+    #[test]
+    fn global_cap_is_shared_fairly() {
+        let mut a = agg();
+        let per = MAX_OPS_PER_PID;
+        let helpers = MAX_TOTAL_OPS / per;
+        for h in 0..helpers {
+            for i in 0..per {
+                a.on_create(1_000, 1_000 + h as u32, 0, &doc(i, h), 5, false);
+            }
+        }
+        assert_eq!(a.total_ops, MAX_TOTAL_OPS);
+        let mut got = None;
+        for i in 0..20 {
+            got = a
+                .on_create(1_001, 7, 0, &doc(10_000 + i, 1), 5, false)
+                .or(got);
+        }
+        let e = got.expect("the late process is still aggregated");
+        assert_eq!(e.pid, 7);
+        assert!(e.activity.files_touched >= 10);
+        assert!(a.total_ops <= MAX_TOTAL_OPS);
+    }
+
+    #[test]
+    fn decoy_in_place_attribution() {
+        let d = r"\device\harddiskvolume3\users\bob\documents\!payroll q3.xlsx";
+        let mut o = DecoyOpeners::default();
+        // Nobody opened it: unknown.
+        assert_eq!(o.in_place_writer(d, 10_000), InPlaceWriter::Unknown);
+        // One opener in the window.
+        o.note(d, 50, 9_000, false);
+        assert_eq!(o.in_place_writer(d, 10_000), InPlaceWriter::Local(50));
+        // Stale opener (> window): unknown (no 2-minute blame any more).
+        assert_eq!(
+            o.in_place_writer(d, 9_000 + IN_PLACE_WINDOW_MS + 1),
+            InPlaceWriter::Unknown
+        );
+        // Framing: malware writes, then ShellExecutes the decoy (Acrobat
+        // opens it). Two readers in the window: nobody is blamed.
+        o.note(d, 60, 9_500, false);
+        assert_eq!(o.in_place_writer(d, 10_000), InPlaceWriter::Unknown);
+        // A write-capable open is preferred over plain opens.
+        o.note(d, 70, 9_600, true);
+        assert_eq!(o.in_place_writer(d, 10_000), InPlaceWriter::Local(70));
+        // Remote (SMB) write: no local blame.
+        o.note(d, 4, 9_700, true);
+        assert_eq!(o.in_place_writer(d, 10_000), InPlaceWriter::Remote);
+        // Poller hits are flagged as in-place.
+        let mut a = agg();
+        assert!(a.canary_modified(1, 70, d).activity.canary_in_place);
     }
 
     #[test]

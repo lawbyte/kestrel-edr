@@ -296,7 +296,8 @@ pub enum Attribution {
     /// Inferred by correlation (value name within a time window, the most
     /// recent schtasks / sc / taskschd.dll hint, the last opener of a file).
     Heuristic,
-    /// No writer could be determined (`pid` is 0).
+    /// No writer could be determined: `pid` is 0, or for task / service /
+    /// WMI events the service that logged the change. Never act on it.
     None,
 }
 

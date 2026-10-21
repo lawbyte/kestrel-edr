@@ -173,28 +173,149 @@ fn write_no_follow(path: &Path, data: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// What is at a canary path ([`DecoyFs::probe`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Probe {
+    Absent,
+    /// A regular, single-link, non-reparse file with this SHA-256 (hex).
+    File(String),
+    /// A real (non-link) directory.
+    Dir,
+    /// A link / reparse point / multi-link file / unreadable object: never ours.
+    Foreign,
+}
+
+/// Outcome of [`DecoyFs::remove_if_ours`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoveResult {
+    Removed,
+    Gone,
+    NotOurs,
+    Failed,
+}
+
+/// File operations used to plant and remove decoys. On Windows the agent
+/// runs them as SYSTEM inside user-writable profiles, so the Windows
+/// implementation (`win::rcanary::SafeDecoyFs`, V-H8) works on handles: every
+/// ancestor verified with `FILE_FLAG_OPEN_REPARSE_POINT`, files created /
+/// opened relative to a verified directory handle, and the hash check and
+/// the delete done through the **same** handle. [`StdFs`] is the portable
+/// path-based version (tests, non-Windows).
+pub trait DecoyFs {
+    fn probe(&self, path: &Path) -> Probe;
+    /// Create `path` (and missing parents) as directories, never through a link.
+    fn create_dirs(&self, path: &Path, hidden: bool) -> std::io::Result<()>;
+    /// Write `data` to `path`. `replace_sha`: the file currently there must
+    /// have exactly this SHA-256 (it is ours) and is replaced; `None`: the
+    /// path must not exist.
+    fn write_file(
+        &self,
+        path: &Path,
+        data: &[u8],
+        replace_sha: Option<&str>,
+        hidden: bool,
+    ) -> std::io::Result<()>;
+    /// Delete `path` only if it is a plain file whose SHA-256 is `sha`.
+    fn remove_if_ours(&self, path: &Path, sha: &str) -> RemoveResult;
+}
+
+/// Portable, path-based [`DecoyFs`] (link checks before and after; not
+/// race-free against a local attacker: Windows uses `SafeDecoyFs`).
+pub struct StdFs<'a> {
+    pub set_hidden: &'a dyn Fn(&Path),
+}
+
+impl DecoyFs for StdFs<'_> {
+    fn probe(&self, path: &Path) -> Probe {
+        if has_link_in_chain(path) {
+            return Probe::Foreign;
+        }
+        match std::fs::symlink_metadata(path) {
+            Err(_) => Probe::Absent,
+            Ok(m) if m.is_dir() => Probe::Dir,
+            Ok(m) if m.is_file() => match std::fs::read(path) {
+                Ok(b) => Probe::File(hex(&Sha256::digest(&b))),
+                Err(_) => Probe::Foreign,
+            },
+            Ok(_) => Probe::Foreign,
+        }
+    }
+
+    fn create_dirs(&self, path: &Path, hidden: bool) -> std::io::Result<()> {
+        create_dirs_no_follow(path)?;
+        if hidden {
+            (self.set_hidden)(path);
+        }
+        Ok(())
+    }
+
+    fn write_file(
+        &self,
+        path: &Path,
+        data: &[u8],
+        replace_sha: Option<&str>,
+        hidden: bool,
+    ) -> std::io::Result<()> {
+        match (self.probe(path), replace_sha) {
+            (Probe::Absent, None) => {}
+            (Probe::File(cur), Some(want)) if cur.eq_ignore_ascii_case(want) => {}
+            _ => return Err(std::io::Error::other("target changed; not ours")),
+        }
+        write_no_follow(path, data)?;
+        if hidden {
+            (self.set_hidden)(path);
+        }
+        Ok(())
+    }
+
+    fn remove_if_ours(&self, path: &Path, sha: &str) -> RemoveResult {
+        match self.probe(path) {
+            Probe::Absent => RemoveResult::Gone,
+            Probe::File(cur) if cur.eq_ignore_ascii_case(sha) => match std::fs::remove_file(path) {
+                Ok(()) => RemoveResult::Removed,
+                Err(_) => RemoveResult::Failed,
+            },
+            _ => RemoveResult::NotOurs,
+        }
+    }
+}
+
 /// Plant `specs`; returns paths that now hold Kestrel canaries. `set_hidden`
-/// marks files/dirs hidden (Windows: FILE_ATTRIBUTE_HIDDEN).
+/// marks files/dirs hidden (Windows: FILE_ATTRIBUTE_HIDDEN). Path-based:
+/// Windows callers use [`plant_with`] and the handle-based `SafeDecoyFs`.
 pub fn plant(
     specs: &[CanarySpec],
     reg: &mut CanaryRegistry,
     set_hidden: &dyn Fn(&Path),
+) -> Vec<String> {
+    plant_with(&StdFs { set_hidden }, specs, reg, true)
+}
+
+/// Plant `specs` through `fs`; `hidden` marks what is created hidden.
+pub fn plant_with(
+    fs: &dyn DecoyFs,
+    specs: &[CanarySpec],
+    reg: &mut CanaryRegistry,
+    hidden: bool,
 ) -> Vec<String> {
     let mut ok = Vec::new();
     for spec in specs {
         let path = Path::new(&spec.path);
         let k = key(&spec.path);
         let rec = reg.planted.get(&k);
-        if has_link_in_chain(path) {
-            tracing::warn!(path = %spec.path, "not planting canary: link / junction in the path");
+        let probe = fs.probe(path);
+        if probe == Probe::Foreign {
+            tracing::warn!(path = %spec.path, "not planting canary: link / junction / foreign object at the path");
             continue;
         }
-        let exists = path.exists();
+        let exists = probe != Probe::Absent;
         if spec.is_dir {
+            if exists && probe != Probe::Dir {
+                continue;
+            }
             match decide(true, exists, None, rec, "") {
                 Decision::WriteNew => {
-                    if create_dirs_no_follow(path).is_ok() {
-                        set_hidden(path);
+                    if fs.create_dirs(path, hidden).is_ok() {
                         reg.planted.insert(
                             k,
                             CanaryRecord {
@@ -211,20 +332,19 @@ pub fn plant(
             continue;
         }
         let new_sha = hex(&Sha256::digest(&spec.content));
-        let current = if exists && path.is_file() {
-            std::fs::read(path).ok().map(|b| hex(&Sha256::digest(&b)))
-        } else {
-            None
+        let current = match &probe {
+            Probe::File(s) => Some(s.clone()),
+            Probe::Absent => None,
+            // A directory (or something else) sits where a file canary should go.
+            _ => continue,
         };
-        if exists && !path.is_file() {
-            continue; // a directory (or something else) sits where a file canary should go
-        }
         match decide(false, exists, current.as_deref(), rec, &new_sha) {
             Decision::WriteNew | Decision::Refresh => {
                 // Temp name first so a crash never leaves a partial canary.
-                let written = write_no_follow(path, &spec.content).is_ok();
+                let written = fs
+                    .write_file(path, &spec.content, current.as_deref(), hidden)
+                    .is_ok();
                 if written {
-                    set_hidden(path);
                     reg.planted.insert(
                         k,
                         CanaryRecord {

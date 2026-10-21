@@ -128,6 +128,10 @@ pub struct Enricher {
 }
 
 fn meta(path: &str) -> Option<(u64, u64)> {
+    // V-M1: no SYSTEM file access to network paths (NTLM coercion).
+    if super::scan::is_remote(path) {
+        return None;
+    }
     let m = std::fs::metadata(path).ok()?;
     let mtime = m
         .modified()
@@ -529,6 +533,9 @@ fn revocation_worker(e: std::sync::Weak<Enricher>, rx: Receiver<String>) {
 }
 
 fn hash_file(path: &str) -> Option<String> {
+    if super::scan::is_remote(path) {
+        return None; // V-M1
+    }
     let file = std::fs::OpenOptions::new()
         .read(true)
         .share_mode(7)
@@ -545,6 +552,13 @@ pub fn compute(path: &str, hash: bool) -> (FileFacts, u64, u64) {
         hashed: hash,
         ..Default::default()
     };
+    // V-M1: never open UNC / WebDAV / mapped-network images as SYSTEM (no
+    // metadata, hash, Authenticode or Zone.Identifier read): facts stay
+    // unknown. Rules see the network location through the image path.
+    if super::scan::is_remote(path) {
+        f.hashed = false;
+        return (f, 0, 0);
+    }
     let Some((size, mtime)) = meta(path) else {
         // Not readable / gone (self-deleting images, unmapped device paths):
         // the signature is *unknown*, never "invalid".
@@ -671,6 +685,17 @@ pub struct SigVerdict {
 /// Embedded Authenticode check with the given revocation mode, falling back
 /// to the system catalogs (no revocation) for catalog-signed OS files.
 pub fn verify_ex(path: &str, mode: RevMode) -> SigVerdict {
+    // V-M1: WinVerifyTrust opens the file as SYSTEM; a network path would
+    // make the machine account authenticate to that host. Unknown, not
+    // invalid.
+    if super::scan::is_remote(path) {
+        return SigVerdict {
+            state: SignatureState::Unknown,
+            signer: None,
+            microsoft_root: false,
+            revocation: Revocation::NotChecked,
+        };
+    }
     let wpath = wide(path);
     unsafe {
         let mut fi = WINTRUST_FILE_INFO {

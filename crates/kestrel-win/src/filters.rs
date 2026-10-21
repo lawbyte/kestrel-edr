@@ -70,6 +70,21 @@ pub fn is_extra_sensitive(path: &str) -> bool {
     false
 }
 
+/// Persistence drop locations (Startup folders, task XML stores) where an
+/// open-or-create (`FILE_OPEN_IF`) of a file is reported as a create: the
+/// open itself cannot say whether the file existed, and a missed drop is
+/// worse than a duplicate "create" of an existing autostart file.
+pub fn is_persistence_drop_path(path: &str) -> bool {
+    let p = path.replace('/', "\\").to_ascii_lowercase();
+    [
+        r"\microsoft\windows\start menu\programs\startup\",
+        r"\windows\system32\tasks\",
+        r"\windows\syswow64\tasks\",
+    ]
+    .iter()
+    .any(|c| p.contains(c))
+}
+
 /// Image loads are the noisiest Kernel-Process event; emit only loads from
 /// outside Windows/Program Files plus the interesting DLL list anywhere.
 pub fn should_emit_image_load(path: &str) -> bool {

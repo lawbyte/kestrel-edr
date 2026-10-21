@@ -6,8 +6,13 @@
 //! the very high-volume Write keyword).
 
 use super::etw::{FileState, Raw, Sink};
+use super::safefs::{
+    attr_tag, create_in_dir, delete_now_by_handle, final_path, is_name_surrogate, link_count,
+    long_path, open_in_dir, open_verified_dir, rename_in_dir, set_attributes, RelOpenError,
+};
 use super::util::*;
-use crate::canary::CanaryRegistry;
+use crate::canary::{CanaryRegistry, DecoyFs, Probe, RemoveResult};
+use crate::fileagg::InPlaceWriter;
 use crate::ntpath::DeviceMap;
 use crate::rcanary;
 use std::collections::HashMap;
@@ -15,6 +20,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
+use windows_sys::Wdk::Storage::FileSystem::{
+    FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_IF,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    FlushFileBuffers, ReadFile, WriteFile, DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES, SYNCHRONIZE,
+};
 use windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION;
 
 /// Is this process running as LocalSystem (the installed service)?
@@ -24,11 +38,317 @@ pub fn running_as_system() -> bool {
         .unwrap_or(false)
 }
 
+// ------------------------------------------------------------------ safe fs
+
+/// Handle-based [`DecoyFs`] (security review v1.1 V-H8). Every operation:
+/// * opens the parent directory with [`open_verified_dir`] (each ancestor
+///   checked with `FILE_FLAG_OPEN_REPARSE_POINT`, final path verified) and
+///   keeps that handle **without** `FILE_SHARE_DELETE`, so the directory
+///   cannot be renamed / replaced by a junction while it is in use;
+/// * opens or creates the file *relative to that handle*
+///   (`NtCreateFile` + `RootDirectory`, `FILE_OPEN_REPARSE_POINT`), refuses
+///   reparse points and files with more than one hard link, and checks the
+///   handle's final path;
+/// * hashes, deletes (`FileDispositionInfo`) and renames through the same
+///   handle, opened with sharing `FILE_SHARE_READ` only: nobody can write
+///   or swap the file between the hash check and the delete. An oplock
+///   break during our open no longer helps: there is no later path lookup.
+pub struct SafeDecoyFs;
+
+/// Largest file read for hashing (decoys and credential canaries are small).
+const MAX_HASH_BYTES: u64 = 4 * 1024 * 1024;
+const DIR_ACCESS: u32 = FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_TRAVERSE;
+
+fn split(path: &Path) -> Option<(String, String)> {
+    let parent = path.parent()?.to_string_lossy().into_owned();
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    (!parent.is_empty() && !name.is_empty()).then_some((parent, name))
+}
+
+fn open_dir(dir: &str) -> Result<Handle, String> {
+    open_verified_dir(dir, DIR_ACCESS, FILE_SHARE_READ | FILE_SHARE_WRITE).map(|(h, _)| h)
+}
+
+/// Open (or create, with `create`) the directory chain of `dir` without
+/// following links: the deepest existing ancestor is verified, missing
+/// components are created relative to their verified parent.
+fn ensure_dir(dir: &Path, create: bool) -> Result<Handle, String> {
+    let s = dir.to_string_lossy().into_owned();
+    if let Ok(h) = open_dir(&s) {
+        return Ok(h);
+    }
+    if !create {
+        return Err(format!("{s}: not an openable directory"));
+    }
+    // Deepest existing ancestor.
+    let mut missing = Vec::new();
+    let mut cur = dir.to_path_buf();
+    let base = loop {
+        if std::fs::symlink_metadata(&cur).is_ok() {
+            break open_dir(&cur.to_string_lossy())?;
+        }
+        let name = cur
+            .file_name()
+            .ok_or_else(|| format!("{s}: no existing ancestor"))?
+            .to_string_lossy()
+            .into_owned();
+        missing.push(name);
+        cur = cur
+            .parent()
+            .ok_or_else(|| format!("{s}: no existing ancestor"))?
+            .to_path_buf();
+        if missing.len() > 16 {
+            return Err(format!("{s}: too deep"));
+        }
+    };
+    let mut h = base;
+    for name in missing.iter().rev() {
+        let child = open_in_dir(
+            &h,
+            name,
+            DIR_ACCESS | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_OPEN_IF,
+            FILE_DIRECTORY_FILE,
+        )
+        .map_err(|e| format!("{s}: creating {name}: {e:?}"))?;
+        let (attrs, tag) = attr_tag(&child).ok_or_else(|| format!("{s}: cannot query {name}"))?;
+        if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 && is_name_surrogate(tag) {
+            return Err(format!("{s}: {name} is a link; refusing"));
+        }
+        h = child;
+    }
+    Ok(h)
+}
+
+/// Open `name` in `dir` for hashing (+ `extra` access), sharing read only.
+/// Ok(None) when absent; Err(Probe::Dir / Foreign) for anything not a plain file.
+fn open_file_in(
+    dir: &Handle,
+    dir_path: &str,
+    name: &str,
+    extra: u32,
+) -> Result<Option<Handle>, Probe> {
+    let h = match open_in_dir(
+        dir,
+        name,
+        FILE_GENERIC_READ | extra,
+        FILE_SHARE_READ,
+        FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE,
+    ) {
+        Ok(h) => h,
+        Err(RelOpenError::NotFound) => return Ok(None),
+        Err(RelOpenError::IsDirectory) => return Err(Probe::Dir),
+        Err(RelOpenError::Other(_)) => return Err(Probe::Foreign),
+    };
+    let Some((attrs, _)) = attr_tag(&h) else {
+        return Err(Probe::Foreign);
+    };
+    if attrs & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0 {
+        return Err(Probe::Foreign);
+    }
+    if link_count(&h) != Some(1) {
+        return Err(Probe::Foreign);
+    }
+    let want = format!(r"{}\{name}", dir_path.trim_end_matches('\\'));
+    match final_path(&h) {
+        Some(fp) if crate::qpolicy::same_path(&long_path(&want), &fp) => Ok(Some(h)),
+        _ => Err(Probe::Foreign),
+    }
+}
+
+fn hash_handle(h: &Handle) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let mut n = 0u32;
+        let ok = unsafe {
+            ReadFile(
+                h.raw(),
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                &mut n,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        if total > MAX_HASH_BYTES {
+            return None;
+        }
+        hasher.update(&buf[..n as usize]);
+    }
+    Some(crate::vault::hex(&hasher.finalize()))
+}
+
+fn write_all(h: &Handle, data: &[u8]) -> bool {
+    let mut off = 0usize;
+    while off < data.len() {
+        let chunk = (data.len() - off).min(1 << 20);
+        let mut n = 0u32;
+        let ok = unsafe {
+            WriteFile(
+                h.raw(),
+                data[off..].as_ptr(),
+                chunk as u32,
+                &mut n,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 || n == 0 {
+            return false;
+        }
+        off += n as usize;
+    }
+    unsafe { FlushFileBuffers(h.raw()) != 0 }
+}
+
+impl DecoyFs for SafeDecoyFs {
+    fn probe(&self, path: &Path) -> Probe {
+        // A directory canary / a profile folder: the path itself is a dir.
+        let s = path.to_string_lossy();
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            if meta.is_dir() {
+                return match open_dir(&s) {
+                    Ok(_) => Probe::Dir,
+                    Err(_) => Probe::Foreign,
+                };
+            }
+        }
+        let Some((parent, name)) = split(path) else {
+            return Probe::Foreign;
+        };
+        let dir = match open_dir(&parent) {
+            Ok(d) => d,
+            // A missing parent means the file is absent (it may be created
+            // later through `ensure_dir`); anything else is foreign.
+            Err(_) if std::fs::symlink_metadata(&parent).is_err() => return Probe::Absent,
+            Err(_) => return Probe::Foreign,
+        };
+        match open_file_in(&dir, &parent, &name, 0) {
+            Ok(None) => Probe::Absent,
+            Ok(Some(h)) => hash_handle(&h).map_or(Probe::Foreign, Probe::File),
+            Err(p) => p,
+        }
+    }
+
+    fn create_dirs(&self, path: &Path, hidden: bool) -> std::io::Result<()> {
+        let h = ensure_dir(path, true).map_err(std::io::Error::other)?;
+        if hidden {
+            // Re-open with attribute-write access through the verified chain.
+            if let Some((parent, name)) = split(path) {
+                if let Ok(p) = open_dir(&parent) {
+                    if let Ok(d) = open_in_dir(
+                        &p,
+                        &name,
+                        FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        FILE_OPEN,
+                        FILE_DIRECTORY_FILE,
+                    ) {
+                        if let Some((attrs, _)) = attr_tag(&d) {
+                            if attrs & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+                                set_attributes(&d, attrs | FILE_ATTRIBUTE_HIDDEN);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        drop(h);
+        Ok(())
+    }
+
+    fn write_file(
+        &self,
+        path: &Path,
+        data: &[u8],
+        replace_sha: Option<&str>,
+        hidden: bool,
+    ) -> std::io::Result<()> {
+        let (parent, name) = split(path).ok_or_else(|| std::io::Error::other("bad canary path"))?;
+        let dir = ensure_dir(Path::new(&parent), true).map_err(std::io::Error::other)?;
+        // Re-verify the (possibly just created) parent by path too.
+        let dir_path = parent.clone();
+        // Existing file: must be exactly ours to be replaced.
+        match (open_file_in(&dir, &dir_path, &name, DELETE), replace_sha) {
+            (Ok(None), _) => {}
+            (Ok(Some(h)), Some(want)) => {
+                if !hash_handle(&h).is_some_and(|s| s.eq_ignore_ascii_case(want)) {
+                    return Err(std::io::Error::other("canary changed; not replaced"));
+                }
+                if !delete_now_by_handle(&h) {
+                    return Err(std::io::Error::other("cannot remove old canary"));
+                }
+            }
+            _ => return Err(std::io::Error::other("target exists and is not ours")),
+        }
+        // Temp file relative to the verified directory, then renamed in.
+        let tmp = format!("{name}.kestrel-tmp");
+        if let Ok(Some(old)) = open_file_in(&dir, &dir_path, &tmp, DELETE) {
+            delete_now_by_handle(&old); // our own leftover from a crash
+        }
+        let access = FILE_GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES;
+        let h = create_in_dir(&dir, &tmp, access, 0)?;
+        if !write_all(&h, data) {
+            delete_now_by_handle(&h);
+            return Err(std::io::Error::other("writing canary failed"));
+        }
+        if hidden {
+            set_attributes(&h, FILE_ATTRIBUTE_HIDDEN);
+        }
+        if !rename_in_dir(&h, &dir, &name) {
+            let e = std::io::Error::last_os_error();
+            delete_now_by_handle(&h);
+            return Err(std::io::Error::other(format!(
+                "canary not renamed into place (target appeared?): {e}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn remove_if_ours(&self, path: &Path, sha: &str) -> RemoveResult {
+        let Some((parent, name)) = split(path) else {
+            return RemoveResult::NotOurs;
+        };
+        let dir = match open_dir(&parent) {
+            Ok(d) => d,
+            Err(_) if std::fs::symlink_metadata(&parent).is_err() => return RemoveResult::Gone,
+            Err(_) => return RemoveResult::NotOurs,
+        };
+        match open_file_in(&dir, &parent, &name, DELETE) {
+            Ok(None) => RemoveResult::Gone,
+            Ok(Some(h)) => match hash_handle(&h) {
+                Some(s) if s.eq_ignore_ascii_case(sha) => {
+                    if delete_now_by_handle(&h) {
+                        RemoveResult::Removed
+                    } else {
+                        RemoveResult::Failed
+                    }
+                }
+                Some(_) => RemoveResult::NotOurs,
+                None => RemoveResult::Failed,
+            },
+            // Sharing violation (someone has it open for writing) etc.
+            // is reported as Foreign by `open_file_in`: leave it.
+            Err(_) => RemoveResult::NotOurs,
+        }
+    }
+}
+
 /// Plant decoys for every profile (SYSTEM only). Returns the decoy paths
 /// (Win32) now in place, including ones planted earlier.
 pub fn plant(state_dir: &Path, profiles: &[String]) -> Vec<String> {
     let mut reg: CanaryRegistry = rcanary::load_registry(state_dir);
-    let ok = rcanary::plant(profiles, &mut reg);
+    let ok = rcanary::plant_with(&SafeDecoyFs, profiles, &mut reg);
     if let Err(e) = rcanary::save_registry(state_dir, &reg) {
         tracing::warn!("saving ransomware canary registry: {e}");
     }
@@ -83,8 +403,15 @@ pub fn start_poller(
                         .and_then(|m| m.to_nt_lower(&win32))
                         .unwrap_or_else(|| win32.to_ascii_lowercase());
                     let ts = kestrel_common::now_ms();
+                    // V-H9: only a single recent (write-capable) opener is
+                    // blamed; a remote (pid 4) writer is reported as such.
                     let emit = file_state.lock().ok().map(|mut fs| {
-                        let pid = fs.last_opener(&nt, ts).unwrap_or(0);
+                        let w = fs.openers.in_place_writer(&nt, ts);
+                        let pid = match w {
+                            InPlaceWriter::Local(p) => p,
+                            InPlaceWriter::Remote => 4,
+                            InPlaceWriter::Unknown => 0,
+                        };
                         fs.agg.canary_modified(ts, pid, &nt)
                     });
                     if let Some(e) = emit {
@@ -97,4 +424,106 @@ pub fn start_poller(
                 }
             }
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::canary::DecoyFs;
+    use kestrel_platform::CanarySpec;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("kestrel-safefs-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn safe_fs_plant_probe_remove() {
+        let d = tmp("plant");
+        let fs = SafeDecoyFs;
+        let p = d.join("Documents").join("!Payroll Q3.xlsx");
+        assert_eq!(fs.probe(&p), Probe::Absent);
+        fs.write_file(&p, b"decoy-1", None, false).unwrap();
+        let sha1 = match fs.probe(&p) {
+            Probe::File(s) => s,
+            other => panic!("{other:?}"),
+        };
+        // Refuses to create over an existing file, or replace a foreign one.
+        assert!(fs.write_file(&p, b"x", None, false).is_err());
+        assert!(fs.write_file(&p, b"x", Some("00"), false).is_err());
+        // Replaces ours.
+        fs.write_file(&p, b"decoy-2", Some(&sha1), false).unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"decoy-2");
+        // Not ours any more -> left alone.
+        assert_eq!(fs.remove_if_ours(&p, &sha1), RemoveResult::NotOurs);
+        let sha2 = match fs.probe(&p) {
+            Probe::File(s) => s,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(fs.remove_if_ours(&p, &sha2), RemoveResult::Removed);
+        assert!(!p.exists());
+        assert_eq!(fs.remove_if_ours(&p, &sha2), RemoveResult::Gone);
+        // Hard-linked file is never ours.
+        let q = d.join("Documents").join("linked.docx");
+        std::fs::write(&q, b"z").unwrap();
+        std::fs::hard_link(&q, d.join("other-name")).unwrap();
+        assert_eq!(fs.probe(&q), Probe::Foreign);
+        // Directory canary through the generic planter (hidden).
+        let mut reg = CanaryRegistry::default();
+        let w = d.join("AppData").join("wallet");
+        let specs = vec![CanarySpec {
+            path: w.to_string_lossy().into_owned(),
+            category: kestrel_common::DataCategory::CryptoWallet,
+            content: vec![],
+            is_dir: true,
+        }];
+        assert_eq!(
+            crate::canary::plant_with(&fs, &specs, &mut reg, true).len(),
+            1
+        );
+        assert!(w.is_dir());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// V-H8: a junction in the path (here: the decoy folder redirected to a
+    /// "victim" directory) is never followed for plant or delete.
+    #[test]
+    fn safe_fs_refuses_junctions() {
+        let d = tmp("junction");
+        let victim = d.join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("!Payroll Q3.xlsx"), b"victim data").unwrap();
+        let link = d.join("Documents");
+        let ok = std::process::Command::new(format!(r"{}\System32\cmd.exe", system_root()))
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&victim)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("mklink /J unavailable; skipping");
+            return;
+        }
+        let fs = SafeDecoyFs;
+        let p = link.join("!Payroll Q3.xlsx");
+        let sha = match SafeDecoyFs.probe(&victim.join("!Payroll Q3.xlsx")) {
+            Probe::File(s) => s,
+            other => panic!("{other:?}"),
+        };
+        // Same content hash, but reached through a junction: refused.
+        assert_eq!(fs.remove_if_ours(&p, &sha), RemoveResult::NotOurs);
+        assert!(fs
+            .write_file(&link.join("new.docx"), b"x", None, false)
+            .is_err());
+        assert_eq!(
+            std::fs::read(victim.join("!Payroll Q3.xlsx")).unwrap(),
+            b"victim data"
+        );
+        assert!(!victim.join("new.docx").exists());
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

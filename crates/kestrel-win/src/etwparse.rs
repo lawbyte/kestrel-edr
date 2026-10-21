@@ -100,6 +100,23 @@ pub fn file_op_from_create_options(create_options: u32) -> FileOp {
     }
 }
 
+/// Kernel-File CreateOptions → disposition, `FILE_OPEN_IF` (3) counting as a
+/// create at persistence drop paths (`open_if_is_create`): PowerShell
+/// `Set-Content`/`Out-File` and many writers open-or-create, and the event
+/// does not say whether the file existed (lab VM: a Startup `.vbs` written
+/// with Set-Content came through as `open` only). Kernel-File 30
+/// (CreateNewFile) is the authoritative "file was created" signal and is
+/// reported as a create separately.
+pub fn file_op_for_path(create_options: u32, open_if_is_create: bool) -> FileOp {
+    match (create_options >> 24) & 0xff {
+        3 if open_if_is_create => FileOp::Create,
+        _ => file_op_from_create_options(create_options),
+    }
+}
+
+/// CreateOptions value carrying `FILE_CREATE` (used for Kernel-File 30).
+pub const CREATE_OPTIONS_FILE_CREATE: u32 = 2 << 24;
+
 /// Kernel-File CreateOptions has FILE_DIRECTORY_FILE (0x1) for directory opens.
 pub fn is_directory_open(create_options: u32) -> bool {
     create_options & 0x0000_0001 != 0
@@ -541,6 +558,32 @@ mod tests {
         assert_eq!(file_op_from_create_options(0x0500_0060), FileOp::Create);
         assert_eq!(file_op_from_create_options(0x0300_0000), FileOp::Open);
         assert!(is_directory_open(0x0100_0001));
+        // Every create disposition (high 8 bits of CreateOptions).
+        for (d, want) in [
+            (0u32, FileOp::Create), // FILE_SUPERSEDE
+            (1, FileOp::Open),      // FILE_OPEN
+            (2, FileOp::Create),    // FILE_CREATE (CREATE_NEW)
+            (3, FileOp::Open),      // FILE_OPEN_IF (OPEN_ALWAYS)
+            (4, FileOp::Create),    // FILE_OVERWRITE (TRUNCATE_EXISTING)
+            (5, FileOp::Create),    // FILE_OVERWRITE_IF (CREATE_ALWAYS)
+        ] {
+            // Low bits (FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT) do not matter.
+            assert_eq!(file_op_from_create_options((d << 24) | 0x60), want, "{d}");
+            assert_eq!(file_op_for_path((d << 24) | 0x60, false), want, "{d}");
+        }
+        // Open-or-create at a persistence drop path is a create.
+        assert_eq!(file_op_for_path(0x0300_0060, true), FileOp::Create);
+        assert_eq!(file_op_for_path(0x0100_0060, true), FileOp::Open);
+        assert_eq!(
+            file_op_from_create_options(CREATE_OPTIONS_FILE_CREATE),
+            FileOp::Create
+        );
+        assert!(crate::filters::is_persistence_drop_path(
+            r"C:\Users\lab\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\kestrel-lab.vbs"
+        ));
+        assert!(!crate::filters::is_persistence_drop_path(
+            r"C:\Users\lab\Documents\x.vbs"
+        ));
     }
 
     #[test]

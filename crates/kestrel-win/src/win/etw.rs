@@ -32,7 +32,7 @@ use super::util::*;
 use crate::consts::{self, eid, field, kw, provider};
 use crate::etwparse::*;
 use crate::evtxml::SysmonCross;
-use crate::fileagg::{FileAgg, FileScope};
+use crate::fileagg::{DecoyOpeners, FileAgg, FileScope};
 use crate::persist::{record_from_fields, PersistRecord};
 use crate::taskxml::TaskInfo;
 use ferrisetw::parser::Parser;
@@ -68,6 +68,9 @@ pub enum Raw {
         ts: i64,
         pid: u32,
         ppid: u32,
+        /// EVENT_HEADER ProcessId of the start event: the process that really
+        /// created this one. Differs from `ppid` under PPID spoofing (V-H1).
+        creator_pid: u32,
         create_ft: u64,
         session: u32,
         label_sid: Option<String>,
@@ -165,6 +168,10 @@ pub enum Raw {
         op: RegistryOp,
         ty: u32,
         data: Option<Vec<u8>>,
+        /// The watched key (re)appeared — created, or renamed into place —
+        /// and its values are reported wholesale: only a KeyObject-exact
+        /// join counts (V-H7).
+        reopened: bool,
     },
     /// Ransomware sensor summary (paths are lower-cased NT paths).
     FileActivity {
@@ -236,32 +243,25 @@ pub struct Counters {
 /// Kernel-File callback state shared with the canary poller.
 pub struct FileState {
     pub agg: FileAgg,
-    /// Ransomware canary (NT, lower-case) → last (pid, ts) that opened it.
-    openers: HashMap<String, (u32, i64)>,
+    /// Recent openers of each ransomware decoy (V-H9).
+    pub openers: DecoyOpeners,
 }
 
 impl FileState {
     pub fn new(scope: FileScope) -> Self {
         FileState {
             agg: FileAgg::new(scope),
-            openers: HashMap::new(),
+            openers: DecoyOpeners::default(),
         }
     }
 
-    /// Last non-Kestrel process that opened `nt` within 2 minutes of `ts`.
-    pub fn last_opener(&self, nt: &str, ts: i64) -> Option<u32> {
-        self.openers
-            .get(nt)
-            .filter(|(_, t)| ts - *t < 120_000)
-            .map(|(p, _)| *p)
-    }
-
-    fn note_open(&mut self, nt: &str, pid: u32, ts: i64) {
+    fn note_open(&mut self, nt: &str, pid: u32, ts: i64, create_options: u32) {
         if self.agg.is_canary(nt) {
-            if self.openers.len() > 4096 {
-                self.openers.clear();
-            }
-            self.openers.insert(nt.to_string(), (pid, ts));
+            // Supersede / create / overwrite dispositions are write-capable;
+            // the event has no DesiredAccess (see `DecoyOpeners`).
+            let write =
+                file_op_from_create_options(create_options) == kestrel_common::FileOp::Create;
+            self.openers.note(nt, pid, ts, write);
         }
     }
 }
@@ -334,11 +334,13 @@ fn decode_process(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
     let ts = ts_of(rec);
     match rec.event_id() {
         eid::PROC_START => {
+            let creator_pid = rec.process_id();
             let r = with_fields(rec, loc, |f| {
                 Some(Raw::ProcStart {
                     ts,
                     pid: f.u32(field::PROCESS_ID)?,
                     ppid: f.u32(field::PARENT_PROCESS_ID).unwrap_or(0),
+                    creator_pid,
                     create_ft: f.u64(field::CREATE_TIME).unwrap_or(0),
                     session: f.u32(field::SESSION_ID).unwrap_or(0),
                     label_sid: f.string(field::MANDATORY_LABEL),
@@ -353,6 +355,7 @@ fn decode_process(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
                 pid,
                 ts,
                 ppid,
+                creator_pid,
                 create_ft,
                 session,
                 label_sid,
@@ -371,6 +374,7 @@ fn decode_process(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
                     ts,
                     pid,
                     ppid,
+                    creator_pid,
                     create_ft,
                     session,
                     label_sid,
@@ -413,8 +417,10 @@ fn decode_file(
 ) -> Option<Raw> {
     let ts = ts_of(rec);
     let pid = rec.process_id();
-    // Aggregate only real user processes (pid 4 = System / SMB server writes).
-    let agg = state.filter(|_| pid != sink.self_pid && pid != 4 && pid != 0);
+    // Aggregate everything but the agent itself. pid 4 (System: SMB server
+    // writes from a remote client) is aggregated too; the translator emits
+    // its summaries with `remote_writer` and no local actor (V-H9).
+    let agg = state.filter(|_| pid != sink.self_pid && pid != 0);
     let emit = |e: Option<crate::fileagg::AggEmit>| {
         if let Some(e) = e {
             sink.counters
@@ -440,7 +446,7 @@ fn decode_file(
             if let Some(st) = agg {
                 let nt = name.to_ascii_lowercase();
                 if let Ok(mut st) = st.lock() {
-                    st.note_open(&nt, pid, ts);
+                    st.note_open(&nt, pid, ts, co);
                     let before = st.agg.dropped;
                     let e = st
                         .agg
@@ -460,24 +466,48 @@ fn decode_file(
                 create_options: co,
             })
         }
-        eid::FILE_CREATE_NEW | eid::FILE_DELETE_PATH | eid::FILE_RENAME_PATH => {
-            let st = agg?;
-            let (fo, path) = with_fields(rec, loc, |f| {
-                let path = if id == eid::FILE_CREATE_NEW {
-                    f.string(field::FILE_NAME)
-                } else {
-                    f.string(field::FILE_PATH)
-                };
+        eid::FILE_CREATE_NEW => {
+            // A file was really created: aggregate it, and report it to the
+            // sensitive-path filter as a create (persistence drops written
+            // with open-or-create dispositions, lab VM).
+            let (fo, name) = with_fields(rec, loc, |f| {
                 Some((
                     f.u64(field::FILE_OBJECT).unwrap_or(0),
-                    path.unwrap_or_default(),
+                    f.string(field::FILE_NAME)?,
+                ))
+            })?;
+            if let Some(st) = agg {
+                let nt = name.to_ascii_lowercase();
+                let e = st.lock().ok().and_then(|mut st| {
+                    let before = st.agg.dropped;
+                    let e = st.agg.on_create_new(ts, pid, fo, &nt);
+                    sink.counters
+                        .file_agg_dropped
+                        .fetch_add(st.agg.dropped - before, Ordering::Relaxed);
+                    e
+                });
+                emit(e);
+            }
+            Some(Raw::FileCreate {
+                ts,
+                pid,
+                file_object: fo,
+                name_nt: name,
+                create_options: CREATE_OPTIONS_FILE_CREATE,
+            })
+        }
+        eid::FILE_DELETE_PATH | eid::FILE_RENAME_PATH => {
+            let st = agg?;
+            let (fo, path) = with_fields(rec, loc, |f| {
+                Some((
+                    f.u64(field::FILE_OBJECT).unwrap_or(0),
+                    f.string(field::FILE_PATH).unwrap_or_default(),
                 ))
             })?;
             let nt = path.to_ascii_lowercase();
             let e = st.lock().ok().and_then(|mut st| {
                 let before = st.agg.dropped;
                 let e = match id {
-                    eid::FILE_CREATE_NEW => st.agg.on_create_new(ts, pid, fo, &nt),
                     eid::FILE_DELETE_PATH => st.agg.on_delete(ts, pid, fo, &nt),
                     _ => st.agg.on_rename(ts, pid, fo, &nt),
                 };
@@ -673,8 +703,9 @@ fn decode_registry(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
 
 /// TaskScheduler 106/140/141, SCM 7045, WMI-Activity 5861 (field names from
 /// the manifests on build 26200; see [`crate::persist`]). The task XML /
-/// service key is read here (own low-volume session thread).
-fn decode_persist(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
+/// service key is read by the enrichment worker, never in this callback
+/// (V-M9); the record is queued there and nothing is returned.
+fn decode_persist(rec: &EventRecord, loc: &SchemaLocator, sink: &Sink) -> Option<Raw> {
     use crate::persist::eid as p;
     let id = rec.event_id();
     let names: &[&str] = match id {
@@ -698,14 +729,9 @@ fn decode_persist(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
                 .collect(),
         )
     })?;
-    let mut record = record_from_fields(id, &fields)?;
-    let task = super::persist::enrich(&mut record);
-    Some(Raw::Persist {
-        ts: ts_of(rec),
-        logger_pid: rec.process_id(),
-        record,
-        task,
-    })
+    let record = record_from_fields(id, &fields)?;
+    super::persist::submit(sink, ts_of(rec), rec.process_id(), record);
+    None
 }
 
 fn decode_dns(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
@@ -970,21 +996,19 @@ pub fn start_session(kind: SessionKind, sink: &Sink, opts: &SensorOpts) -> anyho
             Running::User(t)
         }
         SessionKind::File => {
-            let mut file_kw = kw::FILE_CREATE;
-            let mut file_ids = vec![eid::FILE_CREATE];
+            // CreateNewFile (30) always: it is the only reliable "a file was
+            // created" signal (open-or-create dispositions say nothing) and
+            // new files are far rarer than opens.
+            let mut file_kw = kw::FILE_CREATE | kw::FILE_CREATE_NEW_FILE;
+            let mut file_ids = vec![eid::FILE_CREATE, eid::FILE_CREATE_NEW];
             if FILE_READ_EVENTS {
                 file_kw |= kw::FILE_READ;
                 file_ids.push(eid::FILE_READ);
             }
             if opts.file_activity {
                 // Never 0x20 (all I/O) or 0x200 (Write): volume.
-                file_kw |=
-                    kw::FILE_DELETE_PATH | kw::FILE_RENAME_SETLINK_PATH | kw::FILE_CREATE_NEW_FILE;
-                file_ids.extend([
-                    eid::FILE_DELETE_PATH,
-                    eid::FILE_RENAME_PATH,
-                    eid::FILE_CREATE_NEW,
-                ]);
+                file_kw |= kw::FILE_DELETE_PATH | kw::FILE_RENAME_SETLINK_PATH;
+                file_ids.extend([eid::FILE_DELETE_PATH, eid::FILE_RENAME_PATH]);
             }
             let state = opts.file_activity.then(|| opts.file_state.clone());
             let s2 = sink.clone();
@@ -1011,6 +1035,7 @@ pub fn start_session(kind: SessionKind, sink: &Sink, opts: &SensorOpts) -> anyho
         }
         SessionKind::Persist => {
             use crate::persist::eid as p;
+            let (s1, s2, s3) = (sink.clone(), sink.clone(), sink.clone());
             let (t, h) = UserTrace::new()
                 .named(name.clone())
                 .set_trace_properties(props(1, 8))
@@ -1020,7 +1045,7 @@ pub fn start_session(kind: SessionKind, sink: &Sink, opts: &SensorOpts) -> anyho
                     5,
                     vec![p::TASK_REGISTERED, p::TASK_UPDATED, p::TASK_DELETED],
                     sink,
-                    decode_persist,
+                    move |rec, loc| decode_persist(rec, loc, &s1),
                 ))
                 .enable(prov(
                     provider::WMI_ACTIVITY,
@@ -1028,7 +1053,7 @@ pub fn start_session(kind: SessionKind, sink: &Sink, opts: &SensorOpts) -> anyho
                     5,
                     vec![p::WMI_ESS_TO_CONSUMER_BINDING],
                     sink,
-                    decode_persist,
+                    move |rec, loc| decode_persist(rec, loc, &s2),
                 ))
                 .enable(prov(
                     provider::SCM,
@@ -1036,7 +1061,7 @@ pub fn start_session(kind: SessionKind, sink: &Sink, opts: &SensorOpts) -> anyho
                     5,
                     vec![p::SCM_SERVICE_INSTALLED],
                     sink,
-                    decode_persist,
+                    move |rec, loc| decode_persist(rec, loc, &s3),
                 ))
                 .start()
                 .map_err(|e| anyhow::anyhow!("start {name}: {e:?}"))?;

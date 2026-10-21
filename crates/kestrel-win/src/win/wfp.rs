@@ -148,7 +148,36 @@ impl Engine {
 
     /// Add filters atomically; returns their keys.
     pub fn add_filters(&self, specs: &[FilterSpec]) -> Result<Vec<String>, String> {
+        // V-H10: an app-scoped permit without the user-id condition would let
+        // any process started from the agent's path through. Refuse.
+        if !crate::wfp_plan::app_permits_have_user_sd(specs) {
+            return Err(
+                "refusing to add an application permit without an ALE user-id condition".into(),
+            );
+        }
         self.ensure_objects()?;
+        // Self-relative security descriptors for ALE_USER_ID conditions; the
+        // LocalSd allocations live until the end of this function (after
+        // every FwpmFilterAdd0). A descriptor that cannot be built fails the
+        // whole batch (fail closed).
+        let mut sds: Vec<(String, LocalSd, u32)> = Vec::new();
+        for s in specs {
+            for c in &s.conditions {
+                if let Cond::UserSd(sddl) = c {
+                    if sds.iter().any(|(q, _, _)| q == sddl) {
+                        continue;
+                    }
+                    let sd = sd_from_sddl(sddl)
+                        .ok_or_else(|| format!("invalid ALE user-id security descriptor {sddl}"))?;
+                    let len =
+                        unsafe { windows_sys::Win32::Security::GetSecurityDescriptorLength(sd.0) };
+                    if len == 0 {
+                        return Err(format!("empty security descriptor for {sddl}"));
+                    }
+                    sds.push((sddl.clone(), sd, len));
+                }
+            }
+        }
         // Resolve app ids up front (they need freeing with FwpmFreeMemory0).
         let mut app_ids: Vec<(String, *mut FWP_BYTE_BLOB)> = Vec::new();
         for s in specs {
@@ -176,7 +205,7 @@ impl Engine {
             let mut keys = Vec::new();
             for spec in specs {
                 let key = uuid::Uuid::new_v4();
-                self.add_one(spec, key, &app_ids)?;
+                self.add_one(spec, key, &app_ids, &sds)?;
                 keys.push(key.to_string());
             }
             Ok(keys)
@@ -192,12 +221,14 @@ impl Engine {
         spec: &FilterSpec,
         key: uuid::Uuid,
         app_ids: &[(String, *mut FWP_BYTE_BLOB)],
+        sds: &[(String, LocalSd, u32)],
     ) -> Result<(), String> {
         // Storage that must outlive FwpmFilterAdd0.
         let mut name = wide(&spec.name);
         let mut desc = wide("Managed by Kestrel EDR");
         let mut pk = provider_key();
         let mut v6: Vec<Box<FWP_BYTE_ARRAY16>> = Vec::new();
+        let mut sd_blobs: Vec<Box<FWP_BYTE_BLOB>> = Vec::new();
         let mut conds: Vec<FWPM_FILTER_CONDITION0> = Vec::new();
         for c in &spec.conditions {
             let mut fc: FWPM_FILTER_CONDITION0 = unsafe { std::mem::zeroed() };
@@ -248,6 +279,23 @@ impl Engine {
                     fc.conditionValue.r#type = FWP_UINT32;
                     fc.conditionValue.Anonymous.uint32 = FWP_CONDITION_FLAG_IS_LOOPBACK;
                 }
+                Cond::UserSd(sddl) => {
+                    // V-H10: matches only when the connecting token is
+                    // granted FWP_ACTRL_MATCH_FILTER by this descriptor.
+                    let (sd, len) = sds
+                        .iter()
+                        .find(|(q, _, _)| q == sddl)
+                        .map(|(_, sd, len)| (sd.0, *len))
+                        .ok_or("security descriptor missing")?;
+                    let mut b = Box::new(FWP_BYTE_BLOB {
+                        size: len,
+                        data: sd as *mut u8,
+                    });
+                    fc.fieldKey = FWPM_CONDITION_ALE_USER_ID;
+                    fc.conditionValue.r#type = FWP_SECURITY_DESCRIPTOR_TYPE;
+                    fc.conditionValue.Anonymous.sd = &mut *b;
+                    sd_blobs.push(b);
+                }
             }
             conds.push(fc);
         }
@@ -274,6 +322,7 @@ impl Engine {
         let mut id = 0u64;
         let rc = unsafe { FwpmFilterAdd0(self.0, &f, std::ptr::null_mut(), &mut id) };
         drop(v6);
+        drop(sd_blobs);
         if rc != 0 {
             return Err(format!("{} ('{}')", err("FwpmFilterAdd0", rc), spec.name));
         }
@@ -384,8 +433,72 @@ pub fn remove_all_wfp_objects() -> anyhow::Result<()> {
     .map_err(anyhow::Error::msg)
 }
 
-/// (isolated_at, permitted servers, analyst allow-list, current plan).
-pub type IsolationInputs = (Option<i64>, Vec<String>, Vec<String>, Vec<FilterSpec>);
+/// Isolation state needed for a re-plan.
+pub struct IsolationInputs {
+    /// Server addresses permitted (frozen at isolation time, V-M7).
+    pub servers: Vec<String>,
+    /// Analyst allow-list.
+    pub allow_ips: Vec<String>,
+    /// Resolvers frozen at isolation time (empty for pre-V-M7 state files).
+    pub dns: Vec<String>,
+    /// Current plan.
+    pub specs: Vec<FilterSpec>,
+}
+
+/// The agent process as WFP sees it (V-H10): its image path plus the SID
+/// that only this process's token carries — the service SID
+/// `NT SERVICE\KestrelAgent` when the token holds it (the service is
+/// installed with `SERVICE_SID_TYPE_UNRESTRICTED`, see `service.rs`), else
+/// the token's user SID (LocalSystem for older installs; the interactive
+/// user for a console run). None (fail closed) when neither can be read.
+pub fn agent_identity() -> Option<crate::wfp_plan::AgentId> {
+    let exe = std::env::current_exe()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())?;
+    let sid = service_sid_if_member().or_else(|| {
+        let h = open_process(
+            std::process::id(),
+            windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION,
+        )?;
+        process_token_info(&h).0
+    })?;
+    crate::wfp_plan::AgentId::new(&exe, &sid)
+}
+
+/// `NT SERVICE\<SERVICE_NAME>` SID string when the current process token
+/// contains it as an enabled group (i.e. we run as the service with a
+/// service SID type set).
+fn service_sid_if_member() -> Option<String> {
+    use windows_sys::Win32::Security::{CheckTokenMembership, LookupAccountNameW, SID_NAME_USE};
+    let name = wide(&format!(r"NT SERVICE\{}", crate::consts::SERVICE_NAME));
+    let mut sid = vec![0u8; 256];
+    let mut sid_len = sid.len() as u32;
+    let mut dom = vec![0u16; 256];
+    let mut dom_len = dom.len() as u32;
+    let mut use_: SID_NAME_USE = 0;
+    unsafe {
+        if LookupAccountNameW(
+            std::ptr::null(),
+            name.as_ptr(),
+            sid.as_mut_ptr() as _,
+            &mut sid_len,
+            dom.as_mut_ptr(),
+            &mut dom_len,
+            &mut use_,
+        ) == 0
+        {
+            return None;
+        }
+        let mut member = 0;
+        if CheckTokenMembership(std::ptr::null_mut(), sid.as_mut_ptr() as _, &mut member) == 0
+            || member == 0
+        {
+            return None;
+        }
+        sid_to_string(sid.as_mut_ptr() as _)
+    }
+}
 
 fn clear_isolation(s: &mut WfpState) {
     s.isolated = false;
@@ -395,6 +508,7 @@ fn clear_isolation(s: &mut WfpState) {
     s.isolation_allow.clear();
     s.isolation_servers.clear();
     s.isolation_allow_ips.clear();
+    s.isolation_dns.clear();
 }
 
 /// Break-glass (H10): remove Kestrel's isolation filters without the
@@ -466,12 +580,14 @@ impl Wfp {
     /// are remembered so the plan can be refreshed when the server address
     /// or the adapters' DNS servers change (H10). `keep_since` keeps the
     /// original isolation start on a re-plan.
+    #[allow(clippy::too_many_arguments)]
     pub fn isolate(
         &self,
         specs: Vec<FilterSpec>,
         allow_desc: Vec<String>,
         servers: Vec<String>,
         allow_ips: Vec<String>,
+        dns: Vec<String>,
         keep_since: bool,
     ) -> Result<String, String> {
         let e = Engine::open()?;
@@ -492,6 +608,7 @@ impl Wfp {
         s.isolation_allow = allow_desc.clone();
         s.isolation_servers = servers;
         s.isolation_allow_ips = allow_ips;
+        s.isolation_dns = dns;
         self.persist(&s);
         Ok(format!(
             "host isolated ({n} WFP filters); reachable: loopback, DHCP, DNS resolvers, {}",
@@ -499,16 +616,14 @@ impl Wfp {
         ))
     }
 
-    /// Current isolation inputs: (isolated_at, servers, allow ips, specs).
+    /// Current isolation inputs (None when not isolated).
     pub fn isolation_inputs(&self) -> Option<IsolationInputs> {
         let s = self.state.lock().ok()?;
-        s.isolated.then(|| {
-            (
-                s.isolated_at,
-                s.isolation_servers.clone(),
-                s.isolation_allow_ips.clone(),
-                s.isolation_specs.clone(),
-            )
+        s.isolated.then(|| IsolationInputs {
+            servers: s.isolation_servers.clone(),
+            allow_ips: s.isolation_allow_ips.clone(),
+            dns: s.isolation_dns.clone(),
+            specs: s.isolation_specs.clone(),
         })
     }
 
@@ -688,21 +803,33 @@ impl Wfp {
     }
 
     /// Always-on hard permits for the agent's server connections.
+    /// An empty `specs` removes the existing permits (no agent identity:
+    /// never leave app-only permits from an older version in place, V-H10).
     pub fn ensure_server_permits(&self, specs: Vec<FilterSpec>) -> Result<(), String> {
-        if specs.is_empty() {
-            return Ok(());
-        }
         let e = Engine::open()?;
         let mut s = self.state.lock().map_err(|_| "state lock poisoned")?;
+        if specs.is_empty() {
+            if !s.server_permit_filters.is_empty() {
+                let old = std::mem::take(&mut s.server_permit_filters);
+                e.delete_filters(&old)?;
+                s.server_permit_specs.clear();
+                self.persist(&s);
+            }
+            return Ok(());
+        }
+        // A changed plan (e.g. filters from before V-H10 without the user-id
+        // condition) is replaced, not only missing filters.
         let all_present = !s.server_permit_filters.is_empty()
             && s.server_permit_filters.len() == specs.len()
+            && !crate::wfp_plan::isolation_plan_changed(&s.server_permit_specs, &specs)
             && s.server_permit_filters.iter().all(|k| e.filter_exists(k));
         if all_present {
             return Ok(());
         }
-        let old = std::mem::take(&mut s.server_permit_filters);
+        let keys = e.add_filters(&specs)?;
+        let old = std::mem::replace(&mut s.server_permit_filters, keys);
         let _ = e.delete_filters(&old);
-        s.server_permit_filters = e.add_filters(&specs)?;
+        s.server_permit_specs = specs;
         self.persist(&s);
         Ok(())
     }

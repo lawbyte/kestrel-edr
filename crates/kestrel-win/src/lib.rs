@@ -40,6 +40,7 @@ pub mod qpolicy;
 pub mod rcanary;
 pub mod regdiff;
 pub mod sddl;
+pub mod spawnreg;
 pub mod taskxml;
 pub mod tray;
 pub mod vault;
@@ -59,3 +60,27 @@ pub use win::statedir::{secure_state_dir, StateDirResult};
 pub use win::wfp::{release_isolation_offline, remove_all_wfp_objects};
 
 pub use consts::{SERVICE_ARG, SERVICE_NAME};
+
+/// `%SystemRoot%` from `GetSystemWindowsDirectoryW`, never from the caller's
+/// environment (a standard user controls that for the agent CLI: V-H1).
+#[cfg(windows)]
+/// Authenticode check of a local file (WinVerifyTrust, whole chain, online
+/// revocation): (state, signer subject). A revoked certificate is reported as
+/// `Invalid`. Used for update packages (V-H3).
+pub fn verify_file_signature(
+    path: &std::path::Path,
+) -> (kestrel_common::SignatureState, Option<String>) {
+    use win::enrich::{verify_ex, RevMode, Revocation};
+    let v = verify_ex(&path.to_string_lossy(), RevMode::Online);
+    let state = if v.revocation == Revocation::Revoked {
+        kestrel_common::SignatureState::Invalid
+    } else {
+        v.state
+    };
+    (state, v.signer)
+}
+
+#[cfg(windows)]
+pub fn windows_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(win::util::system_root())
+}

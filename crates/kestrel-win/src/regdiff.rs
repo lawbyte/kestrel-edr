@@ -15,7 +15,7 @@
 use crate::etwparse::{
     le_u32, le_u64, utf16le, REG_DWORD, REG_EXPAND_SZ, REG_MULTI_SZ, REG_QWORD, REG_SZ,
 };
-use kestrel_common::RegistryOp;
+use kestrel_common::{Attribution, RegistryOp};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 /// Which hive a watch spec applies to.
@@ -496,13 +496,35 @@ pub struct EtwWrite {
 }
 
 /// Joins watcher changes to ETW writers.
+///
+/// Security review v1.1 V-H6: the value name alone does not identify the
+/// writer (an attacker can write the same value name elsewhere at the same
+/// moment, e.g. with the signed `reg.exe`, to choose who gets blamed). So:
+/// * every candidate in the window is collected;
+/// * a write whose `KeyObject` (per-handle kernel object, so per process) was
+///   learnt — from an earlier **unambiguous** join by the **same pid** — to
+///   be this key is [`Attribution::Exact`];
+/// * otherwise the value-name match is only [`Attribution::Heuristic`] (the
+///   closest candidate in time is reported; the engine never kills on it);
+/// * no candidate → `None` (pid 0).
+///
+/// A KeyObject → key mapping is learnt only from a join with exactly one
+/// distinct candidate pid (the real writer of a watched value is always a
+/// candidate unless ETW lost the event, so a single candidate is the writer).
 #[derive(Debug, Default)]
 pub struct RegJoin {
     writes: VecDeque<EtwWrite>,
-    /// KeyObject → lower-cased normalised key it was last joined to.
-    key_objects: HashMap<u64, String>,
+    /// KeyObject → (lower-cased normalised key, pid that used the handle).
+    key_objects: HashMap<u64, (String, u32)>,
     pub attributed: u64,
     pub unattributed: u64,
+}
+
+/// Result of [`RegJoin::attribute`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Writer {
+    pub pid: u32,
+    pub attribution: Attribution,
 }
 
 impl RegJoin {
@@ -532,24 +554,70 @@ impl RegJoin {
         }
     }
 
-    /// Find the writer of a change to `key` / `value_name` observed at `ts`.
-    /// Preference: a write whose KeyObject is already known to be `key`; then
-    /// an unused write with the same value name and matching op closest in
-    /// time; then any such write. Returns the pid.
+    /// Find the writer of a change to `key` / `value_name` observed at `ts`
+    /// (see the type docs for the ranking). `exact_only` (a re-created or
+    /// renamed watched key, V-H7): only a KeyObject match counts; a mere
+    /// value-name match is not used at all.
     pub fn attribute(
         &mut self,
         key: &str,
         value_name: &str,
         op: RegistryOp,
         ts: i64,
-    ) -> Option<u32> {
+        exact_only: bool,
+    ) -> Option<Writer> {
         let key_lc = key.to_ascii_lowercase();
+        let (best_exact, best_heur, heur_pids) = self.rank(&key_lc, value_name, op, ts)?;
+        let (i, attribution) = match (best_exact, best_heur) {
+            (Some(i), _) => (i, Attribution::Exact),
+            (None, Some(i)) if !exact_only => (i, Attribution::Heuristic),
+            _ => return None,
+        };
+        let w = &mut self.writes[i];
+        w.used = true;
+        let (pid, kobj) = (w.pid, w.key_object);
+        // Learn the handle only from an unambiguous join.
+        if kobj != 0 && attribution == Attribution::Heuristic && heur_pids.len() == 1 {
+            if self.key_objects.len() >= MAX_KEYOBJ {
+                self.key_objects.clear();
+            }
+            // Never re-assign a handle learnt for another process.
+            match self.key_objects.get(&kobj) {
+                Some((_, p)) if *p != pid => {}
+                _ => {
+                    self.key_objects.insert(kobj, (key_lc, pid));
+                }
+            }
+        }
+        self.attributed += 1;
+        Some(Writer { pid, attribution })
+    }
+
+    /// Is there already a KeyObject-exact writer for this change? (No side
+    /// effects: used while a change waits for late ETW events.)
+    pub fn has_exact(&self, key: &str, value_name: &str, op: RegistryOp, ts: i64) -> bool {
+        self.rank(&key.to_ascii_lowercase(), value_name, op, ts)
+            .is_some_and(|(e, _, _)| e.is_some())
+    }
+
+    /// (best exact index, best heuristic index, distinct heuristic pids).
+    #[allow(clippy::type_complexity)]
+    fn rank(
+        &self,
+        key_lc: &str,
+        value_name: &str,
+        op: RegistryOp,
+        ts: i64,
+    ) -> Option<(Option<usize>, Option<usize>, Vec<u32>)> {
         let value_lc = value_name.to_ascii_lowercase();
         let want_delete = op == RegistryOp::DeleteValue;
         if op == RegistryOp::DeleteKey {
             return None;
         }
-        let mut best: Option<(usize, (u8, i64))> = None;
+        // (index, (used, distance))
+        let mut best_exact: Option<(usize, (bool, i64))> = None;
+        let mut best_heur: Option<(usize, (bool, i64))> = None;
+        let mut heur_pids: Vec<u32> = Vec::new();
         for (i, w) in self.writes.iter().enumerate() {
             if w.value_lc != value_lc
                 || w.delete != want_delete
@@ -557,37 +625,30 @@ impl RegJoin {
             {
                 continue;
             }
-            let kobj_match = self.key_objects.get(&w.key_object).map(|k| *k == key_lc);
-            if kobj_match == Some(false) {
-                continue; // that handle is known to belong to another key
-            }
-            let rank: u8 = match (kobj_match, w.used) {
-                (Some(true), _) => 0,
-                (None, false) => 1,
-                (None, true) => 2,
-                (Some(false), _) => unreachable!(),
-            };
-            let score = (rank, (w.ts - ts).abs());
-            if best.as_ref().is_none_or(|(_, b)| score < *b) {
-                best = Some((i, score));
-            }
-        }
-        match best {
-            Some((i, _)) => {
-                let w = &mut self.writes[i];
-                w.used = true;
-                let (pid, kobj) = (w.pid, w.key_object);
-                if kobj != 0 {
-                    if self.key_objects.len() >= MAX_KEYOBJ {
-                        self.key_objects.clear();
+            let score = (w.used, (w.ts - ts).abs());
+            match self.key_objects.get(&w.key_object) {
+                Some((k, p)) if *p == w.pid && *k == key_lc => {
+                    if best_exact.as_ref().is_none_or(|(_, b)| score < *b) {
+                        best_exact = Some((i, score));
                     }
-                    self.key_objects.insert(kobj, key_lc);
                 }
-                self.attributed += 1;
-                Some(pid)
+                // That handle is known to belong to another key (same process).
+                Some((_, p)) if *p == w.pid => {}
+                _ => {
+                    if !heur_pids.contains(&w.pid) {
+                        heur_pids.push(w.pid);
+                    }
+                    if best_heur.as_ref().is_none_or(|(_, b)| score < *b) {
+                        best_heur = Some((i, score));
+                    }
+                }
             }
-            None => None,
         }
+        Some((
+            best_exact.map(|(i, _)| i),
+            best_heur.map(|(i, _)| i),
+            heur_pids,
+        ))
     }
 
     /// A change could not be attributed (counted for health).
@@ -786,38 +847,56 @@ mod tests {
         assert_eq!(render_sysmon(REG_SZ, &[]).unwrap(), "");
     }
 
+    fn w(pid: u32, attribution: Attribution) -> Option<Writer> {
+        Some(Writer { pid, attribution })
+    }
+
     #[test]
     fn join_attributes_by_value_name_and_key_object() {
+        use Attribution::{Exact, Heuristic};
         let mut j = RegJoin::new();
         let k_run = r"HKU\S-1-5-21-1\Software\Microsoft\Windows\CurrentVersion\Run";
         let k_mru = r"HKU\S-1-5-21-1\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU";
         j.record(1_000, 111, 0xA, "KestrelProbe", false);
         j.record(1_100, 222, 0xB, "Other", false);
-        // Watcher saw the change slightly after the write.
+        // Watcher saw the change slightly after the write: a value-name match
+        // is heuristic (single candidate: KeyObject 0xA is learnt).
         assert_eq!(
-            j.attribute(k_run, "kestrelprobe", RegistryOp::Set, 1_050),
-            Some(111)
+            j.attribute(k_run, "kestrelprobe", RegistryOp::Set, 1_050, false),
+            w(111, Heuristic)
         );
         // Op must match: a delete is not attributed to a set.
         assert_eq!(
-            j.attribute(k_run, "KestrelProbe", RegistryOp::DeleteValue, 1_050),
+            j.attribute(k_run, "KestrelProbe", RegistryOp::DeleteValue, 1_050, false),
             None
         );
         // Out of window.
-        assert_eq!(j.attribute(k_run, "Other", RegistryOp::Set, 9_000), None);
-        // KeyObject 0xA is now known to be the Run key: a write with the same
-        // value name through 0xA is not attributed to RunMRU.
+        assert_eq!(
+            j.attribute(k_run, "Other", RegistryOp::Set, 9_000, false),
+            None
+        );
+        // KeyObject 0xA (pid 111) is now known to be the Run key: a write
+        // through it is Exact; it is never attributed to RunMRU.
         j.record(5_000, 111, 0xA, "a", false);
         j.record(5_010, 333, 0xC, "a", false);
-        assert_eq!(j.attribute(k_mru, "a", RegistryOp::Set, 5_020), Some(333));
-        assert_eq!(j.attribute(k_run, "a", RegistryOp::Set, 5_020), Some(111));
+        assert_eq!(
+            j.attribute(k_mru, "a", RegistryOp::Set, 5_020, false),
+            w(333, Heuristic)
+        );
+        assert_eq!(
+            j.attribute(k_run, "a", RegistryOp::Set, 5_020, false),
+            w(111, Exact)
+        );
         // Delete value joins on event 6.
         j.record(7_000, 444, 0xD, "KestrelProbe", true);
         assert_eq!(
-            j.attribute(k_run, "KestrelProbe", RegistryOp::DeleteValue, 7_400),
-            Some(444)
+            j.attribute(k_run, "KestrelProbe", RegistryOp::DeleteValue, 7_400, false),
+            w(444, Heuristic)
         );
-        assert_eq!(j.attribute(k_run, "", RegistryOp::DeleteKey, 7_400), None);
+        assert_eq!(
+            j.attribute(k_run, "", RegistryOp::DeleteKey, 7_400, false),
+            None
+        );
         assert_eq!(j.attributed, 4);
         j.expire(100_000);
         assert!(j.is_empty());
@@ -825,12 +904,84 @@ mod tests {
 
     #[test]
     fn join_prefers_unused_closest_write() {
+        use Attribution::Heuristic;
         let mut j = RegJoin::new();
         j.record(1_000, 1, 0, "v", false);
         j.record(1_900, 2, 0, "v", false);
-        assert_eq!(j.attribute("HKLM\\A", "v", RegistryOp::Set, 2_000), Some(2));
-        assert_eq!(j.attribute("HKLM\\B", "v", RegistryOp::Set, 2_000), Some(1));
+        assert_eq!(
+            j.attribute("HKLM\\A", "v", RegistryOp::Set, 2_000, false),
+            w(2, Heuristic)
+        );
+        assert_eq!(
+            j.attribute("HKLM\\B", "v", RegistryOp::Set, 2_000, false),
+            w(1, Heuristic)
+        );
         // Both used: still attributes (closest).
-        assert_eq!(j.attribute("HKLM\\C", "v", RegistryOp::Set, 2_000), Some(2));
+        assert_eq!(
+            j.attribute("HKLM\\C", "v", RegistryOp::Set, 2_000, false),
+            w(2, Heuristic)
+        );
+    }
+
+    /// V-H6: malware writes `HKCU\Junk\Upd` with the signed reg.exe and its
+    /// own `Run\Upd` at the same moment. Two candidates: heuristic only, and
+    /// neither handle is learnt (so the decoy can never become "exact").
+    #[test]
+    fn ambiguous_value_name_is_heuristic_and_not_learnt() {
+        let run = r"HKU\S-1-5-21-1\Software\Microsoft\Windows\CurrentVersion\Run";
+        let mut j = RegJoin::new();
+        j.record(1_000, 50, 0x50, "Upd", false); // reg.exe -> HKCU\Junk
+        j.record(1_010, 66, 0x66, "Upd", false); // malware -> Run
+        let r = j
+            .attribute(run, "Upd", RegistryOp::Set, 1_020, false)
+            .unwrap();
+        assert_eq!(r.attribution, Attribution::Heuristic);
+        assert!(
+            j.key_objects.is_empty(),
+            "nothing learnt from an ambiguous join"
+        );
+        // Same pid, same handle later: still only heuristic.
+        j.record(3_000, 50, 0x50, "Upd", false);
+        assert_eq!(
+            j.attribute(run, "Upd", RegistryOp::Set, 3_010, false)
+                .unwrap()
+                .attribution,
+            Attribution::Heuristic
+        );
+    }
+
+    /// A learnt handle does not make another process "exact" (handle
+    /// addresses are per process; reuse by another pid is not trusted).
+    #[test]
+    fn learnt_handle_is_per_pid() {
+        let run = r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+        let mut j = RegJoin::new();
+        j.record(1_000, 7, 0x70, "A", false);
+        assert_eq!(
+            j.attribute(run, "A", RegistryOp::Set, 1_000, false)
+                .unwrap()
+                .attribution,
+            Attribution::Heuristic
+        );
+        j.record(2_000, 8, 0x70, "B", false); // same address, other process
+        assert_eq!(
+            j.attribute(run, "B", RegistryOp::Set, 2_000, false),
+            w(8, Attribution::Heuristic)
+        );
+        j.record(3_000, 7, 0x70, "C", false);
+        assert_eq!(
+            j.attribute(run, "C", RegistryOp::Set, 3_000, false),
+            w(7, Attribution::Exact)
+        );
+    }
+
+    /// V-H7: values of a re-created / renamed watched key only join on a
+    /// known handle; a same-named decoy write elsewhere is ignored.
+    #[test]
+    fn exact_only_for_recreated_keys() {
+        let run = r"HKU\S-1-5-21-1\Software\Microsoft\Windows\CurrentVersion\Run";
+        let mut j = RegJoin::new();
+        j.record(1_000, 66, 0x66, "Upd", false);
+        assert_eq!(j.attribute(run, "Upd", RegistryOp::Set, 1_010, true), None);
     }
 }

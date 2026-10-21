@@ -64,6 +64,21 @@ pub fn write_install_config(state_dir: &Path, o: &InstallOpts) -> Result<AgentCo
     Ok(cfg)
 }
 
+/// After [`write_install_config`]: when this device already holds an identity
+/// for the same server and CA (re-install, repair, or an MSI upgrade that ran
+/// the install action anyway), keep it and do not enroll again (V-M3). The
+/// enrollment token just supplied is not kept in the config then. Returns
+/// true when enrollment should be skipped.
+pub fn keep_existing_enrollment(state_dir: &Path, cfg: &mut AgentConfig) -> Result<bool> {
+    if !crate::pki::is_enrolled(state_dir, cfg) {
+        return Ok(false);
+    }
+    if cfg.pending_enroll_token.take().is_some() {
+        cfg.save(state_dir)?;
+    }
+    Ok(true)
+}
+
 /// File holding a locally generated uninstall token (only when the server
 /// did not issue one). Lives in the SYSTEM/Administrators-only state dir and
 /// is removed as soon as a server-issued token replaces it.
@@ -272,6 +287,8 @@ pub async fn run_real(
     ips.extend(server_ips_hint(&cfg).await);
     let platform = crate::platform_win::platform(state_dir.clone(), ips)?;
     let handle = agent::start(platform, state_dir, Tuning::default()).await?;
+    // V-M3: report the outcome of an update the previous process installed.
+    crate::update::on_startup(&handle.core);
     let cancel = handle.shutdown_token();
     tokio::select! {
         _ = stop => {}

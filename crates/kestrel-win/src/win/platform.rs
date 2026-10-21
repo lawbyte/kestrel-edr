@@ -231,59 +231,77 @@ impl Inner {
         wfp_plan::parse_ips(&self.server_ips, |h| resolve_server(h, isolated))
     }
 
-    fn agent_exe() -> Option<String> {
-        std::env::current_exe()
-            .ok()
-            .map(|p| p.to_string_lossy().into_owned())
-            .filter(|s| !s.is_empty())
-    }
-
-    /// Re-resolve the server and re-read the adapters' DNS servers; replace
-    /// the isolation filters when the plan changed. Never drops a server
-    /// address that worked before (failed lookups keep the old ones).
+    /// Re-apply the isolation plan when it no longer matches what should be
+    /// in force (agent identity changed, filters from an older version).
+    ///
+    /// V-M7: the inputs are **frozen at isolation time**. Server addresses
+    /// are never re-resolved while isolated (a rogue DHCPv6 / mitm6 resolver
+    /// could otherwise add attacker IPs as agent permits), and resolvers that
+    /// appeared after isolation are never permitted. Trade-off: if the
+    /// server's address changes while a host is isolated, the agent loses
+    /// contact until the isolation auto-release deadline or the local
+    /// break-glass (`kestrel-agent release-isolation`).
     fn replan_isolation(&self) -> Option<String> {
-        let (_, servers, allow_ips, current) = self.wfp.isolation_inputs()?;
-        let (fresh, _) = self.server_addrs();
-        let (prev, _) = wfp_plan::parse_ips(&servers, |_| vec![]);
-        let merged = wfp_plan::merge_server_ips(&fresh, &prev, 16);
-        if merged.is_empty() {
+        let inp = self.wfp.isolation_inputs()?;
+        let (servers, _) = wfp_plan::parse_ips(&inp.servers, |_| vec![]);
+        if servers.is_empty() {
             return None;
         }
-        let (mut allow, _) = wfp_plan::parse_ips(&allow_ips, |_| vec![]);
-        allow.retain(|a| !merged.contains(a));
-        let (_, dns) = host::adapters();
-        let exe = Self::agent_exe();
-        let specs = wfp_plan::plan_isolation(&merged, &allow, &dns, exe.as_deref());
-        if !wfp_plan::isolation_plan_changed(&current, &specs) {
+        let (mut allow, _) = wfp_plan::parse_ips(&inp.allow_ips, |_| vec![]);
+        allow.retain(|a| !servers.contains(a));
+        let (_, current_dns) = host::adapters();
+        let (frozen, _) = wfp_plan::parse_ips(&inp.dns, |_| vec![]);
+        // State files from before V-M7 carry no frozen set: freeze the
+        // resolvers the plan already permits (never the current adapters').
+        let frozen = if frozen.is_empty() {
+            wfp_plan::planned_dns(&inp.specs)
+        } else {
+            frozen
+        };
+        let dns = wfp_plan::frozen_resolvers(&frozen, &current_dns);
+        let Some(agent) = super::wfp::agent_identity() else {
+            return Some("re-plan skipped: agent identity (image + token SID) unavailable".into());
+        };
+        let specs = wfp_plan::plan_isolation(&servers, &allow, &dns, Some(&agent));
+        if !wfp_plan::isolation_plan_changed(&inp.specs, &specs) {
             return None;
         }
-        let mut desc: Vec<String> = merged.iter().map(|s| format!("server {s}")).collect();
+        let mut desc: Vec<String> = servers.iter().map(|s| format!("server {s}")).collect();
         desc.extend(allow.iter().map(|a| a.to_string()));
-        let merged_s: Vec<String> = merged.iter().map(|i| i.to_string()).collect();
-        match self.wfp.isolate(specs, desc, merged_s, allow_ips, true) {
+        let dns_s: Vec<String> = frozen.iter().map(|i| i.to_string()).collect();
+        match self
+            .wfp
+            .isolate(specs, desc, inp.servers, inp.allow_ips, dns_s, true)
+        {
             Ok(_) => Some(format!(
-                "re-planned for server {:?} and DNS {:?}",
-                merged, dns
+                "re-planned for server {servers:?} and frozen DNS {dns:?}"
             )),
             Err(e) => Some(format!("re-plan failed: {e}")),
         }
     }
 
     fn ensure_server_permits(&self) {
-        let (ips, _) = self.server_addrs();
+        // V-M7: while isolated the permitted set is the frozen isolation
+        // server set (these hard permits outrank the isolation block).
+        let ips = match self.wfp.isolation_inputs() {
+            Some(inp) => wfp_plan::parse_ips(&inp.servers, |_| vec![]).0,
+            None => self.server_addrs().0,
+        };
         if ips.is_empty() {
             return;
         }
-        let exe = std::env::current_exe()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if exe.is_empty() {
-            return;
-        }
-        if let Err(e) = self
-            .wfp
-            .ensure_server_permits(wfp_plan::plan_server_permits(&ips, &exe))
-        {
+        // V-H10: without the agent identity no permit is installed (and
+        // app-only permits from older versions are removed).
+        let specs = match super::wfp::agent_identity() {
+            Some(a) => wfp_plan::plan_server_permits(&ips, &a),
+            None => {
+                tracing::error!(
+                    "agent identity (image + token SID) unavailable: server hard-permit filters removed"
+                );
+                Vec::new()
+            }
+        };
+        if let Err(e) = self.wfp.ensure_server_permits(specs) {
             tracing::warn!("could not install server hard-permit filters: {e}");
         }
     }
@@ -424,13 +442,22 @@ impl Inner {
                 // they must not come back as any-process permits.
                 allow.retain(|a| !servers.contains(a));
                 let (_, dns) = host::adapters();
-                let exe = Self::agent_exe();
-                let specs = wfp_plan::plan_isolation(&servers, &allow, &dns, exe.as_deref());
+                // V-H10: permits are scoped to image + token identity; never
+                // isolate without it (the agent would be cut off too).
+                let Some(agent) = super::wfp::agent_identity() else {
+                    return (false, "refusing to isolate: the agent's own identity (image path + token SID) could not be determined, so its server permit cannot be scoped".into(), None);
+                };
+                let specs = wfp_plan::plan_isolation(&servers, &allow, &dns, Some(&agent));
                 let mut desc: Vec<String> = servers.iter().map(|s| format!("server {s}")).collect();
                 desc.extend(allow.iter().map(|a| a.to_string()));
                 let servers_s: Vec<String> = servers.iter().map(|i| i.to_string()).collect();
                 let allow_s: Vec<String> = allow.iter().map(|i| i.to_string()).collect();
-                match self.wfp.isolate(specs, desc, servers_s, allow_s, false) {
+                // V-M7: the resolver set is frozen here.
+                let dns_s: Vec<String> = dns.iter().map(|i| i.to_string()).collect();
+                match self
+                    .wfp
+                    .isolate(specs, desc, servers_s, allow_s, dns_s, false)
+                {
                     Ok(mut d) => {
                         if !bad.is_empty() || !bad_allow.is_empty() {
                             d.push_str(&format!(
@@ -483,7 +510,15 @@ impl Inner {
                         let mut v: Vec<String> = snapshot::toolhelp_rows()
                             .iter()
                             .filter_map(|r| live_proc(r.pid).and_then(|l| l.image))
-                            .filter(|img| PathClass::of(img).is_user_writable())
+                            // V-M1: user-writable local images only; UNC /
+                            // WebDAV / mapped-network images are never
+                            // opened as SYSTEM (NTLM coercion).
+                            .filter(|img| {
+                                let c = PathClass::of(img);
+                                c.is_user_writable()
+                                    && c != PathClass::External
+                                    && !scan::is_remote(img)
+                            })
                             .collect();
                         v.sort();
                         v.dedup();
@@ -703,7 +738,8 @@ impl Platform for WindowsPlatform {
         let Ok(mut reg) = i.canary_reg.lock() else {
             return vec![];
         };
-        let ok = canary::plant(specs, &mut reg, &|p| set_hidden(p));
+        // V-H8: handle-based, never follows a link planted in the profile.
+        let ok = canary::plant_with(&super::rcanary::SafeDecoyFs, specs, &mut reg, true);
         if let Ok(mut c) = i.canaries.write() {
             *c = reg.planted.keys().cloned().collect();
             for p in &ok {

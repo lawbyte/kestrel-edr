@@ -295,15 +295,23 @@ async fn dispatch(state_dir: PathBuf, cmd: Cmd) -> Result<()> {
                     moved.display()
                 );
             }
-            commands::write_install_config(&state_dir, &o)?;
+            let mut cfg = commands::write_install_config(&state_dir, &o)?;
             println!(
                 "Configuration written to {}",
                 config::AgentConfig::path(&state_dir).display()
             );
-            let host = commands::local_hostname();
-            match commands::enroll(&state_dir, None, &host, kestrel_platform_os()).await {
-                Ok(id) => println!("Enrolled as device {id}"),
-                Err(e) => eprintln!("warning: enrollment failed now ({e:#}); the service will retry with the saved token"),
+            if commands::keep_existing_enrollment(&state_dir, &mut cfg)? {
+                // V-M3: re-install / upgrade of an enrolled device keeps its identity.
+                println!(
+                    "Already enrolled as device {}; keeping the existing identity",
+                    cfg.device_id.map(|d| d.to_string()).unwrap_or_default()
+                );
+            } else {
+                let host = commands::local_hostname();
+                match commands::enroll(&state_dir, None, &host, kestrel_platform_os()).await {
+                    Ok(id) => println!("Enrolled as device {id}"),
+                    Err(e) => eprintln!("warning: enrollment failed now ({e:#}); the service will retry with the saved token"),
+                }
             }
             // M5: the token is never printed (custom-action output can reach
             // the MSI log). Server-issued tokens are shown in the console.

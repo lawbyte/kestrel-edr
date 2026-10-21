@@ -90,14 +90,14 @@ unsafe extern "system" fn callback(action: i32, ctx: *const c_void, event: EVT_H
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let Some(xml) = render_xml(event) else { return };
         if matches!(ctx.kind, Kind::Persist) {
-            if let Some(mut p) = crate::persist::parse_persist_xml(&xml) {
-                let task = super::persist::enrich(&mut p.record);
-                ctx.sink.send(Raw::Persist {
-                    ts: p.ts.unwrap_or_else(kestrel_common::now_ms),
-                    logger_pid: p.logger_pid.unwrap_or(0),
-                    record: p.record,
-                    task,
-                });
+            if let Some(p) = crate::persist::parse_persist_xml(&xml) {
+                // Enrichment runs on the persistence worker (V-M9).
+                super::persist::submit(
+                    &ctx.sink,
+                    p.ts.unwrap_or_else(kestrel_common::now_ms),
+                    p.logger_pid.unwrap_or(0),
+                    p.record,
+                );
             }
             return;
         }

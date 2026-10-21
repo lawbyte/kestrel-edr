@@ -307,6 +307,28 @@ pub fn set_security(h: &Handle, sddl: &str, protect: bool) -> io::Result<()> {
     }
 }
 
+/// Delete an open file with POSIX semantics (the name disappears at once,
+/// even while another process — e.g. an AV scanner — still holds a handle),
+/// falling back to the classic delete-on-close disposition.
+pub fn delete_now_by_handle(h: &Handle) -> bool {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileDispositionInfoEx, FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+        FILE_DISPOSITION_INFO_EX,
+    };
+    let info = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    };
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            h.raw(),
+            FileDispositionInfoEx,
+            &info as *const _ as *const c_void,
+            std::mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+        ) != 0
+    };
+    ok || delete_by_handle(h)
+}
+
 /// Mark an open file for deletion (needs DELETE access).
 pub fn delete_by_handle(h: &Handle) -> bool {
     let info = FILE_DISPOSITION_INFO { DeleteFile: true };
@@ -358,8 +380,45 @@ pub fn set_attributes(h: &Handle, attributes: u32) -> bool {
 /// Create a **new** file `name` (a single path component) inside the open
 /// directory `dir` — relative to the handle, so it cannot be redirected.
 pub fn create_in_dir(dir: &Handle, name: &str, access: u32, share: u32) -> io::Result<Handle> {
+    open_in_dir(
+        dir,
+        name,
+        access,
+        share,
+        FILE_CREATE,
+        FILE_NON_DIRECTORY_FILE,
+    )
+    .map_err(|e| match e {
+        RelOpenError::NotFound => io::Error::from(io::ErrorKind::NotFound),
+        RelOpenError::IsDirectory => io::Error::other("is a directory"),
+        RelOpenError::Other(s) => io::Error::other(s),
+    })
+}
+
+/// Error of [`open_in_dir`].
+#[derive(Debug)]
+pub enum RelOpenError {
+    /// STATUS_OBJECT_NAME_NOT_FOUND.
+    NotFound,
+    /// STATUS_FILE_IS_A_DIRECTORY (non-directory open of a directory).
+    IsDirectory,
+    Other(String),
+}
+
+/// `NtCreateFile` of the single component `name` relative to the open
+/// directory `dir`, never following a reparse point at `name`
+/// (`FILE_OPEN_REPARSE_POINT`; a link is opened as itself and the caller
+/// checks [`attr_tag`]). `options` is added to synchronous I/O.
+pub fn open_in_dir(
+    dir: &Handle,
+    name: &str,
+    access: u32,
+    share: u32,
+    disposition: u32,
+    options: u32,
+) -> Result<Handle, RelOpenError> {
     if name.is_empty() || name.contains(['\\', '/', ':']) || name == "." || name == ".." {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad file name"));
+        return Err(RelOpenError::Other("bad file name".into()));
     }
     let wname: Vec<u16> = name.encode_utf16().collect();
     let us = UNICODE_STRING {
@@ -386,19 +445,57 @@ pub fn create_in_dir(dir: &Handle, name: &str, access: u32, share: u32) -> io::R
             std::ptr::null(),
             0x80, // FILE_ATTRIBUTE_NORMAL
             share,
-            FILE_CREATE,
-            FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+            disposition,
+            options | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
             std::ptr::null(),
             0,
         )
     };
     if st < 0 {
-        return Err(io::Error::other(format!(
-            "NtCreateFile({name}) failed: NTSTATUS 0x{:08X}",
-            st as u32
-        )));
+        return Err(match st as u32 {
+            0xC000_0034 => RelOpenError::NotFound, // STATUS_OBJECT_NAME_NOT_FOUND
+            0xC000_00BA => RelOpenError::IsDirectory, // STATUS_FILE_IS_A_DIRECTORY
+            s => RelOpenError::Other(format!("NtCreateFile({name}) failed: NTSTATUS 0x{s:08X}")),
+        });
     }
-    Handle::new(h).ok_or_else(|| io::Error::other("NtCreateFile returned no handle"))
+    Handle::new(h).ok_or_else(|| RelOpenError::Other("NtCreateFile returned no handle".into()))
+}
+
+/// Rename the open file `h` to `name` inside the open directory `dir`
+/// (`FILE_RENAME_INFO.RootDirectory`: cannot be redirected). Never replaces
+/// an existing file. Needs DELETE access on `h`.
+pub fn rename_in_dir(h: &Handle, dir: &Handle, name: &str) -> bool {
+    if name.is_empty() || name.contains(['\\', '/', ':']) {
+        return false;
+    }
+    // NtSetInformationFile directly: kernelbase's SetFileInformationByHandle
+    // rejects a relative name with a RootDirectory (ERROR_INVALID_PARAMETER,
+    // measured on build 26200).
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FileRenameInformation, NtSetInformationFile, FILE_RENAME_INFORMATION,
+    };
+    let wname: Vec<u16> = name.encode_utf16().collect();
+    let size = std::mem::size_of::<FILE_RENAME_INFORMATION>() + wname.len() * 2;
+    let mut buf = vec![0u64; size.div_ceil(8)];
+    unsafe {
+        let info = buf.as_mut_ptr() as *mut FILE_RENAME_INFORMATION;
+        (*info).Anonymous.ReplaceIfExists = false;
+        (*info).RootDirectory = dir.raw();
+        (*info).FileNameLength = (wname.len() * 2) as u32;
+        std::ptr::copy_nonoverlapping(
+            wname.as_ptr(),
+            std::ptr::addr_of_mut!((*info).FileName) as *mut u16,
+            wname.len(),
+        );
+        let mut iosb: IO_STATUS_BLOCK = std::mem::zeroed();
+        NtSetInformationFile(
+            h.raw(),
+            &mut iosb,
+            info as *const c_void,
+            size as u32,
+            FileRenameInformation,
+        ) >= 0
+    }
 }
 
 /// Create a directory with an explicit security descriptor (owner + DACL).

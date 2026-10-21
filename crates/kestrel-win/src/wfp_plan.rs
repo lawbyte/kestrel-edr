@@ -60,6 +60,63 @@ pub enum Cond {
     AppPath(String),
     /// FWPM_CONDITION_FLAGS has FWP_CONDITION_FLAG_IS_LOOPBACK
     Loopback,
+    /// FWPM_CONDITION_ALE_USER_ID matched against this security descriptor
+    /// (SDDL; FWP_SECURITY_DESCRIPTOR_TYPE). The filter matches only when an
+    /// access check of the connecting process's token against the SD grants
+    /// `FWP_ACTRL_MATCH_FILTER` (V-H10).
+    UserSd(String),
+}
+
+/// `FWP_ACTRL_MATCH_FILTER` (fwpmu.h, 0x00000001): the access right WFP
+/// checks for `FWPM_CONDITION_ALE_USER_ID` ("Filtering Condition
+/// Identifiers", learn.microsoft.com/windows/win32/fwp/filtering-condition-identifiers-;
+/// "Access Right Identifiers", …/fwp/access-right-identifiers). In SDDL the
+/// generic right string `CC` is bit 0x1.
+pub const FWP_ACTRL_MATCH_FILTER: u32 = 0x1;
+
+/// SDDL for the ALE user-id condition: only `sid` (a SID string, e.g. the
+/// service SID `S-1-5-80-…` of `NT SERVICE\KestrelAgent`, or `S-1-5-18`) is
+/// granted `FWP_ACTRL_MATCH_FILTER`. None for anything that is not a plain
+/// SID string (fail closed: the caller then adds no agent permit).
+pub fn agent_user_sddl(sid: &str) -> Option<String> {
+    let s = sid.trim();
+    let ok = s.starts_with("S-1-")
+        && s.len() <= 184
+        && s[4..]
+            .split('-')
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    ok.then(|| format!("O:SYG:SYD:(A;;CC;;;{s})"))
+}
+
+/// The agent process as WFP sees it: image path (ALE app id) **and** token
+/// identity (ALE user id). Every agent-scoped permit carries both, so a copy
+/// of `kestrel-agent.exe` started by a user (same path → same app id) does
+/// not match (V-H10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentId {
+    pub exe: String,
+    /// SDDL from [`agent_user_sddl`].
+    pub user_sddl: String,
+}
+
+impl AgentId {
+    /// None unless both parts are present.
+    pub fn new(exe: &str, sid: &str) -> Option<AgentId> {
+        if exe.trim().is_empty() {
+            return None;
+        }
+        Some(AgentId {
+            exe: exe.to_string(),
+            user_sddl: agent_user_sddl(sid)?,
+        })
+    }
+
+    fn conds(&self) -> [Cond; 2] {
+        [
+            Cond::AppPath(self.exe.clone()),
+            Cond::UserSd(self.user_sddl.clone()),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,9 +138,12 @@ fn family_ok(layer: Layer, ip: &IpAddr) -> bool {
 }
 
 /// Filters for host isolation: everything blocked except loopback, the
-/// Kestrel server(s) (only for the agent executable when `agent_exe` is
-/// given), the extra allow-list (any process), DHCP, and DNS (TCP/UDP 53) to
-/// the configured resolvers **for the agent executable only** (H10).
+/// Kestrel server(s) **for the agent process only** (image path + token
+/// identity, V-H10), the extra allow-list (any process), DHCP, and DNS
+/// (TCP/UDP 53) to the resolvers frozen at isolation time (V-M7), again for
+/// the agent process only (H10). Without a known agent identity no server or
+/// DNS permit is added at all (fail closed; the platform refuses to isolate
+/// in that case).
 ///
 /// Trade-off (intended): while isolated no other process — including the
 /// Windows DNS Client service that answers `getaddrinfo` — can resolve
@@ -94,7 +154,7 @@ pub fn plan_isolation(
     servers: &[IpAddr],
     allow: &[IpAddr],
     dns: &[IpAddr],
-    agent_exe: Option<&str>,
+    agent: Option<&AgentId>,
 ) -> Vec<FilterSpec> {
     let mut v = Vec::new();
     for layer in Layer::ALL {
@@ -106,19 +166,19 @@ pub fn plan_isolation(
             weight: W_PERMIT,
             conditions: vec![Cond::Loopback],
         });
-        for ip in servers {
-            if family_ok(layer, ip) {
-                let mut conditions = vec![Cond::RemoteAddr(*ip)];
-                if let Some(exe) = agent_exe.filter(|e| !e.is_empty()) {
-                    conditions.push(Cond::AppPath(exe.to_string()));
+        if let Some(a) = agent {
+            for ip in servers {
+                if family_ok(layer, ip) {
+                    let mut conditions = vec![Cond::RemoteAddr(*ip)];
+                    conditions.extend(a.conds());
+                    v.push(FilterSpec {
+                        name: format!("Kestrel isolate: permit server {ip} ({dir})"),
+                        layer,
+                        action: Action::Permit,
+                        weight: W_PERMIT,
+                        conditions,
+                    });
                 }
-                v.push(FilterSpec {
-                    name: format!("Kestrel isolate: permit server {ip} ({dir})"),
-                    layer,
-                    action: Action::Permit,
-                    weight: W_PERMIT,
-                    conditions,
-                });
             }
         }
         for ip in allow {
@@ -148,19 +208,17 @@ pub fn plan_isolation(
         // H10: DNS only for the agent itself (it resolves the server with its
         // own stub resolver, `crate::dnswire`, while isolated). Without a
         // known agent image no DNS permit is added at all (fail closed).
-        if let (false, Some(exe)) = (layer.is_inbound(), agent_exe.filter(|e| !e.is_empty())) {
+        if let (false, Some(a)) = (layer.is_inbound(), agent) {
             for ip in dns {
                 if family_ok(layer, ip) {
+                    let mut conditions = vec![Cond::RemoteAddr(*ip), Cond::RemotePort(53)];
+                    conditions.extend(a.conds());
                     v.push(FilterSpec {
                         name: format!("Kestrel isolate: permit agent DNS {ip}"),
                         layer,
                         action: Action::Permit,
                         weight: W_PERMIT,
-                        conditions: vec![
-                            Cond::RemoteAddr(*ip),
-                            Cond::RemotePort(53),
-                            Cond::AppPath(exe.to_string()),
-                        ],
+                        conditions,
                     });
                 }
             }
@@ -225,21 +283,38 @@ pub fn plan_block_image(image: &str) -> Vec<FilterSpec> {
 
 /// Always-on hard permits for the agent's own server connections, so a
 /// soft block added by another tool (EDRSilencer-style) cannot silence it.
-pub fn plan_server_permits(servers: &[IpAddr], agent_exe: &str) -> Vec<FilterSpec> {
+/// Scoped to the agent process (image + token identity, V-H10): these
+/// permits outrank the isolation catch-all block in the same sublayer.
+pub fn plan_server_permits(servers: &[IpAddr], agent: &AgentId) -> Vec<FilterSpec> {
     servers
         .iter()
-        .map(|ip| FilterSpec {
-            name: format!("Kestrel agent: permit server {ip}"),
-            layer: if ip.is_ipv4() {
-                Layer::ConnectV4
-            } else {
-                Layer::ConnectV6
-            },
-            action: Action::Permit,
-            weight: W_PERMIT,
-            conditions: vec![Cond::RemoteAddr(*ip), Cond::AppPath(agent_exe.to_string())],
+        .map(|ip| {
+            let mut conditions = vec![Cond::RemoteAddr(*ip)];
+            conditions.extend(agent.conds());
+            FilterSpec {
+                name: format!("Kestrel agent: permit server {ip}"),
+                layer: if ip.is_ipv4() {
+                    Layer::ConnectV4
+                } else {
+                    Layer::ConnectV6
+                },
+                action: Action::Permit,
+                weight: W_PERMIT,
+                conditions,
+            }
         })
         .collect()
+}
+
+/// V-H10 invariant: every permit that is scoped to an application (ALE app
+/// id) also carries the ALE user-id condition. Used by tests and checked by
+/// the Windows glue before adding filters.
+pub fn app_permits_have_user_sd(specs: &[FilterSpec]) -> bool {
+    specs
+        .iter()
+        .filter(|f| f.action == Action::Permit)
+        .filter(|f| f.conditions.iter().any(|c| matches!(c, Cond::AppPath(_))))
+        .all(|f| f.conditions.iter().any(|c| matches!(c, Cond::UserSd(_))))
 }
 
 /// A set of filters added for one response action.
@@ -286,11 +361,53 @@ pub struct WfpState {
     /// Extra addresses the analyst allowed (kept for re-planning).
     #[serde(default)]
     pub isolation_allow_ips: Vec<String>,
+    /// DNS resolvers frozen when isolation started (V-M7): re-plans never
+    /// permit a resolver that appeared later (rogue DHCPv6 / mitm6).
+    #[serde(default)]
+    pub isolation_dns: Vec<String>,
+    /// Plan behind `server_permit_filters`, so a changed plan (new agent
+    /// identity condition, new address) replaces the filters.
+    #[serde(default)]
+    pub server_permit_specs: Vec<FilterSpec>,
+}
+
+/// Resolvers to permit on a re-plan while isolated (V-M7): only those frozen
+/// at isolation time that are still configured; when none of them is still
+/// configured the frozen set is kept as is (never the new ones).
+pub fn frozen_resolvers(frozen: &[IpAddr], current: &[IpAddr]) -> Vec<IpAddr> {
+    let still: Vec<IpAddr> = frozen
+        .iter()
+        .filter(|ip| current.contains(ip))
+        .copied()
+        .collect();
+    if still.is_empty() {
+        frozen.to_vec()
+    } else {
+        still
+    }
+}
+
+/// Resolvers an existing isolation plan permits (agent DNS permits).
+pub fn planned_dns(specs: &[FilterSpec]) -> Vec<IpAddr> {
+    let mut out = Vec::new();
+    for f in specs {
+        if f.action == Action::Permit && f.conditions.contains(&Cond::RemotePort(53)) {
+            for c in &f.conditions {
+                if let Cond::RemoteAddr(ip) = c {
+                    if !out.contains(ip) {
+                        out.push(*ip);
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Server addresses to permit after a re-resolution: the fresh answers
 /// first, then previously permitted ones (so a failed or partial lookup never
-/// removes a working address), bounded to `cap`.
+/// removes a working address), bounded to `cap`. Not used while isolated
+/// (V-M7: the server set is frozen then).
 pub fn merge_server_ips(fresh: &[IpAddr], previous: &[IpAddr], cap: usize) -> Vec<IpAddr> {
     let mut out: Vec<IpAddr> = Vec::new();
     for ip in fresh.iter().chain(previous.iter()) {
@@ -422,23 +539,27 @@ mod tests {
             assert_eq!(last.weight, 0);
             assert!(l.iter().any(|x| x.conditions == vec![Cond::Loopback]));
         }
-        // server permitted only in its own family
-        assert!(f.iter().any(|x| x.layer == Layer::ConnectV4
-            && x.conditions == vec![Cond::RemoteAddr(ip("10.0.0.5"))]));
-        assert!(!f.iter().any(|x| x.layer == Layer::ConnectV6
-            && x.conditions == vec![Cond::RemoteAddr(ip("10.0.0.5"))]));
-        assert!(f.iter().any(|x| x.layer == Layer::ConnectV6
-            && x.conditions == vec![Cond::RemoteAddr(ip("fd00::5"))]));
-        // No agent image known → no DNS permit at all (fail closed, H10)
+        // No agent identity known → no DNS and no server permit at all
+        // (fail closed, H10 / V-H10)
         assert!(!f
             .iter()
             .any(|x| x.conditions.contains(&Cond::RemotePort(53))));
+        assert!(!f
+            .iter()
+            .any(|x| x.conditions.contains(&Cond::RemoteAddr(ip("10.0.0.5")))));
         let f = plan_isolation(
             &[ip("10.0.0.5"), ip("fd00::5")],
             &[ip("10.0.0.9")],
             &[ip("10.0.0.53")],
-            Some(r"C:\Program Files\Kestrel\kestrel-agent.exe"),
+            Some(&agent()),
         );
+        // server permitted only in its own family
+        assert!(f.iter().any(|x| x.layer == Layer::ConnectV4
+            && x.conditions.contains(&Cond::RemoteAddr(ip("10.0.0.5")))));
+        assert!(!f.iter().any(|x| x.layer == Layer::ConnectV6
+            && x.conditions.contains(&Cond::RemoteAddr(ip("10.0.0.5")))));
+        assert!(f.iter().any(|x| x.layer == Layer::ConnectV6
+            && x.conditions.contains(&Cond::RemoteAddr(ip("fd00::5")))));
         // DNS only outbound
         assert!(f
             .iter()
@@ -460,18 +581,114 @@ mod tests {
             .all(|x| x.weight > W_ISOLATE_BLOCK));
     }
 
+    const EXE: &str = r"C:\Program Files\Kestrel\kestrel-agent.exe";
+    const SVC_SID: &str = "S-1-5-80-1234567890-1-2-3-4";
+
+    fn agent() -> AgentId {
+        AgentId::new(EXE, SVC_SID).unwrap()
+    }
+
+    #[test]
+    fn agent_identity_sddl() {
+        assert_eq!(
+            agent_user_sddl(SVC_SID).unwrap(),
+            format!("O:SYG:SYD:(A;;CC;;;{SVC_SID})")
+        );
+        assert_eq!(
+            agent_user_sddl("S-1-5-18").unwrap(),
+            "O:SYG:SYD:(A;;CC;;;S-1-5-18)"
+        );
+        // Anything but a plain SID string is refused (no SDDL injection).
+        for bad in [
+            "",
+            "SY",
+            "S-1-5-18)(A;;CC;;;WD",
+            "S-1-5-",
+            "S-1-5--18",
+            "S-1-5-x",
+            "s-1-5-18",
+        ] {
+            assert!(agent_user_sddl(bad).is_none(), "{bad}");
+        }
+        assert!(AgentId::new("", SVC_SID).is_none());
+        assert!(AgentId::new(EXE, "nope").is_none());
+        assert_eq!(FWP_ACTRL_MATCH_FILTER, 1);
+    }
+
+    /// V-H10: every agent-scoped permit (isolation server + DNS, always-on
+    /// hard permits) carries the ALE user-id condition next to the app id.
+    #[test]
+    fn every_agent_permit_has_user_id() {
+        let a = agent();
+        let iso = plan_isolation(
+            &[ip("10.0.0.5"), ip("fd00::5")],
+            &[ip("10.0.0.9")],
+            &[ip("10.0.0.53"), ip("fd00::53")],
+            Some(&a),
+        );
+        let hard = plan_server_permits(&[ip("10.0.0.5"), ip("fd00::5")], &a);
+        for plan in [&iso, &hard] {
+            assert!(app_permits_have_user_sd(plan));
+            let scoped: Vec<_> = plan
+                .iter()
+                .filter(|f| f.conditions.contains(&Cond::AppPath(EXE.into())))
+                .collect();
+            assert!(!scoped.is_empty());
+            for f in scoped {
+                assert!(f.conditions.contains(&Cond::UserSd(a.user_sddl.clone())));
+            }
+        }
+        // The invariant check catches a permit without it.
+        let mut broken = hard.clone();
+        broken[0]
+            .conditions
+            .retain(|c| !matches!(c, Cond::UserSd(_)));
+        assert!(!app_permits_have_user_sd(&broken));
+        // Blocks by image are not permits and need no user condition.
+        assert!(app_permits_have_user_sd(&plan_block_image(r"C:\x.exe")));
+    }
+
+    #[test]
+    fn resolvers_stay_frozen() {
+        let frozen = [ip("10.0.0.53")];
+        // A rogue resolver appearing later is never added.
+        assert_eq!(
+            frozen_resolvers(&frozen, &[ip("10.0.0.53"), ip("fe80::bad")]),
+            vec![ip("10.0.0.53")]
+        );
+        assert_eq!(
+            frozen_resolvers(&frozen, &[ip("192.168.1.1")]),
+            vec![ip("10.0.0.53")]
+        );
+        assert!(frozen_resolvers(&[], &[ip("192.168.1.1")]).is_empty());
+        // Pre-V-M7 state: the frozen set is what the plan already permits.
+        let plan = plan_isolation(
+            &[ip("10.0.0.5")],
+            &[ip("10.0.0.9")],
+            &[ip("10.0.0.53"), ip("fd00::53")],
+            Some(&agent()),
+        );
+        assert_eq!(planned_dns(&plan), vec![ip("10.0.0.53"), ip("fd00::53")]);
+    }
+
     #[test]
     fn isolation_server_permit_is_agent_only_and_replannable() {
-        let exe = r"C:\Program Files\Kestrel\kestrel-agent.exe";
+        let exe = EXE;
+        let a = agent();
         let f = plan_isolation(
             &[ip("10.0.0.5")],
             &[ip("10.0.0.9")],
             &[ip("10.0.0.53")],
-            Some(exe),
+            Some(&a),
         );
-        // server permitted only for the agent executable
+        // server permitted only for the agent process
         assert!(f.iter().any(|x| x.layer == Layer::ConnectV4
-            && x.conditions == vec![Cond::RemoteAddr(ip("10.0.0.5")), Cond::AppPath(exe.into())]));
+            && x.conditions
+                == vec![
+                    Cond::RemoteAddr(ip("10.0.0.5")),
+                    Cond::AppPath(exe.into()),
+                    Cond::UserSd(a.user_sddl.clone())
+                ]));
         assert!(!f
             .iter()
             .any(|x| x.conditions == vec![Cond::RemoteAddr(ip("10.0.0.5"))]));
@@ -487,7 +704,8 @@ mod tests {
             vec![
                 Cond::RemoteAddr(ip("10.0.0.53")),
                 Cond::RemotePort(53),
-                Cond::AppPath(exe.into())
+                Cond::AppPath(exe.into()),
+                Cond::UserSd(a.user_sddl.clone())
             ]
         );
         assert!(!f
@@ -495,7 +713,7 @@ mod tests {
             .any(|x| x.conditions.contains(&Cond::RemotePort(53))
                 && !x.conditions.contains(&Cond::AppPath(exe.into()))));
         assert_eq!(
-            plan_isolation(&[ip("10.0.0.5")], &[], &[ip("10.0.0.53")], Some(""))
+            plan_isolation(&[ip("10.0.0.5")], &[], &[ip("10.0.0.53")], None)
                 .iter()
                 .filter(|x| x.conditions.contains(&Cond::RemotePort(53)))
                 .count(),
@@ -510,16 +728,26 @@ mod tests {
             &[ip("10.0.0.5")],
             &[ip("10.0.0.9")],
             &[ip("10.0.0.53")],
-            Some(exe),
+            Some(&a),
         );
         assert!(!isolation_plan_changed(&f, &same));
         let roamed = plan_isolation(
             &[ip("10.0.0.5")],
             &[ip("10.0.0.9")],
             &[ip("192.168.1.1")],
-            Some(exe),
+            Some(&a),
         );
         assert!(isolation_plan_changed(&f, &roamed));
+        // A plan from before V-H10 (no user-id condition) is re-planned.
+        let old: Vec<FilterSpec> = f
+            .iter()
+            .cloned()
+            .map(|mut s| {
+                s.conditions.retain(|c| !matches!(c, Cond::UserSd(_)));
+                s
+            })
+            .collect();
+        assert!(isolation_plan_changed(&old, &f));
         // server IP changed: new answer first, old kept
         assert_eq!(
             merge_server_ips(&[ip("10.0.0.6")], &[ip("10.0.0.5")], 8),
@@ -544,10 +772,7 @@ mod tests {
         let b6 = plan_block_destination(ip("2001:db8::1"), None, None);
         assert_eq!(b6[0].layer, Layer::ConnectV6);
         assert_eq!(plan_block_image(r"C:\a.exe").len(), 4);
-        let p = plan_server_permits(
-            &[ip("10.0.0.5")],
-            r"C:\Program Files\Kestrel\kestrel-agent.exe",
-        );
+        let p = plan_server_permits(&[ip("10.0.0.5")], &agent());
         assert_eq!(p[0].action, Action::Permit);
         assert!(p[0].weight > W_BLOCK);
     }

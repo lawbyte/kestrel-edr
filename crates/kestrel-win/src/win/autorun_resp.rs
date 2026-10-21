@@ -5,7 +5,10 @@
 //! 1. **Validate first** ([`crate::autorun_plan`]): registry keys only under
 //!    `HKLM\SOFTWARE`, `HKLM\SYSTEM\CurrentControlSet`, `HKU\<SID>`; never
 //!    Kestrel's own keys / service / tasks; no wildcards or empty input;
-//!    OS-critical values only rewritten with a sane default, never deleted.
+//!    registry deletes only for the autorun allow-list; writes only the
+//!    canonical Windows default from a fixed table, with the value's own
+//!    (unchanged) type; never service ImagePath/Start or LSA package lists
+//!    (V-H2).
 //! 2. **Back up the exact original first** into the encrypted quarantine
 //!    vault ([`Vault::store_backup`], JSON [`AutorunBackup`]): registry value
 //!    name + type + data; task XML (Task Scheduler 2.0 `IRegisteredTask::Xml`);
@@ -242,7 +245,9 @@ fn registry(
     value_name: Option<&str>,
     restore_data: Option<&str>,
 ) -> Result<Outcome, String> {
-    let plan = autorun_plan::plan_registry(location, value_name, restore_data)?;
+    // V-H2: deletes only for the autorun allow-list, writes only the
+    // canonical Windows default (Userinit built from the real system root).
+    let plan = autorun_plan::plan_registry(location, value_name, restore_data, &system_root())?;
     let loc = plan.location.clone();
     let shown = if plan.value_name.is_empty() {
         format!(r"{}\(default)", loc.display())
@@ -260,9 +265,12 @@ fn registry(
             "refusing to change {shown}: it points into Kestrel's own installation"
         ));
     }
+    // Never change a value's type: the live value must already have the
+    // default's type (re-checked by the exact re-read below).
+    autorun_plan::check_live_type(&plan.op, ty).map_err(|e| format!("{shown}: {e}"))?;
     let target = match &plan.op {
         RegOp::Delete => None,
-        RegOp::Write(r) => Some(encode_restore(ty, r)),
+        RegOp::Write { reg_type, data } => Some(encode_restore(*reg_type, data)),
     };
     if let Some((tt, tb)) = &target {
         if *tt == ty && *tb == data {
@@ -278,7 +286,8 @@ fn registry(
             value: RegValueDump::new(&plan.value_name, ty, &data),
         },
     )?;
-    // TOCTOU: re-read right before acting.
+    // TOCTOU: re-read right before acting (same type and bytes as backed up,
+    // so the type check above still holds at write time).
     match query_raw(&key, &plan.value_name)? {
         Some((t2, d2)) if t2 == ty && d2 == data => {}
         Some(_) => {
@@ -317,7 +326,7 @@ fn registry(
     };
     let what = match &plan.op {
         RegOp::Delete => "removed".to_string(),
-        RegOp::Write(r) => format!("restored to {r:?}"),
+        RegOp::Write { data, .. } => format!("restored to the Windows default {data:?}"),
     };
     Ok((
         verified,

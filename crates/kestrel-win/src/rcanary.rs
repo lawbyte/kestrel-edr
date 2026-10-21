@@ -16,11 +16,9 @@
 //! `<state>\rcanaries.json`; [`remove_planted`] deletes only files whose
 //! content is still exactly what Kestrel wrote (call it at uninstall).
 
-use crate::canary::{self, CanaryRecord, CanaryRegistry};
-use crate::vault::hex;
+use crate::canary::{self, CanaryRegistry, DecoyFs, Probe, RemoveResult};
 use kestrel_common::DataCategory;
 use kestrel_platform::CanarySpec;
-use sha2::{Digest, Sha256};
 use std::path::Path;
 
 /// Registry file name in the agent state directory.
@@ -200,18 +198,28 @@ pub fn specs_for_profile(profile: &str, folder_exists: impl Fn(&str) -> bool) ->
     out
 }
 
-/// Plant decoys for `profiles`. Returns the paths that now hold our decoys.
+/// Plant decoys for `profiles` (path-based [`canary::StdFs`]; the Windows
+/// agent uses [`plant_with`] and the handle-based `SafeDecoyFs`). Returns the
+/// paths that now hold our decoys.
 pub fn plant(profiles: &[String], reg: &mut CanaryRegistry) -> Vec<String> {
+    plant_with(
+        &canary::StdFs {
+            set_hidden: &|_| {},
+        },
+        profiles,
+        reg,
+    )
+}
+
+pub fn plant_with(fs: &dyn DecoyFs, profiles: &[String], reg: &mut CanaryRegistry) -> Vec<String> {
     let mut specs = Vec::new();
     for p in profiles {
         specs.extend(specs_for_profile(p, |d| {
-            let path = Path::new(d);
-            !canary::has_link_in_chain(path)
-                && std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+            fs.probe(Path::new(d)) == Probe::Dir
         }));
     }
     // Never hidden: ransomware skips hidden/system files.
-    canary::plant(&specs, reg, &|_: &Path| {})
+    canary::plant_with(fs, &specs, reg, false)
 }
 
 /// Remove every planted decoy whose content is still ours (uninstall /
@@ -219,10 +227,23 @@ pub fn plant(profiles: &[String], reg: &mut CanaryRegistry) -> Vec<String> {
 /// left alone. Returns the removed paths; the registry keeps entries that
 /// could not be removed for a later attempt.
 pub fn remove_planted(reg: &mut CanaryRegistry) -> Vec<String> {
+    remove_planted_with(
+        &canary::StdFs {
+            set_hidden: &|_| {},
+        },
+        reg,
+    )
+}
+
+pub fn remove_planted_with(fs: &dyn DecoyFs, reg: &mut CanaryRegistry) -> Vec<String> {
     let mut removed = Vec::new();
     let mut keep = std::collections::BTreeMap::new();
     for (k, rec) in std::mem::take(&mut reg.planted) {
-        match remove_one(&rec) {
+        let r = match rec.sha256.as_deref() {
+            Some(sha) => fs.remove_if_ours(Path::new(&rec.path), sha),
+            None => RemoveResult::NotOurs,
+        };
+        match r {
             RemoveResult::Removed => removed.push(rec.path.clone()),
             RemoveResult::Gone | RemoveResult::NotOurs => {}
             RemoveResult::Failed => {
@@ -232,39 +253,6 @@ pub fn remove_planted(reg: &mut CanaryRegistry) -> Vec<String> {
     }
     reg.planted = keep;
     removed
-}
-
-enum RemoveResult {
-    Removed,
-    Gone,
-    NotOurs,
-    Failed,
-}
-
-fn remove_one(rec: &CanaryRecord) -> RemoveResult {
-    let p = Path::new(&rec.path);
-    if canary::has_link_in_chain(p) {
-        return RemoveResult::NotOurs;
-    }
-    let Ok(m) = std::fs::symlink_metadata(p) else {
-        return RemoveResult::Gone;
-    };
-    if !m.is_file() {
-        return RemoveResult::NotOurs;
-    }
-    let Some(want) = rec.sha256.as_deref() else {
-        return RemoveResult::NotOurs;
-    };
-    match std::fs::read(p) {
-        Ok(b) if hex(&Sha256::digest(&b)).eq_ignore_ascii_case(want) => {
-            match std::fs::remove_file(p) {
-                Ok(()) => RemoveResult::Removed,
-                Err(_) => RemoveResult::Failed,
-            }
-        }
-        Ok(_) => RemoveResult::NotOurs,
-        Err(_) => RemoveResult::Failed,
-    }
 }
 
 /// Load / save the decoy registry.
@@ -291,6 +279,10 @@ pub fn remove_all(state_dir: &Path) -> Vec<String> {
     if reg.planted.is_empty() {
         return vec![];
     }
+    // V-H8: on Windows (SYSTEM, user-writable profiles) handle-based only.
+    #[cfg(windows)]
+    let removed = remove_planted_with(&crate::win::rcanary::SafeDecoyFs, &mut reg);
+    #[cfg(not(windows))]
     let removed = remove_planted(&mut reg);
     if let Err(e) = save_registry(state_dir, &reg) {
         tracing::warn!("saving {REGISTRY_FILE}: {e}");

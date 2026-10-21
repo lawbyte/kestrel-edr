@@ -312,7 +312,7 @@ impl Watcher {
                 w.snap = snap;
                 let base = w.base();
                 for c in changes {
-                    self.emit(&base, c);
+                    self.emit(&base, c, true);
                 }
             }
             Err(rc) => {
@@ -328,7 +328,7 @@ impl Watcher {
         }
     }
 
-    fn emit(&self, base: &str, c: crate::regdiff::Change) {
+    fn emit(&self, base: &str, c: crate::regdiff::Change, reopened: bool) {
         let key = if c.rel.is_empty() {
             base.to_string()
         } else {
@@ -341,6 +341,7 @@ impl Watcher {
             op: c.op,
             ty: c.ty,
             data: c.data,
+            reopened,
         });
     }
 
@@ -417,7 +418,7 @@ impl Watcher {
             }
         }
         for (base, c) in out {
-            self.emit(&base, c);
+            self.emit(&base, c, false);
         }
         for i in reopen {
             self.try_open(i, true);

@@ -57,13 +57,27 @@ impl PersistRecord {
         }
     }
 
-    /// De-duplication key (ETW and event-log copies of the same event).
+    /// De-duplication key (ETW and event-log copies of the same event). V-M8:
+    /// besides the name and operation it carries the task XML hash (and the
+    /// service image path), and [`Dedup`] only matches copies whose
+    /// timestamps agree to [`DEDUP_MS`]: a real create → delete → create of
+    /// the same name with new content is never merged.
     pub fn dedup_key(&self) -> String {
+        self.dedup_key_with(None)
+    }
+
+    pub fn dedup_key_with(&self, task: Option<&crate::taskxml::TaskInfo>) -> String {
         match self {
-            PersistRecord::Task { name, op, .. } => {
-                format!("task|{op:?}|{}", name.to_ascii_lowercase())
-            }
-            PersistRecord::Service(s) => format!("svc|{}", s.name.to_ascii_lowercase()),
+            PersistRecord::Task { name, op, .. } => format!(
+                "task|{op:?}|{}|{:016x}",
+                name.to_ascii_lowercase(),
+                task.map_or(0, |t| t.xml_hash)
+            ),
+            PersistRecord::Service(s) => format!(
+                "svc|{}|{:016x}",
+                s.name.to_ascii_lowercase(),
+                crate::regdiff::fnv1a(s.image_path.to_ascii_lowercase().as_bytes())
+            ),
             PersistRecord::Wmi(w) => format!(
                 "wmi|{}|{}|{}",
                 w.namespace.to_ascii_lowercase(),
@@ -409,10 +423,27 @@ impl Hints {
 
     /// Most recent hint of `kind` within [ts − 5 s, ts + 1 s].
     pub fn creator(&self, kind: HintKind, ts: i64) -> Option<u32> {
+        self.creator_where(kind, ts, |_| true)
+    }
+
+    /// Most recent hint of `kind` in the window whose process `plausible`
+    /// accepts (V-H5: e.g. only High / System integrity for services).
+    ///
+    /// Every answer is a correlation, never proof: callers must mark the
+    /// event `Attribution::Heuristic`. A `taskschd.dll` load is only a hint
+    /// because a task event must follow it within the same 5 s window to be
+    /// attributed at all (the window is anchored on the task event).
+    pub fn creator_where(
+        &self,
+        kind: HintKind,
+        ts: i64,
+        plausible: impl Fn(u32) -> bool,
+    ) -> Option<u32> {
         self.ring
             .iter()
             .rev()
             .filter(|(t, _, k)| *k == kind && *t >= ts - HINT_BEFORE_MS && *t <= ts + HINT_AFTER_MS)
+            .filter(|(_, p, _)| plausible(*p))
             .max_by_key(|(t, _, _)| *t)
             .map(|(_, p, _)| *p)
     }
@@ -434,7 +465,12 @@ pub struct Dedup {
     recent: VecDeque<(i64, String)>,
 }
 
-pub const DEDUP_MS: i64 = 5_000;
+/// Both copies carry the timestamp of the same provider write (ETW header /
+/// event-log `TimeCreated`), so they agree to the millisecond; a little slack
+/// covers rounding.
+pub const DEDUP_MS: i64 = 50;
+/// How long keys are remembered (the event-log copy can lag the ETW one).
+const DEDUP_KEEP_MS: i64 = 60_000;
 
 impl Dedup {
     /// True when `key` was already seen within ±[`DEDUP_MS`]; records it otherwise.
@@ -442,7 +478,7 @@ impl Dedup {
         while self
             .recent
             .front()
-            .is_some_and(|(t, _)| *t < ts - 4 * DEDUP_MS)
+            .is_some_and(|(t, _)| *t < ts - DEDUP_KEEP_MS)
         {
             self.recent.pop_front();
         }
@@ -620,6 +656,19 @@ mod tests {
         assert_eq!(h.creator(HintKind::Service, 1_300), None);
     }
 
+    /// V-H5: an implausible hint (a Medium-integrity process for a service
+    /// install) is skipped in favour of an older plausible one, or none.
+    #[test]
+    fn implausible_hints_are_rejected() {
+        let mut h = Hints::new();
+        h.on_process_start(1_000, 20, "sc.exe", "sc.exe create a binPath= x"); // elevated
+        h.on_script(1_500, 21, "New-Service -Name x"); // medium-integrity implant
+        let high = |p: u32| p == 20;
+        assert_eq!(h.creator(HintKind::Service, 2_000), Some(21));
+        assert_eq!(h.creator_where(HintKind::Service, 2_000, high), Some(20));
+        assert_eq!(h.creator_where(HintKind::Service, 2_000, |_| false), None);
+    }
+
     #[test]
     fn dedup() {
         let mut d = Dedup::default();
@@ -628,14 +677,49 @@ mod tests {
             op: TaskOp::Created,
             user: None,
         };
+        // ETW + event-log copy of one event: same timestamp.
         assert!(!d.seen(&r.dedup_key(), 1_000));
-        assert!(d.seen(&r.dedup_key(), 3_000));
-        assert!(!d.seen(&r.dedup_key(), 9_000));
+        assert!(d.seen(&r.dedup_key(), 1_000));
+        assert!(d.seen(&r.dedup_key(), 1_020));
+        // A later event with the same name is not a copy.
+        assert!(!d.seen(&r.dedup_key(), 3_000));
         let del = PersistRecord::Task {
             name: r"\x".into(),
             op: TaskOp::Deleted,
             user: None,
         };
-        assert!(!d.seen(&del.dedup_key(), 9_100));
+        assert!(!d.seen(&del.dedup_key(), 3_000));
+    }
+
+    /// V-M8: create (benign) → delete → create (malicious) within 5 s keeps
+    /// every event; the malicious create differs in XML hash anyway.
+    #[test]
+    fn dedup_keeps_quick_recreate() {
+        let mut d = Dedup::default();
+        let create = PersistRecord::Task {
+            name: r"\Updater".into(),
+            op: TaskOp::Created,
+            user: None,
+        };
+        let del = PersistRecord::Task {
+            name: r"\Updater".into(),
+            op: TaskOp::Deleted,
+            user: None,
+        };
+        let benign = crate::taskxml::TaskInfo {
+            xml_hash: 1,
+            ..Default::default()
+        };
+        let evil = crate::taskxml::TaskInfo {
+            xml_hash: 2,
+            ..Default::default()
+        };
+        assert!(!d.seen(&create.dedup_key_with(Some(&benign)), 1_000));
+        assert!(!d.seen(&del.dedup_key_with(None), 1_200));
+        assert!(!d.seen(&create.dedup_key_with(Some(&evil)), 1_210));
+        // Even identical content in the same millisecond window counts as a
+        // copy only when the hash matches too.
+        assert!(!d.seen(&create.dedup_key_with(Some(&benign)), 1_220));
+        assert!(d.seen(&create.dedup_key_with(Some(&evil)), 1_215));
     }
 }

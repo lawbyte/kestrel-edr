@@ -32,7 +32,19 @@
            Scope="perMachine"
            Compressed="yes">
 
-    <MajorUpgrade DowngradeErrorMessage="A newer version of Kestrel is already installed." />
+    <!--
+      V-M3 (agent auto-update): RemoveExistingProducts runs after InstallExecute,
+      i.e. the new version is installed over the old one first (components keep
+      the same generated GUIDs, so they are shared and ref-counted) and the old
+      product is removed last. This keeps the enrolled agent, its service
+      registration and its state, and it means the new product is already
+      registered when the old package's KestrelUninstall custom action checks
+      the UPGRADINGPRODUCTCODE claim (V-M2).
+      WiX: https://docs.firegiant.com/wix/schema/wxs/majorupgrade/ (Schedule);
+      Windows Installer: https://learn.microsoft.com/windows/win32/msi/removeexistingproducts-action
+    -->
+    <MajorUpgrade Schedule="afterInstallExecute"
+                  DowngradeErrorMessage="A newer version of Kestrel is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <!-- Public properties set on the msiexec command line. Hidden so they never reach the MSI log. -->
@@ -45,7 +57,9 @@
     <Property Id="CA_Install" Hidden="yes" />
     <Property Id="CA_Uninstall" Hidden="yes" />
 
-    <Launch Condition="Installed OR (SERVER AND TOKEN AND CA_B64)"
+    <!-- WIX_UPGRADE_DETECTED (set by FindRelatedProducts): an upgrade of an
+         installed Kestrel keeps the existing enrollment and needs no token (V-M3). -->
+    <Launch Condition="Installed OR WIX_UPGRADE_DETECTED OR (SERVER AND TOKEN AND CA_B64)"
             Message="SERVER, TOKEN and CA_B64 are required. Copy the install command from the Kestrel console (Devices > Enrollment tokens)." />
     <Launch Condition="VersionNT64 &gt;= 603"
             Message="Kestrel requires 64-bit Windows 10, Windows 11 or Windows Server 2019 or later." />
@@ -53,11 +67,31 @@
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Kestrel">
         <Component Id="AgentExe" Guid="*">
-          <File Id="KestrelAgentExe" Source="$(var.AgentExe)" Name="kestrel-agent.exe" KeyPath="yes" />
+          <!-- The Rust binaries carry no version resource; DefaultVersion makes
+               the package's copy "versioned" so it always replaces the
+               unversioned file on disk during an upgrade (file versioning rules). -->
+          <File Id="KestrelAgentExe" Source="$(var.AgentExe)" Name="kestrel-agent.exe" KeyPath="yes"
+                DefaultVersion="$(var.Version)" />
         </Component>
         <!-- On-demand YARA-X scanner (kept out of the always-running agent). -->
         <Component Id="ScanExe" Guid="*">
-          <File Id="KestrelScanExe" Source="$(var.ScanExe)" Name="kestrel-scan.exe" KeyPath="yes" />
+          <File Id="KestrelScanExe" Source="$(var.ScanExe)" Name="kestrel-scan.exe" KeyPath="yes"
+                DefaultVersion="$(var.Version)" />
+        </Component>
+        <!--
+          Upgrades only (V-M3): stop the running agent service before the files
+          are replaced and start the new binary afterwards. The service itself is
+          registered by `kestrel-agent install` (fresh installs), not by this
+          package, so nothing here runs on a fresh install or on uninstall (an
+          uninstall must not stop the agent before the token is checked).
+          msiexec runs as LocalSystem, which the hardened service DACL allows to
+          stop and start the service.
+        -->
+        <Component Id="UpgradeServiceControl" Guid="*" Condition="WIX_UPGRADE_DETECTED">
+          <RegistryValue Root="HKLM" Key="SOFTWARE\Kestrel\Installer" Name="UpgradeServiceControl"
+                         Type="integer" Value="1" KeyPath="yes" />
+          <ServiceControl Id="KestrelAgentUpgrade" Name="KestrelAgent"
+                          Stop="install" Start="install" Wait="yes" />
         </Component>
         <Component Id="TrayExe" Guid="*">
           <File Id="KestrelTrayExe" Source="$(var.TrayExe)" Name="kestrel-tray.exe" KeyPath="yes" />
@@ -80,8 +114,10 @@
       </Directory>
     </StandardDirectory>
 
-    <Feature Id="Main" Title="Kestrel EDR Agent" Level="1">
+    <!-- AllowAbsent="no": the feature cannot be removed on its own (V-M2). -->
+    <Feature Id="Main" Title="Kestrel EDR Agent" Level="1" AllowAbsent="no">
       <ComponentRef Id="AgentExe" />
+      <ComponentRef Id="UpgradeServiceControl" />
       <ComponentRef Id="TrayExe" />
       <ComponentRef Id="ScanExe" />
       <ComponentRef Id="StateDir" />
@@ -109,15 +145,30 @@
     <CustomAction Id="CA_Install" BinaryRef="KestrelCA" DllEntry="KestrelInstall"
                   Execute="deferred" Impersonate="no" Return="check" HideTarget="yes" />
 
+    <!--
+      V-M2: UPGRADINGPRODUCTCODE is passed to the custom action, never used in
+      its condition: it is an ordinary property that `msiexec /x {PC}
+      UPGRADINGPRODUCTCODE={x}` can set. KestrelUninstall waives the token only
+      when that code names an installed, newer product under this UpgradeCode.
+    -->
     <SetProperty Id="CA_Uninstall" Sequence="execute" Before="CA_Uninstall"
-                 Value="[INSTALLFOLDER]|[UNINSTALL_TOKEN]" />
+                 Value="[INSTALLFOLDER]|[UNINSTALL_TOKEN]|[UPGRADINGPRODUCTCODE]|[UpgradeCode]|[ProductVersion]|[ProductCode]" />
     <CustomAction Id="CA_Uninstall" BinaryRef="KestrelCA" DllEntry="KestrelUninstall"
                   Execute="deferred" Impersonate="no" Return="check" HideTarget="yes" />
 
+    <!-- V-M2: partial removal (REMOVE=<feature list>) is refused outright. -->
+    <CustomAction Id="CA_BlockPartialRemove"
+                  Error="Removing part of Kestrel is not supported. Uninstall the whole product with the uninstall token." />
+
     <InstallExecuteSequence>
-      <Custom Action="CA_Install" After="InstallFiles" Condition="NOT Installed AND NOT REMOVE" />
+      <Custom Action="CA_BlockPartialRemove" After="LaunchConditions"
+              Condition="REMOVE AND REMOVE&lt;&gt;&quot;ALL&quot;" />
+      <!-- Fresh installs only: an upgrade keeps the enrolled identity (V-M3);
+           `kestrel-agent install` also keeps an existing identity itself. -->
+      <Custom Action="CA_Install" After="InstallFiles"
+              Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED AND NOT REMOVE" />
       <!-- The agent refuses to stop without a valid uninstall token (tamper protection). -->
-      <Custom Action="CA_Uninstall" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="CA_Uninstall" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
     </InstallExecuteSequence>
   </Package>
 </Wix>

@@ -16,11 +16,16 @@
 //!   (e.g. the `KestrelTray` Run value). Kestrel objects are recognised by
 //!   exact name / location, never by a name prefix, so malware cannot dodge
 //!   removal by calling itself "Kestrel…".
-//! * **OS-critical values** (Winlogon `Userinit`/`Shell` in HKLM, Session
-//!   Manager `BootExecute`, the LSA package lists, any service `ImagePath`)
-//!   are never deleted: only a sane `restore_data` may be written to them.
-//!   Security settings Kestrel itself relies on (`Lsa\RunAsPPL`) are never
-//!   touched.
+//! * **Registry values (V-H2)**: a value may be *deleted* only when it is in
+//!   the autorun allow-list ([`plan_registry`]: Run-family keys, Windows
+//!   Load/Run, IFEO Debugger/GlobalFlag/VerifierDlls, SilentProcessExit,
+//!   per-user Winlogon and COM overrides, AppInit_DLLs, AppCertDlls), and
+//!   *written* only with the canonical Windows default for that exact value
+//!   from a fixed table ([`os_default`]: HKLM Winlogon Userinit/Shell,
+//!   BootExecute, WDigest, Startup shell folders, AppInit_DLLs), with the
+//!   table's type, which the live value must already have (a value's type is
+//!   never changed). Service `ImagePath`/`Start`, the LSA package lists and
+//!   hardening-owned settings (`Lsa\RunAsPPL`) are never written or deleted.
 //! * **Scheduled tasks** must be a full `\Folder\Name` path; tasks under
 //!   `\Microsoft\Windows\` are refused for automatic (engine / local)
 //!   actions; analyst commands may remove them.
@@ -130,6 +135,26 @@ pub fn references_own_dirs(data: &str, own_dirs: &[String]) -> bool {
         .any(|p| d.contains(&format!(r"{p}\")))
 }
 
+/// `SYSTEM\ControlSet001\x` → `SYSTEM\CurrentControlSet\x` (any 3-digit set).
+fn normalise_control_set(rest: &str) -> String {
+    let mut parts = rest.splitn(3, '\\');
+    let (a, b, c) = (parts.next(), parts.next(), parts.next());
+    if let (Some(a), Some(b)) = (a, b) {
+        let bl = b.to_ascii_lowercase();
+        if a.eq_ignore_ascii_case("SYSTEM")
+            && bl.len() == "controlset001".len()
+            && bl.starts_with("controlset")
+            && bl["controlset".len()..].bytes().all(|x| x.is_ascii_digit())
+        {
+            return match c {
+                Some(c) => format!(r"{a}\CurrentControlSet\{c}"),
+                None => format!(r"{a}\CurrentControlSet"),
+            };
+        }
+    }
+    rest.to_string()
+}
+
 /// Parse and validate a registry key for `RemoveAutorun`.
 pub fn parse_reg_location(loc: &str) -> Result<RegLocation, String> {
     let t = loc.trim().trim_end_matches('\\');
@@ -165,6 +190,16 @@ pub fn parse_reg_location(loc: &str) -> Result<RegLocation, String> {
             }
         }
         _ => return Err(format!("{loc}: unsupported registry root {head}")),
+    };
+    // `SYSTEM\ControlSet00N\…` → `SYSTEM\CurrentControlSet\…` (the engine
+    // normalises the same way; the live control set is what is acted on).
+    let normalised;
+    let rest = match root {
+        RegRoot::Hklm => {
+            normalised = normalise_control_set(rest);
+            normalised.as_str()
+        }
+        RegRoot::Hku => rest,
     };
     let segs: Vec<&str> = rest.split('\\').collect();
     if segs.iter().any(|s| bad_segment(s)) {
@@ -237,7 +272,12 @@ pub fn parse_restore_data(s: &str) -> Result<RestoreData, String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegOp {
     Delete,
-    Write(RestoreData),
+    /// Write the canonical OS default. `reg_type` is the type the value must
+    /// already have (and is written with): the type is never changed.
+    Write {
+        reg_type: u32,
+        data: RestoreData,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,100 +288,267 @@ pub struct RegPlan {
     pub op: RegOp,
 }
 
-/// Values that must never be deleted (deleting them breaks logon / boot /
-/// LSA); only a sane replacement may be written. Returns a checker for the
-/// replacement string when the value is critical.
-fn critical_value(loc: &RegLocation, value: &str) -> Option<&'static str> {
+const CV: &str = r"software\microsoft\windows\currentversion";
+const NTCV: &str = r"software\microsoft\windows nt\currentversion";
+
+/// Values Kestrel never writes or deletes, whatever the request (V-H2):
+/// service `ImagePath` / `Start` (SYSTEM code execution, disabling security
+/// services past the service guards), the LSA package lists, and security
+/// settings Kestrel's hardening owns (`RunAsPPL`, `LsaCfgFlags`).
+fn forbidden_value(loc: &RegLocation, value: &str) -> Option<&'static str> {
+    if loc.root != RegRoot::Hklm {
+        return None;
+    }
     let k = loc.canonical();
     let v = value.to_ascii_lowercase();
-    match loc.root {
-        RegRoot::Hklm => {
-            if k == r"software\microsoft\windows nt\currentversion\winlogon" {
-                match v.as_str() {
-                    "userinit" => return Some("userinit.exe"),
-                    "shell" => return Some("explorer.exe"),
-                    _ => {}
+    if let Some(svc) = k.strip_prefix(r"system\currentcontrolset\services\") {
+        if !svc.contains('\\') && matches!(v.as_str(), "imagepath" | "start") {
+            return Some("service ImagePath / Start values are never written or deleted (disable the service with kind=service instead)");
+        }
+    }
+    if k == r"system\currentcontrolset\control\lsa" {
+        if matches!(
+            v.as_str(),
+            "security packages" | "authentication packages" | "notification packages"
+        ) {
+            return Some("LSA package lists are never written or deleted");
+        }
+        if matches!(v.as_str(), "runasppl" | "lsacfgflags") {
+            return Some("security setting managed by hardening");
+        }
+    }
+    if k == r"system\currentcontrolset\control\lsa\osconfig" && v == "security packages" {
+        return Some("LSA package lists are never written or deleted");
+    }
+    None
+}
+
+/// Is `k` exactly `<prefix>\<one segment>`? Returns the segment.
+fn one_below<'a>(k: &'a str, prefix: &str) -> Option<&'a str> {
+    k.strip_prefix(prefix)
+        .and_then(|r| r.strip_prefix('\\'))
+        .filter(|s| !s.is_empty() && !s.contains('\\'))
+}
+
+/// Allow-list of autorun values that may be **deleted** (V-H2). `k` and `v`
+/// are lower-case; `k` is [`RegLocation::canonical`] (Wow6432Node folded,
+/// HKU SID / `_Classes` normalised).
+fn deletable(root: RegRoot, k: &str, v: &str) -> bool {
+    // Run-family keys, HKLM and HKU (incl. Wow6432Node via `canonical`).
+    for run in [
+        "run",
+        "runonce",
+        "runservices",
+        "runservicesonce",
+        r"policies\explorer\run",
+    ] {
+        if k == format!(r"{CV}\{run}") {
+            return true;
+        }
+    }
+    let rox = format!(r"{CV}\runonceex");
+    if k == rox || k.starts_with(&format!(r"{rox}\")) {
+        return true;
+    }
+    if k == format!(r"{NTCV}\windows") && matches!(v, "load" | "run") {
+        return true;
+    }
+    if one_below(k, &format!(r"{NTCV}\image file execution options")).is_some()
+        && matches!(v, "debugger" | "globalflag" | "verifierdlls")
+    {
+        return true;
+    }
+    if one_below(k, &format!(r"{NTCV}\silentprocessexit")).is_some() {
+        return true;
+    }
+    // Shell override through policy (falls back to Winlogon).
+    if k == format!(r"{CV}\policies\system") && v == "shell" {
+        return true;
+    }
+    match root {
+        RegRoot::Hku => {
+            // Per-user Winlogon overrides (HKLM Winlogon is restore-only).
+            if k == format!(r"{NTCV}\winlogon") && matches!(v, "shell" | "userinit") {
+                return true;
+            }
+            // Per-user COM hijacks.
+            if let Some(tail) = k.strip_prefix(r"software\classes\clsid\") {
+                match tail.split_once('\\') {
+                    Some((clsid, sub)) => {
+                        return !clsid.is_empty()
+                            && v.is_empty()
+                            && matches!(
+                                sub,
+                                "inprocserver32" | "inprochandler32" | "localserver32" | "treatas"
+                            );
+                    }
+                    None => return !tail.is_empty() && v == "scriptleturl",
                 }
             }
-            if k == r"system\currentcontrolset\control\session manager" && v == "bootexecute" {
-                return Some("autochk");
-            }
-            if k == r"system\currentcontrolset\control\lsa"
-                && matches!(
-                    v.as_str(),
-                    "security packages" | "authentication packages" | "notification packages"
-                )
-            {
-                return Some("");
-            }
-            if k.starts_with(r"system\currentcontrolset\services\")
-                && k.matches('\\').count() == 3
-                && v == "imagepath"
-            {
-                return Some("");
-            }
-            None
+            false
         }
-        RegRoot::Hku => None,
+        RegRoot::Hklm => {
+            (k == format!(r"{NTCV}\windows") && v == "appinit_dlls")
+                || k == r"system\currentcontrolset\control\session manager\appcertdlls"
+        }
     }
 }
 
-/// Values Kestrel never touches at all (security settings it depends on).
-fn untouchable_value(loc: &RegLocation, value: &str) -> bool {
-    let k = loc.canonical();
-    let v = value.to_ascii_lowercase();
-    loc.root == RegRoot::Hklm
-        && k == r"system\currentcontrolset\control\lsa"
-        && matches!(v.as_str(), "runasppl" | "lsacfgflags")
+/// One canonical OS default (V-H2 restore table).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultValue {
+    pub reg_type: u32,
+    pub data: RestoreData,
 }
 
-/// Validate a `RemoveAutorun { kind: RegistryValue, .. }`.
+/// The canonical Windows default for (root, canonical key, value), if this
+/// value is restorable. `system_root` is the executor's Windows directory
+/// (`GetSystemWindowsDirectoryW`, e.g. `C:\Windows`).
+///
+/// Sources (checked 2026-10-21):
+/// * Winlogon `Userinit` = `C:\Windows\system32\userinit.exe,` and `Shell` =
+///   `explorer.exe` (REG_SZ): Microsoft Learn, "Winlogon registry entries"
+///   / MITRE ATT&CK T1547.004; the trailing comma is part of the default.
+/// * Session Manager `BootExecute` = `autocheck autochk *` (REG_MULTI_SZ):
+///   Microsoft Learn, "BootExecute" (Windows registry reference) / Sysinternals
+///   Autoruns default.
+/// * WDigest `UseLogonCredential` / `Negotiate` = 0 (REG_DWORD): KB2871997
+///   (0 = no cleartext credentials in LSASS; also the effective default).
+/// * User Shell Folders `Startup` (HKU) =
+///   `%USERPROFILE%\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup`
+///   and `Common Startup` (HKLM) =
+///   `%ProgramData%\Microsoft\Windows\Start Menu\Programs\StartUp`
+///   (REG_EXPAND_SZ): Known Folder defaults (FOLDERID_Startup /
+///   FOLDERID_CommonStartup, Microsoft Learn "KNOWNFOLDERID"). Compared
+///   case-insensitively (paths), written exactly as listed here.
+/// * `AppInit_DLLs` (HKLM `Windows NT\CurrentVersion\Windows`) = "" (REG_SZ):
+///   the shipped value is an empty string (Microsoft Learn, "AppInit DLLs
+///   and Secure Boot").
+pub fn os_default(root: RegRoot, k: &str, v: &str, system_root: &str) -> Option<DefaultValue> {
+    let s = |reg_type: u32, d: &str| {
+        Some(DefaultValue {
+            reg_type,
+            data: RestoreData::String(d.to_string()),
+        })
+    };
+    match root {
+        RegRoot::Hklm => {
+            if k == format!(r"{NTCV}\winlogon") {
+                return match v {
+                    "userinit" => s(
+                        REG_SZ,
+                        &format!(
+                            r"{}\system32\userinit.exe,",
+                            system_root.trim_end_matches('\\')
+                        ),
+                    ),
+                    "shell" => s(REG_SZ, "explorer.exe"),
+                    _ => None,
+                };
+            }
+            if k == r"system\currentcontrolset\control\session manager" && v == "bootexecute" {
+                return s(REG_MULTI_SZ, "autocheck autochk *");
+            }
+            if k == r"system\currentcontrolset\control\securityproviders\wdigest"
+                && matches!(v, "uselogoncredential" | "negotiate")
+            {
+                return Some(DefaultValue {
+                    reg_type: REG_DWORD,
+                    data: RestoreData::Dword(0),
+                });
+            }
+            if k == format!(r"{CV}\explorer\user shell folders") && v == "common startup" {
+                return s(
+                    REG_EXPAND_SZ,
+                    r"%ProgramData%\Microsoft\Windows\Start Menu\Programs\StartUp",
+                );
+            }
+            if k == format!(r"{NTCV}\windows") && v == "appinit_dlls" {
+                return s(REG_SZ, "");
+            }
+            None
+        }
+        RegRoot::Hku => {
+            if k == format!(r"{CV}\explorer\user shell folders") && v == "startup" {
+                return s(
+                    REG_EXPAND_SZ,
+                    r"%USERPROFILE%\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup",
+                );
+            }
+            None
+        }
+    }
+}
+
+fn same_restore(a: &RestoreData, b: &RestoreData) -> bool {
+    match (a, b) {
+        (RestoreData::Dword(x), RestoreData::Dword(y)) => x == y,
+        (RestoreData::String(x), RestoreData::String(y)) => x.eq_ignore_ascii_case(y),
+        _ => false,
+    }
+}
+
+/// Validate a `RemoveAutorun { kind: RegistryValue, .. }` (V-H2).
+///
+/// * Deletes only for the autorun allow-list ([`deletable`]).
+/// * `restore_data` only when it equals the canonical OS default for that
+///   exact value ([`os_default`]); the table's data and type are written,
+///   and the executor refuses if the live value has another type.
+/// * Never: service ImagePath / Start, LSA package lists, hardening settings.
 pub fn plan_registry(
     location: &str,
     value_name: Option<&str>,
     restore_data: Option<&str>,
+    system_root: &str,
 ) -> Result<RegPlan, String> {
     let loc = parse_reg_location(location)?;
     let value = value_name.unwrap_or("").to_string();
-    if value.chars().any(|c| c.is_control()) || value.contains('*') {
+    if value.chars().any(|c| c.is_control()) || value.contains('*') || value.contains('?') {
         return Err("invalid value name".into());
     }
-    if untouchable_value(&loc, &value) {
-        return Err(format!(
-            "refusing to change {}\\{value}: security setting managed by hardening",
-            loc.display()
-        ));
-    }
-    let op = match restore_data {
-        Some(r) => RegOp::Write(parse_restore_data(r)?),
-        None => RegOp::Delete,
+    let shown = || {
+        if value.is_empty() {
+            format!(r"{}\(default)", loc.display())
+        } else {
+            format!(r"{}\{value}", loc.display())
+        }
     };
-    if let Some(must_contain) = critical_value(&loc, &value) {
-        match &op {
-            RegOp::Delete => {
+    if let Some(why) = forbidden_value(&loc, &value) {
+        return Err(format!("refusing to change {}: {why}", shown()));
+    }
+    let k = loc.canonical();
+    let v = value.to_ascii_lowercase();
+    let op = match restore_data {
+        None => {
+            if !deletable(loc.root, &k, &v) {
                 return Err(format!(
-                    "refusing to delete OS-critical value {}\\{value}; supply restore_data with the OS default",
-                    loc.display()
-                ))
+                    "refusing to delete {}: not a recognised autorun location (Run/RunOnce/RunOnceEx/policy Run, Windows Load/Run, IFEO Debugger/GlobalFlag/VerifierDlls, SilentProcessExit, per-user Winlogon/COM overrides, AppInit_DLLs, AppCertDlls); OS defaults are restored, never deleted",
+                    shown()
+                ));
             }
-            RegOp::Write(RestoreData::String(s)) => {
-                if !s.to_ascii_lowercase().contains(must_contain)
-                    || (!must_contain.is_empty() && s.trim().is_empty())
-                {
-                    return Err(format!(
-                        "restore data {s:?} for {}\\{value} does not look like the OS default (expected to contain {must_contain:?})",
-                        loc.display()
-                    ));
-                }
-            }
-            RegOp::Write(RestoreData::Dword(_)) => {
+            RegOp::Delete
+        }
+        Some(r) => {
+            let want = parse_restore_data(r)?;
+            let Some(def) = os_default(loc.root, &k, &v, system_root) else {
                 return Err(format!(
-                    "{}\\{value} is a string value; a dword restore is not accepted",
-                    loc.display()
-                ))
+                    "refusing to write {}: restore is only allowed for values with a fixed Windows default (Winlogon Userinit/Shell, BootExecute, WDigest, Startup shell folders, AppInit_DLLs)",
+                    shown()
+                ));
+            };
+            if !same_restore(&want, &def.data) {
+                return Err(format!(
+                    "refusing to write {r:?} to {}: only the Windows default {:?} may be restored",
+                    shown(),
+                    def.data
+                ));
+            }
+            RegOp::Write {
+                reg_type: def.reg_type,
+                data: def.data,
             }
         }
-    }
+    };
     Ok(RegPlan {
         location: loc,
         value_name: value,
@@ -363,9 +570,10 @@ fn utf16z(s: &str) -> Vec<u8> {
         .collect()
 }
 
-/// Encode a replacement: (registry type, bytes). Strings keep the original
-/// string type (`REG_EXPAND_SZ` stays expandable; `REG_MULTI_SZ` takes
-/// elements separated by a literal `\0`), otherwise `REG_SZ`.
+/// Encode a replacement: (registry type, bytes). `original_type` is the
+/// plan's type ([`RegOp::Write`]), which the live value must already have.
+/// Strings: `REG_EXPAND_SZ` stays expandable; `REG_MULTI_SZ` takes elements
+/// separated by a literal `\0`; anything else is `REG_SZ`.
 pub fn encode_restore(original_type: u32, data: &RestoreData) -> (u32, Vec<u8>) {
     match data {
         RestoreData::Dword(n) => (REG_DWORD, n.to_le_bytes().to_vec()),
@@ -381,6 +589,21 @@ pub fn encode_restore(original_type: u32, data: &RestoreData) -> (u32, Vec<u8>) 
             }
             _ => (REG_SZ, utf16z(s)),
         },
+    }
+}
+
+/// For a restore, the live value must already have the table's type: the
+/// executor checks this on the value it backed up and again right before
+/// writing (a value's type is never changed). Deletes accept any type.
+pub fn check_live_type(op: &RegOp, live_type: u32) -> Result<(), String> {
+    match op {
+        RegOp::Delete => Ok(()),
+        RegOp::Write { reg_type, .. } if *reg_type == live_type => Ok(()),
+        RegOp::Write { reg_type, .. } => Err(format!(
+            "the value is {} but its Windows default is {}; refusing to change a value's type",
+            reg_type_name(live_type),
+            reg_type_name(*reg_type)
+        )),
     }
 }
 
@@ -808,6 +1031,14 @@ mod tests {
         );
         // prefix look-alikes are NOT Kestrel's (no evasion by naming)
         assert!(parse_reg_location(r"HKLM\SOFTWARE\KestrelUpdate\Run").is_ok());
+        // ControlSet00N is folded to CurrentControlSet.
+        assert_eq!(
+            parse_reg_location(r"HKLM\SYSTEM\ControlSet001\Services\x")
+                .unwrap()
+                .subkey,
+            r"SYSTEM\CurrentControlSet\Services\x"
+        );
+        assert!(parse_reg_location(r"HKLM\SYSTEM\ControlSet002\Services\KestrelAgent").is_err());
         assert!(
             parse_reg_location(r"HKLM\SYSTEM\CurrentControlSet\Services\KestrelAgent2").is_ok()
         );
@@ -832,7 +1063,8 @@ mod tests {
             r"HKLM\SAM\SAM",
             r"HKLM\SECURITY\Policy",
             r"HKLM\SOFTWARE",
-            r"HKLM\SYSTEM\ControlSet001\Services\x",
+            r"HKLM\SYSTEM\ControlSet001",
+            r"HKLM\SYSTEM\Select\x",
             r"HKLM\SYSTEM\CurrentControlSet",
             r"HKLM\SYSTEM\CurrentControlSet\Services\KestrelAgent",
             r"HKLM\SYSTEM\CurrentControlSet\Services\kestrelagent\Parameters",
@@ -881,82 +1113,379 @@ mod tests {
         assert_eq!(t, REG_SZ);
     }
 
+    const SR: &str = r"C:\Windows";
+    const SID: &str = "S-1-5-21-1-2-3-1001";
+
+    fn del(loc: &str, v: &str) -> Result<RegPlan, String> {
+        plan_registry(loc, Some(v), None, SR)
+    }
+
+    fn put(loc: &str, v: &str, data: &str) -> Result<RegPlan, String> {
+        plan_registry(loc, Some(v), Some(data), SR)
+    }
+
     #[test]
-    fn registry_plans() {
-        let run = r"HKU\S-1-5-21-1-2-3-1001\Software\Microsoft\Windows\CurrentVersion\Run";
-        let p = plan_registry(run, Some("Updater"), None).unwrap();
-        assert_eq!(p.op, RegOp::Delete);
-        assert_eq!(p.value_name, "Updater");
-        // default value
-        assert_eq!(plan_registry(run, None, None).unwrap().value_name, "");
-        // WDigest restore
-        let p = plan_registry(
-            r"HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest",
-            Some("UseLogonCredential"),
-            Some("dword:0"),
-        )
-        .unwrap();
-        assert_eq!(p.op, RegOp::Write(RestoreData::Dword(0)));
-        // Winlogon: never deleted, restore must be sane
+    fn registry_delete_allow_list() {
+        let hku = |rest: &str| format!(r"HKU\{SID}\{rest}");
+        let mut ok: Vec<(String, &str)> = Vec::new();
+        for base in [
+            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion".to_string(),
+            r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion".to_string(),
+            hku(r"Software\Microsoft\Windows\CurrentVersion"),
+            hku(r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion"),
+        ] {
+            for k in [
+                "Run",
+                "RunOnce",
+                "RunServices",
+                "RunServicesOnce",
+                r"Policies\Explorer\Run",
+                "RunOnceEx",
+                r"RunOnceEx\0001",
+                r"RunOnceEx\0001\Depend",
+            ] {
+                ok.push((format!(r"{base}\{k}"), "Updater"));
+            }
+            ok.push((format!(r"{base}\Policies\System"), "Shell"));
+        }
+        for base in [
+            r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion".to_string(),
+            r"HKLM\SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion".to_string(),
+            hku(r"Software\Microsoft\Windows NT\CurrentVersion"),
+        ] {
+            ok.push((format!(r"{base}\Windows"), "Load"));
+            ok.push((format!(r"{base}\Windows"), "Run"));
+            for v in ["Debugger", "GlobalFlag", "VerifierDlls"] {
+                ok.push((format!(r"{base}\Image File Execution Options\sethc.exe"), v));
+            }
+            ok.push((
+                format!(r"{base}\SilentProcessExit\lsass.exe"),
+                "MonitorProcess",
+            ));
+            ok.push((
+                format!(r"{base}\SilentProcessExit\notepad.exe"),
+                "ReportingMode",
+            ));
+        }
+        ok.push((
+            r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows".into(),
+            "AppInit_DLLs",
+        ));
+        ok.push((
+            r"HKLM\SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion\Windows".into(),
+            "AppInit_DLLs",
+        ));
+        ok.push((
+            r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\AppCertDlls".into(),
+            "evil",
+        ));
+        ok.push((
+            r"HKLM\SYSTEM\ControlSet001\Control\Session Manager\AppCertDlls".into(),
+            "evil",
+        ));
+        ok.push((
+            hku(r"Software\Microsoft\Windows NT\CurrentVersion\Winlogon"),
+            "Shell",
+        ));
+        ok.push((
+            hku(r"Software\Microsoft\Windows NT\CurrentVersion\Winlogon"),
+            "Userinit",
+        ));
+        for sub in [
+            "InprocServer32",
+            "LocalServer32",
+            "TreatAs",
+            "InprocHandler32",
+        ] {
+            ok.push((hku(&format!(r"Software\Classes\CLSID\{{AAAA}}\{sub}")), ""));
+            ok.push((format!(r"HKU\{SID}_Classes\CLSID\{{AAAA}}\{sub}"), ""));
+        }
+        ok.push((hku(r"Software\Classes\CLSID\{AAAA}"), "ScriptletURL"));
+        for (loc, v) in &ok {
+            let p = del(loc, v).unwrap_or_else(|e| panic!("{loc}\\{v}: {e}"));
+            assert_eq!(p.op, RegOp::Delete);
+        }
+        // Default value of a Run key.
+        assert_eq!(
+            plan_registry(&ok[0].0, None, None, SR).unwrap().value_name,
+            ""
+        );
+
+        // Refused deletes.
+        for (loc, v) in [
+            // OS defaults are restored, never deleted.
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon",
+                "Userinit",
+            ),
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon",
+                "Shell",
+            ),
+            (
+                r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager",
+                "BootExecute",
+            ),
+            // Bricks the host.
+            (
+                r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\SubSystems",
+                "Windows",
+            ),
+            (r"HKLM\SYSTEM\CurrentControlSet\Services\disk", "Start"),
+            (r"HKLM\SYSTEM\CurrentControlSet\Services\Evil", "ImagePath"),
+            (
+                r"HKLM\SYSTEM\CurrentControlSet\Services\Evil\Parameters",
+                "ServiceDll",
+            ),
+            (
+                r"HKLM\SYSTEM\CurrentControlSet\Control\Lsa",
+                "Notification Packages",
+            ),
+            (
+                r"HKLM\SYSTEM\CurrentControlSet\Control\Lsa",
+                "Security Packages",
+            ),
+            (
+                r"HKLM\SYSTEM\CurrentControlSet\Control\Lsa\OSConfig",
+                "Security Packages",
+            ),
+            (r"HKLM\SYSTEM\CurrentControlSet\Control\Lsa", "RunAsPPL"),
+            // Kestrel's hardening (ASR / AppLocker / Defender policy values).
+            (
+                r"HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Windows Defender Exploit Guard\ASR\Rules",
+                "d4f940ab-401b-4efc-aadc-ad5f3c50688a",
+            ),
+            (
+                r"HKLM\SOFTWARE\Policies\Microsoft\Windows\SrpV2\Exe\abc",
+                "Value",
+            ),
+            // exefile handler, CLSID in HKLM, IFEO other values / per-path keys.
+            (r"HKLM\SOFTWARE\Classes\exefile\shell\open\command", ""),
+            (r"HKLM\SOFTWARE\Classes\CLSID\{AAAA}\InprocServer32", ""),
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\x.exe",
+                "UseFilter",
+            ),
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\x.exe\Filter1",
+                "Debugger",
+            ),
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options",
+                "Debugger",
+            ),
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows",
+                "Device",
+            ),
+            (r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\RunX", "a"),
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run\Sub",
+                "a",
+            ),
+            // COM: only the server default value / ScriptletURL.
+            (
+                r"HKU\S-1-5-21-1-2-3-1001\Software\Classes\CLSID\{AAAA}\InprocServer32",
+                "ThreadingModel",
+            ),
+            (r"HKU\S-1-5-21-1-2-3-1001\Software\Classes\CLSID\{AAAA}", ""),
+            // AppInit / AppCert are machine-wide only.
+            (
+                r"HKU\S-1-5-21-1-2-3-1001\Software\Microsoft\Windows NT\CurrentVersion\Windows",
+                "AppInit_DLLs",
+            ),
+        ] {
+            assert!(del(loc, v).is_err(), "delete {loc}\\{v} should be refused");
+        }
+        let run = format!(r"HKU\{SID}\Software\Microsoft\Windows\CurrentVersion\Run");
+        assert!(del(&run, "a*").is_err());
+        assert!(del(&run, "a?").is_err());
+    }
+
+    #[test]
+    fn registry_restore_table() {
         let wl = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon";
-        assert!(plan_registry(wl, Some("Userinit"), None).is_err());
-        assert!(plan_registry(wl, Some("Userinit"), Some(r"C:\evil.exe")).is_err());
-        assert!(plan_registry(wl, Some("Userinit"), Some("dword:0")).is_err());
+        let wd = r"HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest";
+        let sm = r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager";
+        let usf_u = format!(
+            r"HKU\{SID}\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+        );
+        let usf_m = r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders";
+        let win = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows";
+
+        // Canonical defaults (the engine's constants included) are accepted
+        // and carry the table's type.
+        let p = put(wd, "UseLogonCredential", "dword:0").unwrap();
+        assert_eq!(
+            p.op,
+            RegOp::Write {
+                reg_type: REG_DWORD,
+                data: RestoreData::Dword(0)
+            }
+        );
+        assert!(put(wd, "Negotiate", "dword:0").is_ok());
+        let p = put(wl, "Userinit", r"C:\Windows\system32\userinit.exe,").unwrap();
+        assert_eq!(
+            p.op,
+            RegOp::Write {
+                reg_type: REG_SZ,
+                data: RestoreData::String(r"C:\Windows\system32\userinit.exe,".into())
+            }
+        );
+        // Case-insensitive (engine upper-cases the drive letter).
+        assert!(put(wl, "Userinit", r"c:\WINDOWS\System32\userinit.exe,").is_ok());
+        // ...but the drive must be the system root's.
         assert!(plan_registry(
             wl,
             Some("Userinit"),
-            Some(r"C:\Windows\system32\userinit.exe,")
-        )
-        .is_ok());
-        assert!(plan_registry(wl, Some("Shell"), Some("explorer.exe")).is_ok());
-        assert!(plan_registry(wl, Some("shell"), Some("")).is_err());
-        // HKU Winlogon Shell override may be deleted
-        assert!(plan_registry(
-            r"HKU\S-1-5-21-1-2-3-1001\Software\Microsoft\Windows NT\CurrentVersion\Winlogon",
-            Some("Shell"),
-            None
-        )
-        .is_ok());
-        // BootExecute / LSA packages / ImagePath
-        assert!(plan_registry(
-            r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager",
-            Some("BootExecute"),
-            None
+            Some(r"C:\Windows\system32\userinit.exe,"),
+            r"D:\Windows"
         )
         .is_err());
-        assert!(plan_registry(
-            r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager",
-            Some("BootExecute"),
-            Some("autocheck autochk *")
+        assert!(put(wl, "Shell", "explorer.exe").is_ok());
+        let p = put(sm, "BootExecute", "autocheck autochk *").unwrap();
+        assert!(matches!(
+            p.op,
+            RegOp::Write {
+                reg_type: REG_MULTI_SZ,
+                ..
+            }
+        ));
+        let p = put(
+            &usf_u,
+            "Startup",
+            r"%USERPROFILE%\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup",
         )
-        .is_ok());
-        assert!(plan_registry(
+        .unwrap();
+        assert!(matches!(
+            p.op,
+            RegOp::Write {
+                reg_type: REG_EXPAND_SZ,
+                ..
+            }
+        ));
+        // The engine sends "Startup"; the shipped HKLM value is "StartUp".
+        let p = put(
+            usf_m,
+            "Common Startup",
+            r"%ProgramData%\Microsoft\Windows\Start Menu\Programs\Startup",
+        )
+        .unwrap();
+        assert_eq!(
+            p.op,
+            RegOp::Write {
+                reg_type: REG_EXPAND_SZ,
+                data: RestoreData::String(
+                    r"%ProgramData%\Microsoft\Windows\Start Menu\Programs\StartUp".into()
+                )
+            }
+        );
+        let p = put(win, "AppInit_DLLs", "").unwrap();
+        assert_eq!(
+            p.op,
+            RegOp::Write {
+                reg_type: REG_SZ,
+                data: RestoreData::String(String::new())
+            }
+        );
+
+        // The review's exploit examples.
+        assert!(put(
+            r"HKLM\SOFTWARE\Classes\exefile\shell\open\command",
+            "",
+            "C:\\Users\\Public\\x.exe \"%1\" %*"
+        )
+        .is_err());
+        assert!(put(
+            r"HKLM\SYSTEM\CurrentControlSet\Services\Spooler",
+            "ImagePath",
+            "cmd /c calc"
+        )
+        .is_err());
+        for svc in ["Sense", "EventLog", "BFE", "mpssvc", "Sysmon64"] {
+            assert!(put(
+                &format!(r"HKLM\SYSTEM\CurrentControlSet\Services\{svc}"),
+                "Start",
+                "dword:4"
+            )
+            .is_err());
+        }
+        assert!(put(
+            r"HKLM\SYSTEM\ControlSet001\Services\Sense",
+            "Start",
+            "dword:4"
+        )
+        .is_err());
+        assert!(put(
+            wl,
+            "Userinit",
+            r"C:\Windows\system32\userinit.exe,\\host\s\x.exe"
+        )
+        .is_err());
+        assert!(put(wl, "Userinit", r"C:\evil.exe").is_err());
+        assert!(put(wl, "Userinit", "dword:0").is_err());
+        assert!(put(wl, "Shell", "explorer.exe, evil.exe").is_err());
+        assert!(put(wl, "Shell", "").is_err());
+        assert!(put(wd, "UseLogonCredential", "dword:1").is_err());
+        assert!(
+            put(wd, "UseLogonCredential", "0").is_err(),
+            "string for a dword"
+        );
+        assert!(put(sm, "BootExecute", "autocheck autochk * evil").is_err());
+        assert!(put(
             r"HKLM\SYSTEM\CurrentControlSet\Control\Lsa",
-            Some("Notification Packages"),
-            None
+            "Security Packages",
+            "kerberos"
         )
         .is_err());
-        assert!(plan_registry(
-            r"HKLM\SYSTEM\CurrentControlSet\Services\Evil",
-            Some("ImagePath"),
-            None
-        )
-        .is_err());
-        // ServiceDll of a service may be removed
-        assert!(plan_registry(
-            r"HKLM\SYSTEM\CurrentControlSet\Services\Evil\Parameters",
-            Some("ServiceDll"),
-            None
-        )
-        .is_ok());
-        // RunAsPPL is never touched
-        assert!(plan_registry(
+        assert!(put(
             r"HKLM\SYSTEM\CurrentControlSet\Control\Lsa",
-            Some("RunAsPPL"),
-            Some("dword:0")
+            "RunAsPPL",
+            "dword:0"
         )
         .is_err());
-        assert!(plan_registry(run, Some("a*"), None).is_err());
+        assert!(put(&usf_u, "Startup", r"C:\Users\Public\evil").is_err());
+        // Restores are per hive: Startup is HKU, Common Startup HKLM; HKU
+        // Winlogon overrides are deleted, not restored.
+        assert!(put(
+            usf_m,
+            "Startup",
+            r"%USERPROFILE%\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
+        )
+        .is_err());
+        assert!(put(
+            &format!(r"HKU\{SID}\Software\Microsoft\Windows NT\CurrentVersion\Winlogon"),
+            "Shell",
+            "explorer.exe"
+        )
+        .is_err());
+        // A Run value may be deleted but never written.
+        assert!(put(
+            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+            "x",
+            "notepad.exe"
+        )
+        .is_err());
+        assert!(put(win, "AppInit_DLLs", r"C:\x.dll").is_err());
+
+        // Type mismatch: never change a value's type.
+        let p = put(wd, "UseLogonCredential", "dword:0").unwrap();
+        assert!(check_live_type(&p.op, REG_DWORD).is_ok());
+        assert!(check_live_type(&p.op, REG_SZ).is_err());
+        let p = put(sm, "BootExecute", "autocheck autochk *").unwrap();
+        assert!(check_live_type(&p.op, REG_MULTI_SZ).is_ok());
+        assert!(check_live_type(&p.op, REG_SZ).is_err());
+        let p = put(wl, "Userinit", r"C:\Windows\system32\userinit.exe,").unwrap();
+        assert!(check_live_type(&p.op, REG_EXPAND_SZ).is_err());
+        assert!(check_live_type(&RegOp::Delete, REG_BINARY).is_ok());
+        // Encoding uses the table type.
+        if let RegOp::Write { reg_type, data } =
+            &put(sm, "BootExecute", "autocheck autochk *").unwrap().op
+        {
+            let (t, b) = encode_restore(*reg_type, data);
+            assert_eq!(t, REG_MULTI_SZ);
+            assert!(b.ends_with(&[0, 0, 0, 0]));
+        }
     }
 
     #[test]

@@ -19,9 +19,6 @@ use windows_sys::Win32::Security::{
     PSID, SE_PRIVILEGE_ENABLED, SID_NAME_USE, TOKEN_ADJUST_PRIVILEGES, TOKEN_MANDATORY_LABEL,
     TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER,
 };
-use windows_sys::Win32::Storage::FileSystem::{
-    GetFileAttributesW, SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, INVALID_FILE_ATTRIBUTES,
-};
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW,
@@ -390,18 +387,23 @@ pub fn live_proc(pid: u32) -> Option<LiveProc> {
 
 // ------------------------------------------------------------- files
 
-pub fn set_hidden(path: &Path) {
-    let w = wide_path(path);
-    unsafe {
-        let a = GetFileAttributesW(w.as_ptr());
-        if a != INVALID_FILE_ATTRIBUTES {
-            SetFileAttributesW(w.as_ptr(), a | FILE_ATTRIBUTE_HIDDEN);
-        }
-    }
-}
-
+/// The system Windows directory (`C:\Windows`) from
+/// `GetSystemWindowsDirectoryW`. Never `%SystemRoot%`: the environment is
+/// caller-controlled for the CLI and any child we build paths for (V-H1).
 pub fn system_root() -> String {
-    std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string())
+    use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
+    static ROOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        let mut buf = vec![0u16; 512];
+        let n = unsafe { GetSystemWindowsDirectoryW(buf.as_mut_ptr(), buf.len() as u32) };
+        if n == 0 || n as usize >= buf.len() {
+            return r"C:\Windows".to_string();
+        }
+        String::from_utf16_lossy(&buf[..n as usize])
+            .trim_end_matches('\\')
+            .to_string()
+    })
+    .clone()
 }
 
 // ------------------------------------------------------------- registry
@@ -596,7 +598,10 @@ pub struct CmdOutput {
     pub stderr: String,
 }
 
-/// Run a program without a window, with a timeout (killed on expiry).
+/// Run a program without a window, with a timeout (killed on expiry). The
+/// child is recorded in [`crate::spawnreg`] (pid + creation time) so its
+/// ProcessStart is recognised as the agent's own (V-H1). `exe` must be an
+/// absolute path built from [`system_root`] or the agent's own folder.
 pub fn run_cmd(exe: &str, args: &[&str], timeout: Duration) -> io::Result<CmdOutput> {
     let mut child = Command::new(exe)
         .args(args)
@@ -605,6 +610,7 @@ pub fn run_cmd(exe: &str, args: &[&str], timeout: Duration) -> io::Result<CmdOut
         .stderr(Stdio::piped())
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()?;
+    crate::spawnreg::record_child(&child);
     let mut out = child.stdout.take();
     let mut err = child.stderr.take();
     let t_out = std::thread::spawn(move || {

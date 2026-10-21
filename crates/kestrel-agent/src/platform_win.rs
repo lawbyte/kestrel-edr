@@ -84,6 +84,18 @@ mod imp {
     pub fn remove_ransomware_canaries(state_dir: &Path) -> Vec<String> {
         kestrel_win::rcanary::remove_all(state_dir)
     }
+
+    /// Record a child the agent started (pid + creation time) so the sensor
+    /// recognises its ProcessStart as the agent's own (V-H1).
+    pub fn record_spawned_child(child: &std::process::Child) {
+        kestrel_win::spawnreg::record_child(child);
+    }
+
+    /// The Windows directory from `GetSystemWindowsDirectoryW` (never
+    /// `%SystemRoot%`, which the caller of the CLI controls: V-H1).
+    pub fn windows_dir() -> PathBuf {
+        kestrel_win::windows_dir()
+    }
 }
 
 #[cfg(all(windows, not(feature = "win-platform")))]
@@ -106,7 +118,7 @@ mod imp {
     }
 
     fn sc(args: &[&str]) -> Result<()> {
-        let st = std::process::Command::new("sc.exe")
+        let st = std::process::Command::new(windows_dir().join("System32").join("sc.exe"))
             .args(args)
             .status()
             .context("running sc.exe")?;
@@ -160,6 +172,17 @@ mod imp {
     pub fn remove_ransomware_canaries(_state_dir: &Path) -> Vec<String> {
         Vec::new()
     }
+
+    pub fn record_spawned_child(_child: &std::process::Child) {}
+
+    /// Dev builds without the platform layer only: `%SystemRoot%` with a
+    /// fixed fallback (release builds always use `GetSystemWindowsDirectoryW`).
+    pub fn windows_dir() -> PathBuf {
+        std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+    }
 }
 
 #[cfg(not(windows))]
@@ -210,6 +233,12 @@ mod imp {
 
     pub fn remove_ransomware_canaries(_state_dir: &Path) -> Vec<String> {
         Vec::new()
+    }
+
+    pub fn record_spawned_child(_child: &std::process::Child) {}
+
+    pub fn windows_dir() -> PathBuf {
+        PathBuf::from(r"C:\Windows")
     }
 }
 

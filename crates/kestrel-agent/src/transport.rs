@@ -412,12 +412,24 @@ async fn handle_server(
             tokio::spawn(async move { c.run_command(command_id, action).await });
         }
         ServerPayload::Update(m) => {
-            let c = core.clone();
-            tokio::spawn(async move {
-                if let Err(e) = crate::update::handle(&c, m).await {
-                    tracing::error!("agent update failed: {e:#}");
+            // V-H3: one update in flight per agent. The slot is claimed here,
+            // before the task is spawned, so a second delivery (reconnect
+            // Hello during a slow download, a duplicate offer) is dropped.
+            match crate::update::try_begin() {
+                Some(slot) => {
+                    let c = core.clone();
+                    tokio::spawn(async move {
+                        let _slot = slot;
+                        if let Err(e) = crate::update::handle(&c, m).await {
+                            tracing::error!("agent update failed: {e:#}");
+                        }
+                    });
                 }
-            });
+                None => tracing::info!(
+                    version = %m.version,
+                    "an agent update is already in progress; this delivery is ignored"
+                ),
+            }
         }
         ServerPayload::ReviewDecision {
             alert_id,
