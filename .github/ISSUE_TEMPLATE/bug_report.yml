@@ -1,0 +1,42 @@
+name: Bug report
+description: Something does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security vulnerabilities go through private reporting (see SECURITY.md), not this form.
+        For a legitimate app that Kestrel flagged or stopped, use the "False positive" form instead.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options: [Agent, Server, Admin console, Tray app, Installer (MSI), Docs]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Agent version (`kestrel-agent --version`) and server version.
+      placeholder: "1.1.2"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Windows version and build
+      placeholder: "Windows 11 Pro 24H2 (26100)"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant lines from `%ProgramData%\Kestrel\logs` or `docker compose logs kestrel-server`. Remove host names, user names and tokens.
+      render: text

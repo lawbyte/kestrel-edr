@@ -1,8 +1,28 @@
-<p align="center"><img src="docs/diagrams/banner.svg" alt="Kestrel EDR: self-hosted Windows EDR for infostealers, ransomware and credential theft" width="100%"></p>
+<p align="center">
+  <img src="docs/diagrams/banner.svg" alt="Kestrel EDR: self-hosted Windows EDR for infostealers, ransomware and credential theft" width="100%">
+</p>
 
-# Kestrel EDR
+<p align="center">
+  <a href="https://github.com/lawbyte/kestrel-edr/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.1.2-f38ba8?style=for-the-badge&labelColor=313244"></a>
+  <a href="https://github.com/lawbyte/kestrel-edr/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/lawbyte/kestrel-edr/ci.yml?branch=main&style=for-the-badge&label=CI&labelColor=313244&logo=githubactions&logoColor=white"></a>
+  <a href="https://lawbyte.github.io/kestrel-edr/"><img alt="Docs" src="https://img.shields.io/badge/docs-online-89b4fa?style=for-the-badge&labelColor=313244&logo=readthedocs&logoColor=white"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-94e2d5?style=for-the-badge&labelColor=313244"></a>
+  <br>
+  <img alt="Windows 10 and 11" src="https://img.shields.io/badge/endpoint-Windows%2010%20%7C%2011-a6e3a1?style=for-the-badge&labelColor=313244&logo=windows&logoColor=white">
+  <img alt="Rust" src="https://img.shields.io/badge/agent-Rust-fab387?style=for-the-badge&labelColor=313244&logo=rust&logoColor=white">
+  <img alt="React" src="https://img.shields.io/badge/console-React%2019-89dceb?style=for-the-badge&labelColor=313244&logo=react&logoColor=white">
+  <img alt="Docker Compose" src="https://img.shields.io/badge/server-Docker%20Compose-b4befe?style=for-the-badge&labelColor=313244&logo=docker&logoColor=white">
+  <img alt="SigmaHQ" src="https://img.shields.io/badge/rules-54%20built--in%20%2B%2070%20Sigma-f9e2af?style=for-the-badge&labelColor=313244">
+</p>
 
-**Documentation:** [Kestrel EDR docs site](https://lawbyte.github.io/kestrel-edr/) (source in [`website/`](website/))
+<p align="center">
+  <a href="https://lawbyte.github.io/kestrel-edr/"><b>Documentation</b></a> &nbsp;&middot;&nbsp;
+  <a href="https://lawbyte.github.io/kestrel-edr/guide/quick-start"><b>Quick start</b></a> &nbsp;&middot;&nbsp;
+  <a href="https://lawbyte.github.io/kestrel-edr/build/"><b>Build from source</b></a> &nbsp;&middot;&nbsp;
+  <a href="https://lawbyte.github.io/kestrel-edr/console/tour"><b>Console tour</b></a> &nbsp;&middot;&nbsp;
+  <a href="#architecture"><b>Architecture</b></a> &nbsp;&middot;&nbsp;
+  <a href="SECURITY.md"><b>Security</b></a>
+</p>
 
 Kestrel is a self-hosted endpoint detection and response (EDR) product for Windows, built to catch **infostealers** (Lumma, Vidar, StealC, Rhadamanthys and similar malware) while they work. These programs read browser passwords, cookies, crypto wallets and messenger sessions, then upload them. Kestrel watches for exactly that behaviour, contains the process, and gives IT one incident that says what was taken and what to rotate.
 
@@ -31,7 +51,7 @@ Console screenshots use the built-in demo data (`npm run dev:mock`). The tray an
     <td><img src="website/public/img/console/rules-dark.png" alt="Rules catalog"><br><sub>Rules: built-in families and the SigmaHQ pack, Audit or Protect per policy</sub></td>
   </tr>
   <tr>
-    <td><img src="website/public/img/console/device-remote-desktop-dark.png" alt="Remote desktop tab"><br><sub>Remote desktop in the console</sub></td>
+    <td><img src="website/public/img/console/device-remote-desktop-dark.png" alt="Remote desktop tab"><br><sub>Remote desktop of a real Windows 11 PC (lab VM), with the banner the employee sees</sub></td>
     <td><img src="website/public/img/console/device-files-dark.png" alt="Remote file manager"><br><sub>Remote file manager</sub></td>
   </tr>
   <tr>

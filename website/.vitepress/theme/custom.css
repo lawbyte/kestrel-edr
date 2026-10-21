@@ -44,19 +44,32 @@
   white-space: nowrap;
 }
 
-/* Home hero: show the console screenshot large, framed like a window. */
+/* Home hero: the console screenshot, framed like a window, vertically
+   centred against the text column. */
 @media (min-width: 960px) {
+  .VPHero.has-image .container {
+    align-items: center;
+  }
+  .VPHero.has-image .image {
+    margin: 0;
+    order: 2;
+  }
   .VPHero.has-image .image-container {
     width: 560px;
-    height: 360px;
+    height: 350px;
+    transform: none;
   }
   .VPHero.has-image .image-bg {
     display: none;
   }
   .VPHero.has-image .image-src {
+    position: static;
+    transform: none;
+    width: 560px;
     max-width: 560px;
-    max-height: 360px;
+    max-height: none;
     border: 1px solid var(--vp-c-divider);
-    border-radius: 8px;
+    border-radius: 10px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
   }
 }

@@ -29,6 +29,15 @@ export default defineConfig({
       { text: 'Deploy', link: '/deploy/server', activeMatch: '^/deploy/' },
       { text: 'Console', link: '/console/', activeMatch: '^/console/' },
       { text: 'Reference', link: '/reference/rules', activeMatch: '^/reference/' },
+      {
+        text: 'v1.1.2',
+        items: [
+          { text: 'Releases', link: `${repo}/releases` },
+          { text: 'Security policy', link: `${repo}/blob/main/SECURITY.md` },
+          { text: 'Contributing', link: `${repo}/blob/main/CONTRIBUTING.md` },
+          { text: 'Report a false positive', link: `${repo}/issues/new?template=false_positive.yml` },
+        ],
+      },
     ],
     sidebar: [
       {
@@ -91,8 +100,8 @@ export default defineConfig({
       },
     ],
     footer: {
-      message: 'Apache-2.0. SigmaHQ rules are under the Detection Rule License 1.1.',
-      copyright: 'Kestrel EDR',
+      message: 'Released under the Apache License 2.0. SigmaHQ rules are under the Detection Rule License 1.1.',
+      copyright: 'Copyright 2026 Kestrel EDR contributors',
     },
     docFooter: { prev: 'Previous', next: 'Next' },
   },

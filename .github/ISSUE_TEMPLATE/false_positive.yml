@@ -1,0 +1,51 @@
+name: False positive
+description: Kestrel alerted on or stopped a legitimate application.
+labels: ["false positive", "detection"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you. False positives are fixed in the rule itself, so the details below matter.
+        Remove host names, user names and personal paths you do not want public.
+  - type: input
+    id: rule
+    attributes:
+      label: Rule id
+      placeholder: "ST-04"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options: [Audit (alert only), Protect (Kestrel acted)]
+    validations:
+      required: true
+  - type: input
+    id: app
+    attributes:
+      label: Application and version
+      placeholder: "Visual Studio Code 1.106, system install"
+    validations:
+      required: true
+  - type: textarea
+    id: process
+    attributes:
+      label: Process details from the alert
+      description: Image path, signer, command line and parent process, as shown in the alert.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: The alert's evidence (files, registry keys, network destinations) and the action outcome if any.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Kestrel agent version
+      placeholder: "1.1.2"
+    validations:
+      required: true

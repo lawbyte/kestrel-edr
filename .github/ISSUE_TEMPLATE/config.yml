@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://lawbyte.github.io/kestrel-edr/
+    about: Build, deploy and usage guides.
+  - name: Report a security vulnerability
+    url: https://github.com/lawbyte/kestrel-edr/security/advisories/new
+    about: Report privately. Do not open a public issue for vulnerabilities.
