@@ -1,10 +1,15 @@
 //! Alert storage, incident grouping, priority, titles, storylines and
 //! Huntress-style remediation checklists.
 
-use crate::{notify::NotifyJob, state::AppState};
+use crate::{
+    autorun_policy,
+    mdsafe::{md_code, md_text, plain},
+    notify::NotifyJob,
+    state::AppState,
+};
 use kestrel_common::{
-    file_name_lower, now_ms, ActionOutcome, Alert, AutorunKind, DataCategory, Event, EventData,
-    FileActivity, FileOp, PathClass, ProcessInfo, RegistryOp, ResponseAction, Severity,
+    file_name_lower, now_ms, ActionOutcome, Alert, Attribution, AutorunKind, DataCategory, Event,
+    EventData, FileActivity, FileOp, PathClass, ProcessInfo, RegistryOp, ResponseAction, Severity,
     SignatureState, TaskOp,
 };
 use sqlx::{Postgres, Transaction};
@@ -78,7 +83,11 @@ pub fn root_guid(alert: &Alert) -> String {
     root
 }
 
+/// Plain-text description of an action (checklist items, activity, and —
+/// escaped with [`md_text`] — storylines). Endpoint-supplied parts are
+/// stripped of control / bidi characters and clipped.
 pub fn describe_action(a: &ResponseAction) -> String {
+    let p = |s: &str| plain(s, 300);
     match a {
         ResponseAction::KillProcess { pid, tree, .. } => {
             if *tree {
@@ -89,7 +98,7 @@ pub fn describe_action(a: &ResponseAction) -> String {
         }
         ResponseAction::SuspendProcess { pid, .. } => format!("suspended process (pid {pid})"),
         ResponseAction::ResumeProcess { pid, .. } => format!("resumed process (pid {pid})"),
-        ResponseAction::QuarantineFile { path, .. } => format!("quarantined {path}"),
+        ResponseAction::QuarantineFile { path, .. } => format!("quarantined {}", p(path)),
         ResponseAction::RestoreFile { quarantine_id } => {
             format!("restored quarantined file {quarantine_id}")
         }
@@ -101,13 +110,13 @@ pub fn describe_action(a: &ResponseAction) -> String {
             None => format!("blocked destination {ip}"),
         },
         ResponseAction::BlockImageNetwork { image, .. } => {
-            format!("blocked network access for {image}")
+            format!("blocked network access for {}", p(image))
         }
         ResponseAction::IsolateHost { .. } => "isolated the host from the network".into(),
         ResponseAction::ReleaseHost => "released host isolation".into(),
         ResponseAction::ApplyHardening => "re-applied the hardening pack".into(),
         ResponseAction::Scan { path } => match path {
-            Some(p) => format!("scanned {p}"),
+            Some(path) => format!("scanned {}", p(path)),
             None => "scanned running user-path executables".into(),
         },
         ResponseAction::CollectTriage => "collected a triage package".into(),
@@ -118,13 +127,19 @@ pub fn describe_action(a: &ResponseAction) -> String {
             ..
         } => {
             let what = match value_name {
-                Some(v) if !v.is_empty() => format!("{location}\\{v}"),
-                _ => location.clone(),
+                Some(v) if !v.is_empty() => p(&format!("{location}\\{v}")),
+                _ => p(location),
             };
-            if restore_data.is_some() {
-                format!("restored the default value of {what}")
-            } else {
-                format!("removed persistence entry {what}")
+            match restore_data {
+                // V-H2: only a write of the canonical Windows default is
+                // described as a restore; anything else says what was written.
+                Some(d)
+                    if autorun_policy::is_canonical_default(location, value_name.as_deref(), d) =>
+                {
+                    format!("restored the Windows default value of {what}")
+                }
+                Some(d) => format!("wrote \"{}\" to {what}", plain(d, 160)),
+                None => format!("removed persistence entry {what}"),
             }
         }
     }
@@ -295,33 +310,37 @@ pub fn summarize(
     let tamper = rule_ids.iter().all(|r| r.starts_with("TP-"));
     let root_proc = find_process(alerts, root).or_else(|| sorted.first().map(|a| &a.process));
     let title_proc = subject_process(&sorted, root_proc);
+    // V-M6: the title is plain text, the storyline markdown; every
+    // endpoint-controlled value is stripped (title) or escaped (storyline).
     let image_name = title_proc
-        .map(|p| file_name_lower(&p.image))
+        .map(|p| plain(&file_name_lower(&p.image), 120))
         .unwrap_or_else(|| "unknown process".into());
+    let host_title = plain(hostname, 255);
+    let host = md_text(hostname, 255);
     let user = sorted
         .iter()
         .find_map(|a| a.process.user.clone())
         .or_else(|| root_proc.and_then(|p| p.user.clone()));
 
     let title = if tamper {
-        format!("Agent tampering on {hostname}")
+        format!("Agent tampering on {host_title}")
     } else if fam.ransomware {
-        format!("Ransomware activity by {image_name} on {hostname}")
+        format!("Ransomware activity by {image_name} on {host_title}")
     } else if !cats.is_empty() {
-        format!("Credential theft by {image_name} on {hostname}")
+        format!("Credential theft by {image_name} on {host_title}")
     } else if fam.credential_dumping {
-        format!("Credential dumping by {image_name} on {hostname}")
+        format!("Credential dumping by {image_name} on {host_title}")
     } else if exfil {
-        format!("Possible data exfiltration by {image_name} on {hostname}")
+        format!("Possible data exfiltration by {image_name} on {host_title}")
     } else if fam.persistence {
-        format!("Persistence planted by {image_name} on {hostname}")
+        format!("Persistence planted by {image_name} on {host_title}")
     } else {
         let top = sorted
             .iter()
             .max_by_key(|a| severity_rank(a.severity))
-            .map(|a| a.rule_name.clone())
+            .map(|a| plain(&a.rule_name, 160))
             .unwrap_or_default();
-        format!("{top}: {image_name} on {hostname}")
+        format!("{top}: {image_name} on {host_title}")
     };
 
     // ---- storyline (markdown)
@@ -330,13 +349,13 @@ pub fn summarize(
     // non-system actor), not a system root such as explorer.exe.
     if let Some(rp) = title_proc {
         s.push_str(&format!(
-            "`{}` ({}, {}) ran on **{}**{}.",
-            file_name_lower(&rp.image),
+            "{} ({}, {}) ran on **{}**{}.",
+            md_code(&file_name_lower(&rp.image), 120),
             path_phrase(rp.path_class),
             signer_phrase(rp),
-            hostname,
+            host,
             user.as_ref()
-                .map(|u| format!(" as `{u}`"))
+                .map(|u| format!(" as {}", md_code(u, 120)))
                 .unwrap_or_default()
         ));
         if let Some(parent) = sorted
@@ -345,8 +364,8 @@ pub fn summarize(
             .find(|p| Some(&p.guid) == rp.parent_guid.as_ref())
         {
             s.push_str(&format!(
-                " It was started by `{}`.",
-                file_name_lower(&parent.image)
+                " It was started by {}.",
+                md_code(&file_name_lower(&parent.image), 120)
             ));
         }
         if rp.motw_zone == Some(3) {
@@ -364,8 +383,8 @@ pub fn summarize(
             "- {}{} — {} *({} · {} · {})*\n",
             hhmmss(a.ts),
             delta,
-            a.summary.trim(),
-            a.rule_id,
+            md_text(&a.summary, 600),
+            md_text(&a.rule_id, 64),
             a.severity.as_str(),
             enum_str(&a.mode)
         ));
@@ -381,15 +400,16 @@ pub fn summarize(
             } = &e.data
             {
                 if seen.insert(dst_ip.clone()) {
-                    let host = dst_host
+                    let dhost = dst_host
                         .as_ref()
-                        .map(|h| format!(" ({h})"))
+                        .map(|h| format!(" ({})", md_code(h, 120)))
                         .unwrap_or_default();
                     let bytes = bytes_sent
                         .map(|b| format!(", {} sent", human_bytes(b)))
                         .unwrap_or_default();
                     s.push_str(&format!(
-                        "  - connected to `{dst_ip}:{dst_port}`{host}{bytes}\n"
+                        "  - connected to {}{dhost}{bytes}\n",
+                        md_code(&format!("{dst_ip}:{dst_port}"), 80)
                     ));
                 }
             }
@@ -427,12 +447,12 @@ pub fn summarize(
         let ok: Vec<String> = outcomes
             .iter()
             .filter(|o| o.ok)
-            .map(|o| describe_action(&o.action))
+            .map(|o| md_text(&describe_action(&o.action), 600))
             .collect();
         let failed: Vec<String> = outcomes
             .iter()
             .filter(|o| !o.ok)
-            .map(|o| describe_action(&o.action))
+            .map(|o| md_text(&describe_action(&o.action), 600))
             .collect();
         if !ok.is_empty() {
             s.push_str(&format!("**Response:** the agent {}.", join_human(&ok)));
@@ -444,7 +464,7 @@ pub fn summarize(
         let backups: Vec<String> = outcomes
             .iter()
             .filter(|o| o.ok && matches!(o.action, ResponseAction::RemoveAutorun { .. }))
-            .filter_map(|o| o.artifact.as_ref().map(|b| format!("`{b}`")))
+            .filter_map(|o| o.artifact.as_ref().map(|b| md_code(b, 80)))
             .collect();
         if !backups.is_empty() {
             s.push_str(&format!(
@@ -456,20 +476,24 @@ pub fn summarize(
     if !blocked.is_empty() {
         s.push_str(&format!(
             "\nBlocked destinations: {}.\n",
-            blocked.join(", ")
+            blocked
+                .iter()
+                .map(|b| md_text(b, 120))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     if fam.ransomware {
         s.push_str(&format!(
             "\n> Treat this as **active ransomware**. Kestrel works in user mode and cannot guarantee it stopped every encrypting process, \
-             or files encrypted over the network from another machine. Keep **{hostname}** isolated, check every file share it could write to, \
+             or files encrypted over the network from another machine. Keep **{host}** isolated, check every file share it could write to, \
              confirm your backups are intact before restoring, and do not pay or contact the attackers.\n"
         ));
     }
     if fam.credential_dumping {
         s.push_str(&format!(
-            "\n> Treat every account that logged on to **{hostname}** as **compromised**: a dump of LSASS, SAM or NTDS contains reusable password hashes \
-             and Kerberos tickets. Killing the dumper does not undo a dump that already finished. Reset those passwords and look for logons from {hostname} to other machines.\n"
+            "\n> Treat every account that logged on to **{host}** as **compromised**: a dump of LSASS, SAM or NTDS contains reusable password hashes \
+             and Kerberos tickets. Killing the dumper does not undo a dump that already finished. Reset those passwords and look for logons from {host} to other machines.\n"
         ));
     }
     if (exfil || !cats.is_empty()) && !fam.credential_dumping {
@@ -482,7 +506,7 @@ pub fn summarize(
         let removed: Vec<String> = outcomes
             .iter()
             .filter(|o| o.ok && matches!(o.action, ResponseAction::RemoveAutorun { .. }))
-            .map(|o| describe_action(&o.action))
+            .map(|o| md_text(&describe_action(&o.action), 600))
             .collect();
         if removed.is_empty() {
             s.push_str("\n**Persistence:** the entry is still in place (rules ran in Audit mode). Remove it from the checklist, then check the program it starts.\n");
@@ -521,7 +545,8 @@ pub fn summarize(
 }
 
 /// "renamed 412 files in 37 folders in 10 s, new extension `.k3str` (95%)" plus
-/// note / canary / network-share clauses.
+/// note / canary / network-share / remote-writer clauses (markdown; endpoint
+/// values are code spans built with [`md_code`]).
 pub fn describe_file_activity(f: &FileActivity) -> String {
     let verb = if f.renames >= f.overwrites && f.renames >= f.new_files && f.renames > 0 {
         "renamed"
@@ -543,7 +568,10 @@ pub fn describe_file_activity(f: &FileActivity) -> String {
         human_delta(f.window_ms as i64)
     );
     if let Some(ext) = f.top_new_ext.as_deref().filter(|e| !e.is_empty()) {
-        out.push_str(&format!(", new extension `.{ext}`"));
+        out.push_str(&format!(
+            ", new extension {}",
+            md_code(&format!(".{ext}"), 40)
+        ));
         if f.top_ext_pct > 0 {
             out.push_str(&format!(" ({}%)", f.top_ext_pct.min(100)));
         }
@@ -553,7 +581,8 @@ pub fn describe_file_activity(f: &FileActivity) -> String {
     }
     if let Some(note) = f.note_name.as_deref().filter(|n| !n.is_empty()) {
         out.push_str(&format!(
-            "; created `{note}` in {} folder{} (likely ransom note)",
+            "; created {} in {} folder{} (likely ransom note)",
+            md_code(note, 80),
             f.note_dirs,
             if f.note_dirs == 1 { "" } else { "s" }
         ));
@@ -564,6 +593,14 @@ pub fn describe_file_activity(f: &FileActivity) -> String {
             f.canary_hits.len(),
             if f.canary_hits.len() == 1 { "" } else { "s" }
         ));
+        if f.canary_in_place {
+            out.push_str(" (in-place write found by polling: writer inferred)");
+        }
+    }
+    if f.remote_writer {
+        out.push_str(
+            " — the writes came from a **remote client over SMB**, not a local program; check the machines with write access to this device's shares",
+        );
     }
     out
 }
@@ -572,7 +609,17 @@ fn is_lsass(image: &str) -> bool {
     file_name_lower(image) == "lsass.exe"
 }
 
+/// Suffix for an evidence line whose actor was not reported by the kernel.
+fn attribution_note(a: Attribution) -> &'static str {
+    match a {
+        Attribution::Exact => "",
+        Attribution::Heuristic => " (writer inferred)",
+        Attribution::None => " (writer unknown)",
+    }
+}
+
 /// Plain-language lines for the evidence kinds the RW/CD/PS families rely on.
+/// Markdown: every endpoint-controlled value goes through [`md_code`] (V-M6).
 fn evidence_lines(e: &Event) -> Vec<String> {
     match &e.data {
         EventData::FileActivity(f) => vec![describe_file_activity(f)],
@@ -587,10 +634,18 @@ fn evidence_lines(e: &Event) -> Vec<String> {
                 flags.push("hidden".to_string());
             }
             if !t.triggers.is_empty() {
-                flags.push(format!("runs at {}", t.triggers.join("/")));
+                flags.push(format!(
+                    "runs at {}",
+                    t.triggers
+                        .iter()
+                        .take(8)
+                        .map(|x| md_text(x, 24))
+                        .collect::<Vec<_>>()
+                        .join("/")
+                ));
             }
             if let Some(u) = &t.user {
-                flags.push(format!("as {u}"));
+                flags.push(format!("as {}", md_code(u, 80)));
             }
             let flags = if flags.is_empty() {
                 String::new()
@@ -600,9 +655,13 @@ fn evidence_lines(e: &Event) -> Vec<String> {
             let run = t
                 .actions
                 .first()
-                .map(|a| format!(" running `{}`", clip(a, 160)))
+                .map(|a| format!(" running {}", md_code(a, 160)))
                 .unwrap_or_default();
-            vec![format!("scheduled task `{}` {verb}{flags}{run}", t.name)]
+            vec![format!(
+                "scheduled task {} {verb}{flags}{run}{}",
+                md_code(&t.name, 160),
+                attribution_note(t.attribution)
+            )]
         }
         EventData::ServiceInstalled(sv) => {
             let start = match sv.start_type {
@@ -619,38 +678,43 @@ fn evidence_lines(e: &Event) -> Vec<String> {
                 "service"
             };
             vec![format!(
-                "{driver} `{}` installed{start} running `{}`",
-                sv.name,
-                clip(&sv.image_path, 160)
+                "{driver} {} installed{start} running {}{}",
+                md_code(&sv.name, 120),
+                md_code(&sv.image_path, 160),
+                attribution_note(sv.attribution)
             )]
         }
         EventData::WmiSubscription(w) => vec![format!(
-            "WMI subscription in `{}`: filter `{}` runs `{}`",
-            w.namespace,
-            clip(&w.filter, 120),
-            clip(&w.consumer, 160)
+            "WMI subscription in {}: filter {} runs {}{}",
+            md_code(&w.namespace, 80),
+            md_code(&w.filter, 120),
+            md_code(&w.consumer, 160),
+            attribution_note(w.attribution)
         )],
         EventData::RegistrySet {
             key,
             value_name,
             data,
             op,
-            ..
+            attribution,
         } => {
             let at = if value_name.is_empty() {
-                key.clone()
+                md_code(key, 200)
             } else {
-                format!("{key}\\{value_name}")
+                md_code(&format!("{key}\\{value_name}"), 200)
             };
+            let note = attribution_note(*attribution);
             vec![match op {
                 RegistryOp::Set => match data {
                     Some(d) if !d.is_empty() => {
-                        format!("registry value `{at}` set to `{}`", clip(d, 160))
+                        format!("registry value {at} set to {}{note}", md_code(d, 160))
                     }
-                    _ => format!("registry value `{at}` set"),
+                    _ => format!("registry value {at} set{note}"),
                 },
-                RegistryOp::DeleteValue => format!("registry value `{at}` deleted"),
-                RegistryOp::DeleteKey => format!("registry key `{key}` deleted"),
+                RegistryOp::DeleteValue => format!("registry value {at} deleted{note}"),
+                RegistryOp::DeleteKey => {
+                    format!("registry key {} deleted{note}", md_code(key, 200))
+                }
             }]
         }
         EventData::ProcessAccess(t) if is_lsass(&t.target_image) => {
@@ -664,7 +728,11 @@ fn evidence_lines(e: &Event) -> Vec<String> {
             vec![l]
         }
         EventData::FileAccess { path, op } if is_dump_path(path) => {
-            vec![format!("{} `{path}` (memory dump file)", enum_str(op))]
+            vec![format!(
+                "{} {} (memory dump file)",
+                enum_str(op),
+                md_code(path, 200)
+            )]
         }
         _ => vec![],
     }
@@ -675,23 +743,14 @@ fn is_dump_path(p: &str) -> bool {
     l.ends_with(".dmp") || l.ends_with(".mdmp") || l.ends_with(".dump") || l.contains("lsass")
 }
 
-fn clip(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        format!("{}…", s.chars().take(n).collect::<String>())
-    }
-}
-
 /// Persistence entries in an alert's evidence, with the `RemoveAutorun` that
 /// would take each one out when it is safe to offer as a one-click approval.
 /// Only well-understood locations get an action; anything else is a manual step.
 pub fn autorun_targets(alert: &Alert) -> Vec<(String, Option<ResponseAction>)> {
     let mut out: Vec<(String, Option<ResponseAction>)> = vec![];
     let remove = |kind, location: &str, value_name: Option<&str>, restore: Option<&str>| {
-        if location.to_ascii_lowercase().contains("kestrel") {
-            return None;
-        }
+        // Only offer what the approval path will accept (V-H2).
+        autorun_policy::validate(kind, location, value_name, restore).ok()?;
         Some(ResponseAction::RemoveAutorun {
             kind,
             location: location.to_string(),
@@ -724,30 +783,24 @@ pub fn autorun_targets(alert: &Alert) -> Vec<(String, Option<ResponseAction>)> {
                 op: RegistryOp::Set,
                 ..
             } => {
-                let up = key.to_ascii_uppercase();
-                let abs = up.starts_with("HKLM\\") || up.starts_with("HKU\\");
                 let what = format!("registry value {key}\\{value_name}");
-                let action = if !abs {
-                    None
-                } else if up.ends_with("\\CURRENTVERSION\\RUN")
-                    || up.ends_with("\\CURRENTVERSION\\RUNONCE")
-                    || (up.contains("\\IMAGE FILE EXECUTION OPTIONS\\")
-                        && value_name.eq_ignore_ascii_case("Debugger"))
-                    || up.contains("\\SILENTPROCESSEXIT\\")
-                {
-                    remove(AutorunKind::RegistryValue, key, Some(value_name), None)
-                } else if up.ends_with("\\SECURITYPROVIDERS\\WDIGEST")
-                    && value_name.eq_ignore_ascii_case("UseLogonCredential")
-                {
-                    remove(
-                        AutorunKind::RegistryValue,
-                        key,
-                        Some(value_name),
-                        Some("dword:0"),
-                    )
-                } else {
-                    None
-                };
+                // The same allow-list the server enforces when the action is
+                // queued (V-H2): delete autorun values, write back only the
+                // canonical Windows default.
+                let action = autorun_policy::parse_key(key).and_then(|k| {
+                    if autorun_policy::registry_delete_allowed(&k, value_name) {
+                        remove(AutorunKind::RegistryValue, key, Some(value_name), None)
+                    } else if value_name.eq_ignore_ascii_case("UseLogonCredential") {
+                        // Only the WDigest default is offered as one click;
+                        // Winlogon / BootExecute stay manual steps (their
+                        // default path depends on where Windows is installed).
+                        autorun_policy::canonical_default(&k, value_name).and_then(|d| {
+                            remove(AutorunKind::RegistryValue, key, Some(value_name), Some(d))
+                        })
+                    } else {
+                        None
+                    }
+                });
                 Some((what, action))
             }
             EventData::FileAccess { path, op }
@@ -866,6 +919,9 @@ fn family_checklist(alert: &Alert, hostname: &str) -> Vec<ChecklistSeed> {
                 o.ok && matches!(&o.action, ResponseAction::RemoveAutorun { location, .. }
                     if what.contains(location.as_str()))
             });
+            // Plain text shown in the checklist and the approval dialog:
+            // no control / bidi characters (V-M6), clipped.
+            let what = plain(&what, 400);
             match action {
                 Some(a) if !removed => out.push(ChecklistSeed {
                     kind: "approve",
@@ -925,6 +981,27 @@ fn join_human(items: &[String]) -> String {
     }
 }
 
+/// A failed automatic action reported by the agent is offered for one-click
+/// retry only when the approval path would accept it (V-H2: a reported
+/// `remove_autorun` outside the allow-list is never offered).
+fn retry_offerable(a: &ResponseAction) -> bool {
+    match a {
+        ResponseAction::RemoveAutorun {
+            kind,
+            location,
+            value_name,
+            restore_data,
+        } => autorun_policy::validate(
+            *kind,
+            location,
+            value_name.as_deref(),
+            restore_data.as_deref(),
+        )
+        .is_ok(),
+        _ => true,
+    }
+}
+
 pub struct ChecklistSeed {
     pub kind: &'static str,
     pub text: String,
@@ -936,7 +1013,9 @@ pub struct ChecklistSeed {
 /// Checklist items contributed by one alert.
 pub fn checklist_for(alert: &Alert, hostname: &str, user: Option<&str>) -> Vec<ChecklistSeed> {
     let mut out = vec![];
-    let image = file_name_lower(&alert.process.image);
+    // Checklist text is plain text: strip control / bidi characters (V-M6).
+    let hostname = &plain(hostname, 255);
+    let image = plain(&file_name_lower(&alert.process.image), 120);
     let done_keys: HashSet<String> = alert
         .actions
         .iter()
@@ -948,7 +1027,7 @@ pub fn checklist_for(alert: &Alert, hostname: &str, user: Option<&str>) -> Vec<C
         if o.ok {
             let backup = match (&o.action, o.artifact.as_deref()) {
                 (ResponseAction::RemoveAutorun { .. }, Some(b)) if !b.is_empty() => {
-                    format!(" (backup {b} in the quarantine vault)")
+                    format!(" (backup {} in the quarantine vault)", plain(b, 80))
                 }
                 _ => String::new(),
             };
@@ -959,7 +1038,7 @@ pub fn checklist_for(alert: &Alert, hostname: &str, user: Option<&str>) -> Vec<C
                 action: Some(o.action.clone()),
                 key: format!("done:{}", action_key(&o.action)),
             });
-        } else {
+        } else if retry_offerable(&o.action) {
             out.push(ChecklistSeed {
                 kind: "approve",
                 text: format!(
@@ -968,7 +1047,7 @@ pub fn checklist_for(alert: &Alert, hostname: &str, user: Option<&str>) -> Vec<C
                     if o.detail.is_empty() {
                         String::new()
                     } else {
-                        format!(": {}", o.detail)
+                        format!(": {}", plain(&o.detail, 300))
                     }
                 ),
                 done: false,
@@ -1299,8 +1378,12 @@ pub async fn ingest_alert(
     sqlx::query("INSERT INTO incident_activity (incident_id, ts, kind, title, detail) VALUES ($1,$2,'alert',$3,$4)")
         .bind(incident_id)
         .bind(alert.ts)
-        .bind(format!("{} ({})", alert.rule_name, alert.rule_id))
-        .bind(&alert.summary)
+        .bind(format!(
+            "{} ({})",
+            plain(&alert.rule_name, 160),
+            plain(&alert.rule_id, 64)
+        ))
+        .bind(plain(&alert.summary, 2000))
         .execute(&mut *tx)
         .await?;
 
@@ -2031,6 +2114,132 @@ mod tests {
             .any(|i| i.kind == "approve" && i.text.contains("OneDrive Updater")));
         let s = summarize(std::slice::from_ref(&done), "p2", "HR-LT-1", false, &[]);
         assert!(s.storyline.contains("`q-77`"), "{}", s.storyline);
+    }
+
+    #[test]
+    fn endpoint_text_cannot_inject_markdown() {
+        // V-M6: link / quote / emphasis injection through task, service,
+        // registry, WMI, file-activity fields and the alert summary.
+        let mut a = sample_alert("PS-05", Severity::High);
+        a.data_at_risk = vec![];
+        a.summary = "x [Kestrel: re-authenticate](https://evil.example/sso)\n> **Verified benign by Kestrel**".into();
+        let link = "x` [Kestrel: re-authenticate to view evidence](https://evil.example/sso) `y";
+        a.evidence = vec![
+            ev(EventData::TaskRegistered(kestrel_common::TaskChange {
+                name: format!("\\{link}"),
+                op: TaskOp::Created,
+                actions: vec![link.into()],
+                user: Some(link.into()),
+                triggers: vec!["[x](https://evil.example)".into()],
+                attribution: Attribution::Heuristic,
+                ..Default::default()
+            })),
+            ev(EventData::ServiceInstalled(
+                kestrel_common::ServiceInstall {
+                    name: link.into(),
+                    image_path: link.into(),
+                    ..Default::default()
+                },
+            )),
+            ev(EventData::RegistrySet {
+                key: r"HKU\S-1-5-21-1\Software\Microsoft\Windows\CurrentVersion\Run".into(),
+                value_name: link.into(),
+                data: Some("a\n> **Verified benign by Kestrel**".into()),
+                op: RegistryOp::Set,
+                attribution: Attribution::None,
+            }),
+            ev(EventData::WmiSubscription(kestrel_common::WmiBinding {
+                namespace: link.into(),
+                filter: link.into(),
+                consumer: link.into(),
+                attribution: Attribution::Exact,
+            })),
+            ev(EventData::FileActivity(FileActivity {
+                files_touched: 50,
+                renames: 50,
+                dirs: 3,
+                top_new_ext: Some("`[x](https://evil.example)".into()),
+                note_name: Some(link.into()),
+                note_dirs: 3,
+                remote_writer: true,
+                ..Default::default()
+            })),
+        ];
+        let s = summarize(
+            std::slice::from_ref(&a),
+            "p2",
+            "HR\n> [pc](https://evil)",
+            false,
+            &[],
+        );
+        let st = &s.storyline;
+        // No markdown link can survive: every `](` is escaped or inside a code span.
+        for line in st.lines() {
+            let mut in_code = false;
+            let mut prev = ' ';
+            let chars: Vec<char> = line.chars().collect();
+            for (i, c) in chars.iter().enumerate() {
+                if *c == '`' && prev != '\\' {
+                    in_code = !in_code;
+                }
+                if !in_code && *c == ']' && chars.get(i + 1) == Some(&'(') {
+                    assert_eq!(prev, '\\', "unescaped link in: {line}");
+                }
+                prev = *c;
+            }
+            assert!(!in_code, "unbalanced code span in: {line}");
+            // Only the server's own fixed callouts start a quote.
+            if line.starts_with('>') {
+                assert!(line.starts_with("> Treat"), "{line}");
+            }
+        }
+        assert!(!s.title.contains('\n'));
+        assert!(st.contains("(writer inferred)") && st.contains("(writer unknown)"));
+        assert!(st.contains("remote client over SMB"));
+    }
+
+    #[test]
+    fn restore_described_only_for_canonical_default() {
+        let wl = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon".to_string();
+        let act = |d: &str| ResponseAction::RemoveAutorun {
+            kind: AutorunKind::RegistryValue,
+            location: wl.clone(),
+            value_name: Some("Userinit".into()),
+            restore_data: Some(d.into()),
+        };
+        assert!(describe_action(&act(r"C:\Windows\system32\userinit.exe,"))
+            .starts_with("restored the Windows default value"));
+        let evil = describe_action(&act(r"C:\Windows\system32\userinit.exe,\\host\s\x.exe"));
+        assert!(evil.starts_with("wrote \""), "{evil}");
+        // A non-allow-listed failed outcome reported by an agent is never
+        // offered for one-click retry.
+        let mut a = sample_alert("PS-10", Severity::High);
+        a.actions.push(ActionOutcome {
+            action: ResponseAction::RemoveAutorun {
+                kind: AutorunKind::RegistryValue,
+                location: r"HKLM\SYSTEM\CurrentControlSet\Services\Sense".into(),
+                value_name: Some("Start".into()),
+                restore_data: Some("dword:4".into()),
+            },
+            ok: false,
+            detail: "x".into(),
+            ts: 0,
+            artifact: None,
+        });
+        let items = checklist_for(&a, "pc", None);
+        assert!(!items
+            .iter()
+            .any(|i| matches!(i.action, Some(ResponseAction::RemoveAutorun { .. }))));
+        // Service ImagePath writes are never offered from evidence.
+        let mut b = sample_alert("PS-05", Severity::High);
+        b.evidence = vec![ev(EventData::RegistrySet {
+            key: r"HKLM\SYSTEM\CurrentControlSet\Services\Spooler".into(),
+            value_name: "ImagePath".into(),
+            data: Some("cmd /c x".into()),
+            op: RegistryOp::Set,
+            attribution: Attribution::Exact,
+        })];
+        assert!(autorun_targets(&b)[0].1.is_none());
     }
 
     #[test]

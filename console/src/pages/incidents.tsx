@@ -19,7 +19,8 @@ import { Sheet } from '@/components/ui/sheet'
 import { Dropdown, DropdownContent, DropdownItem, DropdownLabel, DropdownSeparator, DropdownTrigger, Kbd, Skeleton, Tooltip } from '@/components/ui/misc'
 import { useAuth } from '@/lib/auth'
 import { DATA_CATEGORY_LABEL, INCIDENT_STATUS_LABEL, SEVERITY_LABEL } from '@/lib/labels'
-import { formatDateTime, timeAgo } from '@/lib/format'
+import { formatDateTime, safeDisplay, timeAgo } from '@/lib/format'
+import { withAgentSpawned } from '@/lib/events'
 import { loadJson, saveJson } from '@/lib/storage'
 import { cn } from '@/lib/utils'
 import { ConfirmActionDialog, type ActionSpec } from '@/components/response-actions'
@@ -532,7 +533,7 @@ function IncidentDrawer({ id, onClose, onStep, position }: { id: string | null; 
             </div>
             <section aria-label="What happened">
               <h3 className="mb-1.5 text-xs font-medium text-fg-subtle">What happened</h3>
-              <Markdown source={inc.storyline} className="text-[14px]" />
+              <Markdown source={inc.storyline} links="none" className="text-[14px]" />
             </section>
             <section aria-label="Data at risk">
               <h3 className="mb-1.5 text-xs font-medium text-fg-subtle">Data at risk</h3>
@@ -567,10 +568,10 @@ function IncidentDrawer({ id, onClose, onStep, position }: { id: string | null; 
 
 function QuickActions({ inc, onPick }: { inc: IncidentDetail; onPick: (s: ActionSpec) => void }) {
   const { can } = useAuth()
-  const root = pickTarget(inc.process_tree)
+  const root = pickTarget(withAgentSpawned(inc.process_tree, inc.evidence))
   const pending = inc.checklist.filter((c) => c.kind === 'approve' && !c.done).length
   const specs: { spec: ActionSpec; label: string; disabled?: string }[] = []
-  if (root) specs.push({ spec: { action: { type: 'kill_process', pid: root.pid, guid: root.guid, tree: true }, destructive: true }, label: `Kill ${root.image.split('\\').pop()}` })
+  if (root) specs.push({ spec: { action: { type: 'kill_process', pid: root.pid, guid: root.guid, tree: true }, destructive: true }, label: `Kill ${safeDisplay(root.image.split('\\').pop())}` })
   else specs.push({ spec: { action: { type: 'kill_process', pid: 0, guid: null, tree: true }, destructive: true }, label: 'Kill process', disabled: 'No safe process to kill (only shell or system processes alerted)' })
   specs.push({ spec: { action: { type: 'isolate_host', allow_ips: [] }, destructive: true, impact: 'Cuts all network traffic except to the Kestrel server. The user loses internet and file shares until released.' }, label: 'Isolate host' })
   specs.push({ spec: { action: { type: 'collect_triage' } }, label: 'Collect triage' })

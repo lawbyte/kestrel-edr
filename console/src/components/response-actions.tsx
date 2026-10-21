@@ -7,6 +7,7 @@ import { ApiError } from '@/api/client'
 import type { Device, ResponseAction } from '@/api/types'
 import { useAuth } from '@/lib/auth'
 import { ACTION_LABEL, actionPrivilege, describeAction } from '@/lib/labels'
+import { safeDisplay } from '@/lib/format'
 import { Button } from './ui/button'
 import { Dialog, DialogContent } from './ui/dialog'
 import { Field, Input, Textarea } from './ui/input'
@@ -85,7 +86,7 @@ export function ConfirmActionDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        title={`${ACTION_LABEL[a.type]} on ${device.hostname}?`}
+        title={`${ACTION_LABEL[a.type]} on ${safeDisplay(device.hostname)}?`}
         description={describeAction(a)}
         footer={
           <>
@@ -105,7 +106,7 @@ export function ConfirmActionDialog({
             submit()
           }}
         >
-          {spec.impact ? <p className="rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-fg-muted">{spec.impact}</p> : null}
+          {spec.impact ? <p className="rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-fg-muted">{safeDisplay(spec.impact)}</p> : null}
           {device.status === 'offline' ? (
             <p className="rounded-md border border-warn/40 bg-warn-soft px-3 py-2 text-sm text-warn">This device is offline. The action will wait and run when it reconnects (expires after 24 h).</p>
           ) : null}
@@ -162,7 +163,7 @@ export function BlockDestinationDialog({ open, onOpenChange, device, incidentId,
           {defaults?.image ? (
             <label className="col-span-2 flex items-center gap-2 text-sm">
               <Switch checked={onlyImage} onCheckedChange={setOnlyImage} aria-label="Only for this program" />
-              Only for <span className="font-mono text-xs">{defaults.image.split('\\').pop()}</span>
+              Only for <span className="font-mono text-xs">{safeDisplay(defaults.image.split('\\').pop())}</span>
             </label>
           ) : null}
         </div>

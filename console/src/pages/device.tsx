@@ -5,7 +5,7 @@ import { useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { api, qk } from '@/api/endpoints'
 import type { DeviceDetail, EventKind, HardeningControl, ProcessInfo, TreeNode } from '@/api/types'
-import { ActionStatusBadge, DeviceStatusBadge, ModeBadge, SeverityBadge } from '@/components/badges'
+import { ActionStatusBadge, DeviceStatusBadge, ModeBadge, ProvenanceBadges, SeverityBadge } from '@/components/badges'
 import { Card, EmptyState, ErrorState, KeyValue, LoadingRows, Mono } from '@/components/common'
 import { ProcessDetail, ProcessTree } from '@/components/process-tree'
 import { ActionButton, ConfirmActionDialog, type ActionSpec } from '@/components/response-actions'
@@ -326,7 +326,12 @@ function TimelineRow({ e, open, onToggle }: { e: import('@/api/types').DeviceEve
           </Tooltip>
         </td>
         <td className="whitespace-nowrap px-2 py-1.5 text-xs text-fg-muted">{EVENT_KIND_LABEL[e.type]}</td>
-        <td className="whitespace-nowrap px-2 py-1.5 font-mono text-[12px]">{image ? basename(image) : `PID ${e.pid}`}</td>
+        <td className="whitespace-nowrap px-2 py-1.5 font-mono text-[12px]">
+          <span className="inline-flex items-center gap-1.5">
+            {e.type === 'file_activity' && e.remote_writer ? 'System' : image ? basename(image) : `PID ${e.pid}`}
+            <ProvenanceBadges event={e} />
+          </span>
+        </td>
         <td className="max-w-[640px] truncate px-2 py-1.5 font-mono text-[12px] text-fg-muted">{describeEvent(e)}</td>
       </tr>
       {open ? (

@@ -21,3 +21,18 @@ export function ruleSource(r: Pick<RuleRow, 'kind' | 'license' | 'references'>):
   if (r.kind === 'sigma' && /DRL/i.test(r.license ?? '') && upstreamUrl(r)) return 'sigmahq'
   return 'custom'
 }
+
+/**
+ * A rule reference as a link target: only absolute `http:`/`https:` URLs
+ * (parsed with `URL`), otherwise `null` and the reference is shown as text.
+ * References come from rule authors and Sigma YAML, so `javascript:` and
+ * friends must never become an `href`.
+ */
+export function referenceHref(ref: string): string | null {
+  try {
+    const u = new URL(ref.trim())
+    return u.protocol === 'https:' || u.protocol === 'http:' ? u.href : null
+  } catch {
+    return null
+  }
+}

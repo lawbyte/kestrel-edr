@@ -126,6 +126,8 @@ export interface ProcessStart {
   sha256?: string | null
   motw_zone?: number | null
   file_size?: number | null
+  /** Direct child the Kestrel agent itself started (hardening PowerShell, scan, msiexec). Never inherited. */
+  agent_spawned?: boolean
 }
 
 export interface TargetProcess {
@@ -139,6 +141,12 @@ export interface TargetProcess {
 }
 
 export type RegistryOp = 'set' | 'delete_value' | 'delete_key'
+
+/**
+ * How the acting process (`pid`/`guid`) of an event was determined (`event.rs` `Attribution`).
+ * Absent means `exact` (older agents). Kill/rollback against the actor requires `exact`.
+ */
+export type Attribution = 'exact' | 'heuristic' | 'none'
 
 /** Per-process file activity summary from the ransomware sensor (`EventData::FileActivity`). */
 export interface FileActivity {
@@ -158,6 +166,10 @@ export interface FileActivity {
   note_dirs?: number
   canary_hits?: string[]
   sample_paths?: string[]
+  /** The writes came from the System process (pid 4): a remote SMB client; no local process is blamed. */
+  remote_writer?: boolean
+  /** canary_hits were found by content polling (in-place write); the actor is inferred (heuristic). */
+  canary_in_place?: boolean
 }
 
 export type TaskOp = 'created' | 'updated' | 'deleted'
@@ -168,6 +180,7 @@ export interface TaskChange {
   actions?: string[]
   hidden?: boolean
   triggers?: string[]
+  attribution?: Attribution
 }
 
 export interface ServiceInstall {
@@ -178,12 +191,14 @@ export interface ServiceInstall {
   /** 1 = kernel driver, 0x10 own process, 0x20 shared process. */
   service_type?: number | null
   account?: string | null
+  attribution?: Attribution
 }
 
 export interface WmiBinding {
   namespace: string
   filter: string
   consumer: string
+  attribution?: Attribution
 }
 
 export type EventData =
@@ -191,7 +206,14 @@ export type EventData =
   | { type: 'process_stop'; exit_code?: number | null }
   | { type: 'image_load'; path: string; signer?: string | null; signed?: SignatureState }
   | { type: 'file_access'; path: string; op: FileOp }
-  | { type: 'registry_set'; key: string; value_name: string; data?: string | null; op?: RegistryOp }
+  | {
+      type: 'registry_set'
+      key: string
+      value_name: string
+      data?: string | null
+      op?: RegistryOp
+      attribution?: Attribution
+    }
   | {
       type: 'net_connect'
       proto: NetProto
@@ -652,6 +674,8 @@ export interface TreeNode {
   path_class: PathClass
   alert_rule_ids: string[]
   is_root: boolean
+  /** Console assumption (optional): the process start carried `agent_spawned`. The console also derives it from evidence. */
+  agent_spawned?: boolean
 }
 
 export type TimelineKind = 'alert' | 'action' | 'comment' | 'status'

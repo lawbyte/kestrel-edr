@@ -23,7 +23,8 @@ export function describeFileActivity(f: FileActivity): string {
   if (f.net_paths) parts.push(`${f.net_paths} on network shares`)
   let s = parts.join(', ')
   if (f.note_name) s += `; created ${f.note_name} in ${plural(f.note_dirs ?? 0, 'folder')}`
-  if (f.canary_hits?.length) s += `; touched ${plural(f.canary_hits.length, 'canary file')}`
+  if (f.canary_hits?.length) s += `; touched ${plural(f.canary_hits.length, 'canary file')}${f.canary_in_place ? ' (in-place write found by polling, writer inferred)' : ''}`
+  if (f.remote_writer) s += '; written by a remote client over SMB'
   return s
 }
 
@@ -39,6 +40,73 @@ const START_TYPE: Record<number, string> = { 0: 'boot start', 1: 'system start',
 export function describeService(s: ServiceInstall): string {
   const flags = [s.service_type === 1 ? 'kernel driver' : null, s.start_type != null ? (START_TYPE[s.start_type] ?? `start ${s.start_type}`) : null, s.account ? `as ${s.account}` : null].filter(Boolean)
   return `Installed service ${s.name}${flags.length ? ` (${flags.join(', ')})` : ''} → ${s.image_path}`
+}
+
+export type ProvenanceKind = 'writer_inferred' | 'writer_unknown' | 'remote_smb' | 'canary_polled' | 'agent_spawned'
+export interface Provenance {
+  kind: ProvenanceKind
+  label: string
+  tip: string
+}
+
+export const PROVENANCE_INFO: Record<ProvenanceKind, Omit<Provenance, 'kind'>> = {
+  writer_inferred: {
+    label: 'writer inferred',
+    tip: 'The acting process was inferred by correlation, not reported by the kernel. Kestrel never kills on it; it may still remove the persistence entry itself.',
+  },
+  writer_unknown: {
+    label: 'writer unknown',
+    tip: 'No acting process could be determined for this change. Kestrel never kills on it; it may still remove the persistence entry itself.',
+  },
+  remote_smb: {
+    label: 'remote client over SMB',
+    tip: 'The writes came through the System process from another machine over a file share. No local process is blamed; investigate the client that has this share mapped.',
+  },
+  canary_polled: {
+    label: 'decoy write found by polling',
+    tip: 'The decoy file was changed in place and found by content polling, so the writer is inferred (the last process seen opening it for writing), not reported by the kernel. Kestrel never kills on it.',
+  },
+  agent_spawned: {
+    label: 'started by Kestrel',
+    tip: 'The Kestrel agent itself started this process (hardening PowerShell, a scan or an update installer). Rules treat it as Kestrel’s own work.',
+  },
+}
+
+/**
+ * How trustworthy the acting process of an event is, as badges to show next to
+ * it. Exact (or absent: older agents) attribution yields nothing.
+ */
+export function eventProvenance(e: KEvent): Provenance[] {
+  const out: ProvenanceKind[] = []
+  switch (e.type) {
+    case 'process_start':
+      if (e.agent_spawned) out.push('agent_spawned')
+      break
+    case 'registry_set':
+    case 'task_registered':
+    case 'service_installed':
+    case 'wmi_subscription':
+      if (e.attribution === 'heuristic') out.push('writer_inferred')
+      else if (e.attribution === 'none') out.push('writer_unknown')
+      break
+    case 'file_activity':
+      if (e.remote_writer) out.push('remote_smb')
+      if (e.canary_in_place && e.canary_hits?.length) out.push('canary_polled')
+      break
+  }
+  return out.map((kind) => ({ kind, ...PROVENANCE_INFO[kind] }))
+}
+
+/**
+ * Mark tree nodes whose `process_start` event (in `events`) says the Kestrel
+ * agent started them. The server's tree rows don't carry the flag (yet), so the
+ * console derives it from the incident evidence. Returns the same array when
+ * nothing changes.
+ */
+export function withAgentSpawned<T extends { guid: string; agent_spawned?: boolean }>(nodes: T[], events: KEvent[]): T[] {
+  const spawned = new Set(events.filter((e) => e.type === 'process_start' && e.agent_spawned).map((e) => e.guid))
+  if (!spawned.size) return nodes
+  return nodes.map((n) => (spawned.has(n.guid) && !n.agent_spawned ? { ...n, agent_spawned: true } : n))
 }
 
 /** NTSTATUS values worth naming in the UI. */

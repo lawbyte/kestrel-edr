@@ -17,7 +17,7 @@ import { Sheet } from '@/components/ui/sheet'
 import { Switch } from '@/components/ui/misc'
 import { useAuth } from '@/lib/auth'
 import { RULE_CATEGORY_HINT, RULE_CATEGORY_ORDER, SEVERITY_LABEL } from '@/lib/labels'
-import { DRL_URL, ruleSource, SOURCE_LABEL, upstreamUrl, type RuleSource } from '@/lib/rules'
+import { DRL_URL, referenceHref, ruleSource, SOURCE_LABEL, upstreamUrl, type RuleSource } from '@/lib/rules'
 import { cn } from '@/lib/utils'
 import { SIGMA_TEMPLATE } from '@/lib/sigma-template'
 
@@ -228,13 +228,20 @@ function RuleDetail({ rule, onClose }: { rule: RuleRow; onClose: () => void }) {
           <div>
             <h3 className="mb-1 text-xs font-medium text-fg-subtle">References</h3>
             <ul className="space-y-1 text-sm">
-              {rule.references.map((r) => (
-                <li key={r}>
-                  <a href={r} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 break-all text-accent-text hover:underline">
-                    {r.replace(/^https?:\/\//, '')} <ExternalLink className="size-3 shrink-0" />
-                  </a>
-                </li>
-              ))}
+              {rule.references.map((r) => {
+                const href = referenceHref(r)
+                return (
+                  <li key={r}>
+                    {href ? (
+                      <a href={href} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 break-all text-accent-text hover:underline">
+                        {r.replace(/^https?:\/\//, '')} <ExternalLink className="size-3 shrink-0" />
+                      </a>
+                    ) : (
+                      <span className="break-all text-fg-muted">{r}</span>
+                    )}
+                  </li>
+                )
+              })}
             </ul>
           </div>
         ) : null}

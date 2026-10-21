@@ -12,6 +12,7 @@ import type {
   Severity,
   SignatureState,
 } from '@/api/types'
+import { safeDisplay } from './format'
 
 export const SEVERITY_LABEL: Record<Severity, string> = {
   info: 'Info',
@@ -288,8 +289,10 @@ export function actionPrivilege(a: ResponseAction): string {
     case 'quarantine_file':
     case 'restore_file':
     case 'delete_quarantined':
-    case 'remove_autorun':
       return 'response.file'
+    case 'remove_autorun':
+      // Writes/deletes registry values as SYSTEM: admin-only by default (V-H2).
+      return 'response.persistence'
     case 'block_destination':
     case 'block_image_network':
     case 'isolate_host':
@@ -300,7 +303,34 @@ export function actionPrivilege(a: ResponseAction): string {
   }
 }
 
-/** One-line description of an action with its parameters. */
+/**
+ * Canonical Windows defaults that `remove_autorun` may legitimately restore
+ * (mirrors the agent's fixed table). Keys are lower-case, without `Wow6432Node\`.
+ */
+const CANONICAL_DEFAULTS: { key: string; value: string; data: string }[] = [
+  { key: 'hklm\\software\\microsoft\\windows nt\\currentversion\\winlogon', value: 'userinit', data: 'C:\\Windows\\system32\\userinit.exe,' },
+  { key: 'hklm\\software\\microsoft\\windows nt\\currentversion\\winlogon', value: 'shell', data: 'explorer.exe' },
+  { key: 'hklm\\system\\currentcontrolset\\control\\session manager', value: 'bootexecute', data: 'autocheck autochk *' },
+  { key: 'hklm\\system\\currentcontrolset\\control\\securityproviders\\wdigest', value: 'uselogoncredential', data: 'dword:0' },
+]
+
+function normKey(k: string): string {
+  return k
+    .trim()
+    .replace(/^HKEY_LOCAL_MACHINE(?=\\|$)/i, 'HKLM')
+    .replace(/\\+$/, '')
+    .replace(/\\wow6432node(?=\\|$)/gi, '')
+    .toLowerCase()
+}
+
+/** True only when `data` is exactly the OS default for this exact key and value (key/value compared case-insensitively). */
+export function isCanonicalDefault(location: string, valueName: string | null | undefined, data: string): boolean {
+  const k = normKey(location)
+  const v = (valueName ?? '').toLowerCase()
+  return CANONICAL_DEFAULTS.some((d) => d.key === k && d.value === v && d.data.toLowerCase() === data.toLowerCase())
+}
+
+/** One-line description of an action with its parameters. Endpoint-controlled text is passed through `safeDisplay`. */
 export function describeAction(a: ResponseAction): string {
   switch (a.type) {
     case 'kill_process':
@@ -310,15 +340,15 @@ export function describeAction(a: ResponseAction): string {
     case 'resume_process':
       return `Resume PID ${a.pid}`
     case 'quarantine_file':
-      return `Quarantine ${a.path}`
+      return `Quarantine ${safeDisplay(a.path)}`
     case 'restore_file':
       return `Restore quarantined item ${a.quarantine_id.slice(0, 8)}`
     case 'delete_quarantined':
       return `Delete quarantined item ${a.quarantine_id.slice(0, 8)}`
     case 'block_destination':
-      return `Block ${a.ip}${a.port ? `:${a.port}` : ''}${a.image ? ` for ${a.image}` : ''}`
+      return `Block ${a.ip}${a.port ? `:${a.port}` : ''}${a.image ? ` for ${safeDisplay(a.image)}` : ''}`
     case 'block_image_network':
-      return `Block all network for ${a.image}`
+      return `Block all network for ${safeDisplay(a.image)}`
     case 'isolate_host':
       return a.allow_ips?.length ? `Isolate host (allow ${a.allow_ips.join(', ')})` : 'Isolate host'
     case 'release_host':
@@ -326,12 +356,16 @@ export function describeAction(a: ResponseAction): string {
     case 'apply_hardening':
       return 'Re-apply hardening pack'
     case 'scan':
-      return a.path ? `Scan ${a.path}` : 'Scan running user-path programs'
+      return a.path ? `Scan ${safeDisplay(a.path)}` : 'Scan running user-path programs'
     case 'collect_triage':
       return 'Collect triage package'
     case 'remove_autorun': {
-      const what = a.kind === 'registry_value' && a.value_name ? `${a.location}\\${a.value_name}` : a.location
-      if (a.restore_data != null) return `Restore default of ${what} (${a.restore_data})`
+      const loc = safeDisplay(a.location)
+      const what = a.kind === 'registry_value' && a.value_name ? `${loc}\\${safeDisplay(a.value_name)}` : loc
+      if (a.restore_data != null) {
+        if (isCanonicalDefault(a.location, a.value_name, a.restore_data)) return `Restore default of ${what} (${safeDisplay(a.restore_data)})`
+        return `Write ${safeDisplay(a.restore_data)} to ${what}`
+      }
       const verb = a.kind === 'service' ? 'Disable service' : `Remove ${AUTORUN_KIND_LABEL[a.kind].replace(/^[A-Z][a-z]/, (m) => m.toLowerCase())}`
       return `${verb} ${what}`
     }
@@ -343,6 +377,7 @@ export const PRIVILEGES = [
   'incidents.write',
   'response.process',
   'response.file',
+  'response.persistence',
   'response.network',
   'response.collect',
   'exclusions.write',
@@ -357,6 +392,28 @@ export const PRIVILEGES = [
   'updates.write',
 ] as const
 
+/** What each privilege allows (shown next to privilege pickers and role tables). */
+export const PRIVILEGE_DESCRIPTION: Record<(typeof PRIVILEGES)[number], string> = {
+  read: 'View devices, incidents, alerts, events and policies',
+  'incidents.write': 'Assign, comment on, classify and close incidents',
+  'response.process': 'Kill, suspend and resume processes',
+  'response.file': 'Quarantine, restore and delete quarantined files',
+  'response.persistence': 'Remove/restore persistence entries as SYSTEM (admin only by default)',
+  'response.network': 'Block destinations and isolate or release hosts',
+  'response.collect': 'Scan, collect triage packages and re-apply hardening',
+  'exclusions.write': 'Create and remove exclusions',
+  'iocs.write': 'Manage indicators (IOCs)',
+  'policies.write': 'Edit policies and groups',
+  'rules.write': 'Edit rules and custom Sigma rules',
+  'devices.write': 'Edit, tag, move and decommission devices',
+  'users.write': 'Manage users and roles',
+  'settings.write': 'Change organisation, SSO and notification settings',
+  'audit.read': 'Read the audit log',
+  'tokens.write': 'Create and revoke API tokens',
+  'updates.write': 'Register, promote and halt agent updates',
+}
+
+/** Built-in roles. Analysts deliberately lack `response.persistence` (SYSTEM registry writes, V-H2). */
 export const ROLE_PRIVILEGES: Record<string, string[]> = {
   admin: ['*'],
   analyst: [

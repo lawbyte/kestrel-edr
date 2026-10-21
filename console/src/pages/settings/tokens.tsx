@@ -11,7 +11,7 @@ import { Field, Input, inputClass } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/misc'
 import { useAuth } from '@/lib/auth'
 import { timeAgo } from '@/lib/format'
-import { PRIVILEGES } from '@/lib/labels'
+import { PRIVILEGE_DESCRIPTION, PRIVILEGES } from '@/lib/labels'
 import { cn } from '@/lib/utils'
 import { SettingsLoading, SettingsSection } from '../settings'
 
@@ -129,7 +129,7 @@ function CreateToken({ onClose }: { onClose: () => void }) {
               <legend className="mb-1.5 text-sm font-medium">Privileges</legend>
               <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
                 {PRIVILEGES.map((p) => (
-                  <label key={p} className="flex items-center gap-2 text-xs">
+                  <label key={p} title={PRIVILEGE_DESCRIPTION[p]} className="flex items-center gap-2 text-xs">
                     <Checkbox checked={privs.includes(p)} onCheckedChange={(v) => setPrivs((s) => (v ? [...s, p] : s.filter((x) => x !== p)))} />
                     <code>{p}</code>
                   </label>

@@ -1,8 +1,10 @@
-import { AlertOctagon, AlertTriangle, Circle, ChevronDown, Info, ShieldCheck, ShieldAlert, ShieldX, ShieldQuestion, Wifi, WifiOff, Activity, Lock, CheckCircle2, XCircle, Clock, Send, Hourglass, FolderDown, FolderClock, FolderOpen, Network, HardDrive, Download, SquareTerminal, KeyRound, Globe, Upload, Radar, ShieldOff, FileCode2, FileLock2, Fingerprint, Anchor, Bird, Sunrise, Pin, CircleDashed, Rocket, OctagonPause } from 'lucide-react'
+import { AlertOctagon, AlertTriangle, Circle, ChevronDown, Info, ShieldCheck, ShieldAlert, ShieldX, ShieldQuestion, Wifi, WifiOff, Activity, Lock, CheckCircle2, XCircle, Clock, Send, Hourglass, FolderDown, FolderClock, FolderOpen, Network, HardDrive, Download, SquareTerminal, KeyRound, Globe, Upload, Radar, ShieldOff, FileCode2, FileLock2, Fingerprint, Anchor, Bird, Sunrise, Pin, CircleDashed, Rocket, OctagonPause, Waypoints, CircleHelp, Server, Bot } from 'lucide-react'
 import type { ActionStatus, DeviceStatus, GroupUpdateRing, UpdateReleaseState, IncidentStatus, PathClass, RuleCategory, RuleMode, Severity, SignatureState } from '@/api/types'
 import { ACTION_STATUS_LABEL, DEVICE_STATUS_LABEL, INCIDENT_STATUS_LABEL, PATH_CLASS_LABEL, RULE_CATEGORY_LABEL, SEVERITY_LABEL, SIGNATURE_LABEL } from '@/lib/labels'
 import { cn } from '@/lib/utils'
 import { RELEASE_STATE_LABEL, RING_HINT, RING_LABEL } from '@/lib/updates'
+import { eventProvenance, PROVENANCE_INFO, type Provenance, type ProvenanceKind } from '@/lib/events'
+import type { KEvent } from '@/api/types'
 import { Tooltip } from './ui/misc'
 import type { ReactNode } from 'react'
 
@@ -201,4 +203,53 @@ export function ReleaseStateBadge({ state }: { state: UpdateReleaseState }) {
       {RELEASE_STATE_LABEL[state]}
     </span>
   )
+}
+
+const PROV_ICON: Record<ProvenanceKind, typeof Bird> = {
+  writer_inferred: Waypoints,
+  writer_unknown: CircleHelp,
+  remote_smb: Server,
+  canary_polled: Radar,
+  agent_spawned: Bot,
+}
+
+function ProvenanceChip({ p }: { p: Provenance }) {
+  const Icon = PROV_ICON[p.kind]
+  return (
+    <Tooltip content={p.tip}>
+      <span
+        tabIndex={0}
+        data-provenance={p.kind}
+        className={cn(
+          'inline-flex items-center gap-1 whitespace-nowrap rounded px-1.5 py-px font-sans text-[11px] font-medium',
+          p.kind === 'agent_spawned' ? 'bg-surface-2 text-fg-subtle' : 'border border-dashed border-border-strong bg-surface-2 text-fg-muted',
+        )}
+      >
+        <Icon className="size-3 shrink-0" aria-hidden />
+        {p.label}
+      </span>
+    </Tooltip>
+  )
+}
+
+/**
+ * How the acting process of an event was determined (writer inferred / unknown,
+ * remote SMB client, polled decoy write, started by Kestrel). Icon + label, with
+ * a tooltip; renders nothing for kernel-exact attribution.
+ */
+export function ProvenanceBadges({ event, className }: { event: KEvent; className?: string }) {
+  const p = eventProvenance(event)
+  if (!p.length) return null
+  return (
+    <span className={cn('inline-flex flex-wrap items-center gap-1', className)}>
+      {p.map((x) => (
+        <ProvenanceChip key={x.kind} p={x} />
+      ))}
+    </span>
+  )
+}
+
+/** Subtle "started by Kestrel" label for a process the agent itself spawned. */
+export function StartedByKestrelBadge() {
+  return <ProvenanceChip p={{ kind: 'agent_spawned', ...PROVENANCE_INFO.agent_spawned }} />
 }

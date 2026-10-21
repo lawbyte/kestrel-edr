@@ -3,7 +3,7 @@ import { useMemo, useState, type KeyboardEvent } from 'react'
 import type { TreeNode } from '@/api/types'
 import { formatDateTime, formatDuration, formatTime, shortHash } from '@/lib/format'
 import { basename, cn } from '@/lib/utils'
-import { PathClassBadge, SignerBadge } from './badges'
+import { PathClassBadge, SignerBadge, StartedByKestrelBadge } from './badges'
 import { KeyValue, Mono } from './common'
 import { CopyButton } from './copy-button'
 import { Tooltip } from './ui/misc'
@@ -138,6 +138,7 @@ export function ProcessTree({ nodes, selected, onSelect, className }: { nodes: T
               <span className="text-xs tabular text-fg-subtle">{n.pid}</span>
               <SignerBadge signed={n.signed} signer={n.signer} />
               {n.path_class !== 'system' && n.path_class !== 'program_files' && n.path_class !== 'windows' ? <PathClassBadge pathClass={n.path_class} /> : null}
+              {n.agent_spawned ? <StartedByKestrelBadge /> : null}
               {n.alert_rule_ids.map((r) => (
                 <span key={r} className="rounded bg-sev-critical-soft px-1 py-px font-mono text-[10.5px] font-medium text-sev-critical">
                   {r}
@@ -172,6 +173,7 @@ export function ProcessDetail({ node, parent }: { node: TreeNode; parent?: TreeN
         <div className="mt-2 flex flex-wrap gap-1.5">
           <SignerBadge signed={node.signed} signer={node.signer} />
           <PathClassBadge pathClass={node.path_class} />
+          {node.agent_spawned ? <StartedByKestrelBadge /> : null}
         </div>
       </div>
       <div>

@@ -402,56 +402,17 @@ pub fn validate_manual_action(a: &ResponseAction) -> ApiResult<()> {
     Ok(())
 }
 
-/// Shape checks for an analyst-issued `remove_autorun`. The agent re-reads the
-/// entry, backs it up and refuses protected/Kestrel entries itself; the server
-/// rejects obviously malformed or self-targeting requests early.
+/// V-H2: `remove_autorun` is limited to known autorun locations and, for
+/// writes, to the canonical Windows default of that exact value (see
+/// [`crate::autorun_policy`]). The agent re-checks everything itself.
 fn validate_remove_autorun(
     kind: kestrel_common::AutorunKind,
     location: &str,
     value_name: Option<&str>,
     restore_data: Option<&str>,
 ) -> ApiResult<()> {
-    use kestrel_common::AutorunKind as K;
-    let bad = |m: &str| Err(ApiError::bad_request(m.to_string()));
-    let loc = location.trim();
-    if loc.is_empty() || loc.len() > 1024 || loc.chars().any(|c| c.is_control()) {
-        return bad("remove_autorun needs a location (1-1024 printable characters)");
-    }
-    for v in [value_name, restore_data].into_iter().flatten() {
-        if v.len() > 2048 || v.contains('\0') {
-            return bad("remove_autorun value_name/restore_data too long or contains NUL");
-        }
-    }
-    if loc.to_ascii_lowercase().contains("kestrel") {
-        return bad("remove_autorun never targets Kestrel's own entries");
-    }
-    let upper = loc.to_ascii_uppercase();
-    match kind {
-        K::RegistryValue => {
-            if !(upper.starts_with(r"HKLM\") || upper.starts_with(r"HKU\")) {
-                return bad(r"registry_value location must be an absolute HKLM\ or HKU\<SID>\ key");
-            }
-        }
-        K::ScheduledTask => {
-            if !loc.starts_with('\\') {
-                return bad(r"scheduled_task location must be a task path such as \Folder\Name");
-            }
-        }
-        K::StartupFile => {
-            if !upper.contains(r"\START MENU\PROGRAMS\STARTUP\") {
-                return bad("startup_file location must be a file inside a Startup folder");
-            }
-        }
-        K::Service | K::WmiSubscription => {
-            if loc.contains('\\') || loc.contains('/') {
-                return bad("service / wmi_subscription location is a bare name");
-            }
-        }
-    }
-    if restore_data.is_some() && kind != K::RegistryValue {
-        return bad("restore_data only applies to registry_value");
-    }
-    Ok(())
+    crate::autorun_policy::validate(kind, location, value_name, restore_data)
+        .map_err(ApiError::bad_request)
 }
 
 // ---------------------------------------------------------------- uninstall token (M5)

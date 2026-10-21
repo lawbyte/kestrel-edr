@@ -28,6 +28,7 @@ pub async fn list(State(st): State<AppState>, p: Principal) -> ApiResult<Json<Va
     let mut out = vec![];
     for meta in Engine::catalog() {
         let mut v = serde_json::to_value(&meta)?;
+        filter_references(&mut v);
         v["enabled_custom"] = false.into();
         v["hits_7d"] = hits.get(&meta.id).copied().unwrap_or(0).into();
         out.push(v);
@@ -39,6 +40,9 @@ pub async fn list(State(st): State<AppState>, p: Principal) -> ApiResult<Json<Va
     .await?;
     for (id, meta, source, enabled, created_at, updated_at) in custom {
         let mut v = meta;
+        // Rules stored before the filter existed: never hand the console a
+        // non-http(s) reference to render as a link.
+        filter_references(&mut v);
         v["enabled_custom"] = enabled.into();
         v["hits_7d"] = hits.get(&id).copied().unwrap_or(0).into();
         v["source"] = source.into();
@@ -56,6 +60,29 @@ fn sigma_severity(level: Option<&str>) -> Severity {
         "high" => Severity::High,
         "critical" => Severity::Critical,
         _ => Severity::Medium,
+    }
+}
+
+/// A rule reference the console may render as a link: an absolute `http(s)://`
+/// URL with a host and no whitespace or control characters (`javascript:`,
+/// `data:` and relative URLs are dropped).
+pub fn is_http_reference(r: &str) -> bool {
+    let lower = r.trim().to_ascii_lowercase();
+    let rest = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"));
+    rest.is_some_and(|h| !h.is_empty() && !h.starts_with('/') && !h.starts_with('@'))
+        && r.len() <= 2048
+        && !r
+            .trim()
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// Keep only http(s) references in a serialised `RuleMeta`.
+fn filter_references(v: &mut Value) {
+    if let Some(Value::Array(a)) = v.get_mut("references") {
+        a.retain(|x| x.as_str().is_some_and(is_http_reference));
     }
 }
 
@@ -148,7 +175,11 @@ pub fn sigma_meta(source: &str, id: Option<&str>) -> ApiResult<RuleMeta> {
             } else {
                 None
             }),
-        references: str_list(obj.get("references")),
+        references: str_list(obj.get("references"))
+            .into_iter()
+            .map(|r| r.trim().to_string())
+            .filter(|r| is_http_reference(r))
+            .collect(),
         false_positives: str_list(obj.get("falsepositives")),
     })
 }
@@ -332,5 +363,38 @@ detection:
         assert_eq!(m.severity, kestrel_common::Severity::High);
         assert!(super::sigma_meta("title: x", None).is_err());
         assert!(super::sigma_meta(": : :", None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::*;
+
+    #[test]
+    fn only_http_references() {
+        assert!(is_http_reference("https://github.com/SigmaHQ/sigma"));
+        assert!(is_http_reference("http://example.com/x"));
+        for bad in [
+            "javascript:alert(1)",
+            "JAVASCRIPT:alert(1)",
+            "data:text/html,x",
+            "//evil.example",
+            "https:///x",
+            "https://a b",
+            "mailto:x@y",
+            "vbscript:x",
+            "",
+        ] {
+            assert!(!is_http_reference(bad), "{bad}");
+        }
+        let m = sigma_meta(
+            "title: t\nid: 0b4ed5f8-1111-2222-3333-444455556666\nreferences:\n  - javascript:alert(1)\n  - https://ok.example/r\nlogsource:\n  category: process_creation\n  product: windows\ndetection:\n  sel:\n    Image|endswith: '\\\\x.exe'\n  condition: sel\n",
+            None,
+        )
+        .unwrap();
+        assert_eq!(m.references, vec!["https://ok.example/r".to_string()]);
+        let mut v = serde_json::json!({"references": ["https://a.example", "javascript:x", 5]});
+        filter_references(&mut v);
+        assert_eq!(v["references"], serde_json::json!(["https://a.example"]));
     }
 }

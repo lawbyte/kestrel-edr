@@ -1,11 +1,12 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Bot, CheckCircle2, Circle, ClipboardCheck, Hand, KeyRound, ShieldAlert, Zap } from 'lucide-react'
-import { useState } from 'react'
+import { Fragment, useState } from 'react'
 import { toast } from 'sonner'
 import { api, qk } from '@/api/endpoints'
-import type { ChecklistItem, DataCategory, Incident, IncidentDetail, TreeNode } from '@/api/types'
+import type { ChecklistItem, DataCategory, Incident, IncidentDetail, ResponseAction, TreeNode } from '@/api/types'
 import { useAuth } from '@/lib/auth'
-import { actionPrivilege, DATA_CATEGORY_LABEL, DATA_CATEGORY_REMEDIATION, describeAction } from '@/lib/labels'
+import { actionPrivilege, AUTORUN_KIND_LABEL, DATA_CATEGORY_LABEL, DATA_CATEGORY_REMEDIATION, describeAction, isCanonicalDefault } from '@/lib/labels'
+import { safeDisplay } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { Button } from './ui/button'
 import { Dialog, DialogContent } from './ui/dialog'
@@ -33,6 +34,8 @@ const RISKY = new Set(['temp', 'downloads', 'user_writable', 'external'])
  * merely *named* like a shell in a user-writable folder is malware and is fair game.
  */
 export function isSafeKillTarget(n: TreeNode): boolean {
+  // Kestrel's own children (hardening PowerShell, scan, update msiexec) are never offered.
+  if (n.agent_spawned) return false
   if (n.path_class === 'system' || n.path_class === 'windows') return false
   if (RISKY.has(n.path_class)) return true
   return !UNSAFE_KILL_TARGETS.has(baseName(n.image))
@@ -143,6 +146,34 @@ export function DataAtRiskPanel({ categories, user, compact }: { categories: Dat
   )
 }
 
+/** The exact target of a remove_autorun, field by field, with bidi/control characters stripped. */
+export function AutorunTarget({ action }: { action: Extract<ResponseAction, { type: 'remove_autorun' }> }) {
+  const rows: [string, string][] = [
+    ['Type', AUTORUN_KIND_LABEL[action.kind]],
+    [action.kind === 'registry_value' ? 'Key' : 'Name', safeDisplay(action.location)],
+  ]
+  if (action.value_name != null) rows.push(['Value', safeDisplay(action.value_name) || '(default)'])
+  if (action.restore_data != null) rows.push(['New data', safeDisplay(action.restore_data)])
+  return (
+    <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 rounded-md border border-border bg-surface-2 px-3 py-2 text-xs" data-testid="autorun-target">
+      {rows.map(([k, v]) => (
+        <Fragment key={k}>
+          <dt className="text-fg-subtle">{k}</dt>
+          <dd className="font-mono text-fg [overflow-wrap:anywhere]">{v}</dd>
+        </Fragment>
+      ))}
+    </dl>
+  )
+}
+
+/** Why the Approve button is disabled; always names the missing privilege. */
+export function approveDeniedReason(priv: string, canWriteIncidents: boolean): string {
+  if (!canWriteIncidents) return 'Your role is missing the incidents.write privilege'
+  return priv === 'response.persistence'
+    ? 'Your role is missing the response.persistence privilege (admin only by default: it writes the registry as SYSTEM)'
+    : `Your role is missing the ${priv} privilege`
+}
+
 const KIND_META = {
   done: { title: 'Already done by Kestrel', icon: Bot, empty: 'The agent took no automatic action.' },
   approve: { title: 'Needs your approval', icon: Zap, empty: 'Nothing waiting for approval.' },
@@ -222,11 +253,11 @@ export function RemediationChecklist({ incident }: { incident: IncidentDetail })
                         <ShieldAlert className="mt-0.5 size-4 shrink-0 text-accent-text" aria-hidden />
                       )}
                       <div className="min-w-0 flex-1">
-                        <p className={cn('text-sm [overflow-wrap:anywhere]', it.done && k !== 'done' && 'text-fg-muted line-through decoration-fg-subtle/60')}>{it.text}</p>
+                        <p className={cn('text-sm [overflow-wrap:anywhere]', it.done && k !== 'done' && 'text-fg-muted line-through decoration-fg-subtle/60')}>{safeDisplay(it.text)}</p>
                         {it.action && k === 'approve' ? <p className="mt-0.5 font-mono text-[11.5px] text-fg-subtle [overflow-wrap:anywhere]">{describeAction(it.action)}</p> : null}
                       </div>
                       {k === 'approve' && !it.done ? (
-                        <Tooltip content={allowed ? 'Sends the action to the device now' : `Your role is missing ${priv}`}>
+                        <Tooltip content={allowed ? 'Sends the action to the device now' : approveDeniedReason(priv, can('incidents.write'))}>
                           <span>
                             <Button size="sm" variant="primary" disabled={!allowed || m.isPending} onClick={() => (it.action?.type === 'remove_autorun' ? setConfirming(it) : m.mutate({ item: it, done: true }))}>
                               <ClipboardCheck /> Approve
@@ -271,10 +302,13 @@ export function RemediationChecklist({ incident }: { incident: IncidentDetail })
                 {confirming.action.kind === 'service'
                   ? 'stops the service and sets it to disabled (it is not deleted)'
                   : confirming.action.restore_data != null
-                    ? `writes the safe value ${confirming.action.restore_data}`
+                    ? isCanonicalDefault(confirming.action.location, confirming.action.value_name, confirming.action.restore_data)
+                      ? `writes the Windows default value ${safeDisplay(confirming.action.restore_data)}`
+                      : `writes ${safeDisplay(confirming.action.restore_data)} (not a known Windows default — check it carefully)`
                     : 'deletes it'}
                 . It refuses Kestrel’s own entries and protected Windows entries.
               </p>
+              <AutorunTarget action={confirming.action} />
               <p>If this is legitimate software, the user loses whatever it started at logon until you restore it from the backup.</p>
             </div>
           </DialogContent>

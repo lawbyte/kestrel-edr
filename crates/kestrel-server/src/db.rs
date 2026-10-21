@@ -12,6 +12,7 @@ pub const ALL_PRIVILEGES: &[&str] = &[
     "incidents.write",
     "response.process",
     "response.file",
+    "response.persistence",
     "response.network",
     "response.collect",
     "exclusions.write",

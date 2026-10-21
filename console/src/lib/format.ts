@@ -71,6 +71,24 @@ export function shortHash(h: string | null | undefined, n = 12): string {
   return h.length > n ? `${h.slice(0, n)}…` : h
 }
 
+/**
+ * C0/C1 controls (incl. tab, CR, LF), DEL, the Arabic letter mark, LRM/RLM and
+ * the bidi embedding/override/isolate controls (U+202A–U+202E, U+2066–U+2069).
+ */
+const UNSAFE_DISPLAY = new RegExp('[' + [[0x00, 0x1f], [0x7f, 0x9f], [0x061c, 0x061c], [0x200e, 0x200f], [0x2028, 0x2029], [0x202a, 0x202e], [0x2066, 0x2069]].map(([a, b]) => `\\u{${a.toString(16)}}-\\u{${b.toString(16)}}`).join('') + ']', 'gu')
+
+/**
+ * Endpoint-controlled text (task/service/WMI names, registry paths and data,
+ * file paths) made safe to show in confirmations: strips characters that can
+ * hide or reorder what the analyst reads (e.g. U+202E "RIGHT-TO-LEFT OVERRIDE"
+ * turning `evil<U+202E>txt.exe` into what reads as `evilexe.txt`) and line breaks that could
+ * fake extra lines in a dialog.
+ */
+export function safeDisplay(s: string | null | undefined): string {
+  if (s == null) return ''
+  return String(s).replace(UNSAFE_DISPLAY, '')
+}
+
 export function hex(n: number | undefined): string {
   return n == null ? '—' : `0x${n.toString(16)}`
 }

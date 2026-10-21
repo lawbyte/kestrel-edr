@@ -5,7 +5,7 @@ import { Link, useNavigate, useParams } from 'react-router'
 import { toast } from 'sonner'
 import { api, qk } from '@/api/endpoints'
 import type { AlertRow, IncidentDetail, KEvent, TimelineEntry, TreeNode } from '@/api/types'
-import { ActionStatusBadge, ModeBadge, PriorityScore, SeverityBadge, SeverityIcon } from '@/components/badges'
+import { ActionStatusBadge, ModeBadge, PriorityScore, ProvenanceBadges, SeverityBadge, SeverityIcon } from '@/components/badges'
 import { AttackChips, Avatar, Card, EmptyState, ErrorState, KeyValue, LoadingRows, Mono } from '@/components/common'
 import { AssigneeControl, ClassificationControl, StatusControl } from '@/components/incident-controls'
 import { DataAtRiskPanel, PriorityBreakdown, RemediationChecklist, pickTarget } from '@/components/incident-parts'
@@ -17,8 +17,8 @@ import { Textarea } from '@/components/ui/input'
 import { Tabs, TabsContent, TabsList, TabsTrigger, Tooltip } from '@/components/ui/misc'
 import { useAuth } from '@/lib/auth'
 import { describeAction, EVENT_KIND_LABEL } from '@/lib/labels'
-import { describeEvent } from '@/lib/events'
-import { formatDateTime, formatTime, timeAgo } from '@/lib/format'
+import { describeEvent, withAgentSpawned } from '@/lib/events'
+import { formatDateTime, formatTime, safeDisplay, timeAgo } from '@/lib/format'
 import { basename, cn } from '@/lib/utils'
 import { ExclusionDialog } from './exclusions'
 
@@ -35,13 +35,14 @@ function IncidentView({ inc }: { inc: IncidentDetail }) {
   const device = useQuery({ queryKey: qk.device(inc.device_id), queryFn: () => api.device(inc.device_id), staleTime: 30_000 })
   const dev = device.data?.device
   const isolated = dev?.status === 'isolated'
-  const [selected, setSelected] = useState<string | null>(() => pickTarget(inc.process_tree)?.guid ?? inc.process_tree[0]?.guid ?? null)
+  const tree = useMemo(() => withAgentSpawned(inc.process_tree, inc.evidence), [inc.process_tree, inc.evidence])
+  const [selected, setSelected] = useState<string | null>(() => pickTarget(tree)?.guid ?? tree[0]?.guid ?? null)
   const [action, setAction] = useState<ActionSpec | null>(null)
   const [blockOpen, setBlockOpen] = useState<{ ip?: string; port?: number | null; image?: string | null } | null>(null)
   const [excludeFrom, setExcludeFrom] = useState<AlertRow | null>(null)
-  const selNode = inc.process_tree.find((n) => n.guid === selected) ?? null
-  const byGuid = useMemo(() => new Map(inc.process_tree.map((n) => [n.guid, n])), [inc.process_tree])
-  const target = pickTarget(inc.process_tree)
+  const selNode = tree.find((n) => n.guid === selected) ?? null
+  const byGuid = useMemo(() => new Map(tree.map((n) => [n.guid, n])), [tree])
+  const target = pickTarget(tree)
   const devRef = { id: inc.device_id, hostname: inc.hostname, status: dev?.status ?? 'online' }
   const pendingApprovals = inc.checklist.filter((c) => c.kind === 'approve' && !c.done).length
   const lastNet = inc.network.filter((n) => !n.blocked && n.dst_ip !== '127.0.0.1').slice(-1)[0]
@@ -99,7 +100,7 @@ function IncidentView({ inc }: { inc: IncidentDetail }) {
       {/* Sticky response bar */}
       <div className="sticky top-0 z-20 flex flex-wrap items-center gap-2 border-b border-border bg-bg/90 px-6 py-2 backdrop-blur" role="toolbar" aria-label="Response actions">
         {target ? (
-          <ActionButton spec={{ action: { type: 'kill_process', pid: target.pid, guid: target.guid, tree: true }, destructive: true, impact: `Ends ${basename(target.image)} (PID ${target.pid}) and every process it started.` }} label={`Kill ${basename(target.image)}`} onPick={setAction} />
+          <ActionButton spec={{ action: { type: 'kill_process', pid: target.pid, guid: target.guid, tree: true }, destructive: true, impact: `Ends ${safeDisplay(basename(target.image))} (PID ${target.pid}) and every process it started.` }} label={`Kill ${safeDisplay(basename(target.image))}`} onPick={setAction} />
         ) : (
           <ActionButton
             spec={{ action: { type: 'kill_process', pid: 0, guid: null, tree: true }, destructive: true }}
@@ -132,7 +133,7 @@ function IncidentView({ inc }: { inc: IncidentDetail }) {
           {/* Storyline */}
           <section aria-label="What happened" className="rounded-lg border border-border bg-surface px-5 py-4">
             <h2 className="mb-2 text-xs font-medium text-fg-subtle">What happened</h2>
-            <Markdown source={inc.storyline} className="text-[15px] leading-[1.65]" />
+            <Markdown source={inc.storyline} links="none" className="text-[15px] leading-[1.65]" />
             <KillChain alerts={inc.alerts} />
           </section>
 
@@ -142,7 +143,7 @@ function IncidentView({ inc }: { inc: IncidentDetail }) {
 
           <Card title="Process tree" bodyClassName="p-0" description="Top-down from the earliest recorded ancestor. Click a process for details.">
             <div className="grid lg:grid-cols-[minmax(0,1fr)_320px]">
-              <ProcessTree nodes={inc.process_tree} selected={selected} onSelect={setSelected} className="border-b border-border lg:border-b-0 lg:border-r" />
+              <ProcessTree nodes={tree} selected={selected} onSelect={setSelected} className="border-b border-border lg:border-b-0 lg:border-r" />
               <div className="p-4">{selNode ? <ProcessDetail node={selNode} parent={selNode.parent_guid ? byGuid.get(selNode.parent_guid) : undefined} /> : <p className="text-sm text-fg-muted">Select a process.</p>}</div>
             </div>
           </Card>
@@ -404,7 +405,12 @@ export function EvidenceTable({ events, nodes }: { events: KEvent[]; nodes?: Map
                   </td>
                   <td className="whitespace-nowrap px-3 py-1.5 text-xs tabular text-fg-muted">{formatTime(e.ts)}</td>
                   <td className="whitespace-nowrap px-3 py-1.5 text-xs">{EVENT_KIND_LABEL[e.type]}</td>
-                  <td className="whitespace-nowrap px-3 py-1.5 font-mono text-[12px]">{proc ? basename(proc.image) : e.pid}</td>
+                  <td className="whitespace-nowrap px-3 py-1.5 font-mono text-[12px]">
+                    <span className="inline-flex items-center gap-1.5">
+                      {e.type === 'file_activity' && e.remote_writer ? 'System' : proc ? basename(proc.image) : e.pid}
+                      <ProvenanceBadges event={e} />
+                    </span>
+                  </td>
                   <td className="max-w-[520px] truncate px-3 py-1.5 font-mono text-[12px] text-fg-muted">{describeEvent(e)}</td>
                 </tr>
                 {isOpen ? (

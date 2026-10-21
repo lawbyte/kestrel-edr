@@ -78,7 +78,6 @@ export function buildTelemetry(d: Device, storyEvents: KEvent[], storyProcs: Pro
   const services = mk('C:\\Windows\\System32\\services.exe', 'C:\\Windows\\system32\\services.exe', 'Microsoft Windows', null, boot, 'NT AUTHORITY\\SYSTEM')
   const svchost = mk('C:\\Windows\\System32\\svchost.exe', 'C:\\Windows\\system32\\svchost.exe -k DcomLaunch -p', 'Microsoft Windows', services, boot + 2000, 'NT AUTHORITY\\SYSTEM')
   const agent = mk('C:\\Program Files\\Kestrel\\kestrel-agent.exe', '"C:\\Program Files\\Kestrel\\kestrel-agent.exe" --service', 'Kestrel Labs Pte. Ltd.', services, boot + 3000, 'NT AUTHORITY\\SYSTEM')
-  void agent
   const explorer = user ? mk('C:\\Windows\\explorer.exe', 'C:\\Windows\\Explorer.EXE', 'Microsoft Windows', null, boot + 40_000, user) : null
   const home = `C:\\Users\\${(user ?? 'svc').split('\\').pop()}`
   const n = d.hostname.startsWith('SRV') ? 70 : 120
@@ -109,6 +108,32 @@ export function buildTelemetry(d: Device, storyEvents: KEvent[], storyProcs: Pro
   }
   if (r() < 0.4)
     events.push({ device_id: d.id, hostname: d.hostname, ts: NOW - ri(1, 20) * HOUR, pid: services.pid, guid: services.guid, type: 'registry_set', key: 'HKLM\\SOFTWARE\\Policies\\Google\\Chrome', value_name: 'RemoteDebuggingAllowed', data: '0' })
+  // The agent's own hardening run: a direct child it recorded spawning (agent_spawned).
+  {
+    const t = NOW - ri(2, 26) * HOUR
+    const hp = mk('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', 'powershell.exe -NoProfile -NonInteractive -Command "Add-MpPreference -AttackSurfaceReductionRules_Ids 9e6c4e1f-7d60-472f-ba1a-a39ef669e4b2 -AttackSurfaceReductionRules_Actions Enabled"', 'Microsoft Windows', agent, t, 'NT AUTHORITY\\SYSTEM', t + 2_400)
+    events.push({ device_id: d.id, hostname: d.hostname, ts: t, pid: hp.pid, guid: hp.guid, type: 'process_start', ppid: hp.ppid, parent_guid: hp.parent_guid, image: hp.image, cmdline: hp.cmdline, user: hp.user, integrity: 'system', session_id: 0, signer: hp.signer, signed: 'valid', sha256: hp.sha256, file_size: hp.file_size, agent_spawned: true })
+  }
+  // File server: a client rewrote files over SMB, so the writer is the System process (pid 4).
+  if (d.hostname === 'SRV-FS-01') {
+    events.push({
+      device_id: d.id,
+      hostname: d.hostname,
+      ts: NOW - 3 * HOUR - 12 * 60_000,
+      pid: 4,
+      guid: '',
+      type: 'file_activity',
+      window_ms: 10_000,
+      files_touched: 96,
+      dirs: 11,
+      renames: 0,
+      overwrites: 96,
+      new_files: 0,
+      net_paths: 0,
+      sample_paths: ['D:\\Shared\\Warehouse\\Q3\\stock_count.xlsx', 'D:\\Shared\\Warehouse\\Q3\\pallets.csv'],
+      remote_writer: true,
+    })
+  }
   for (const p of storyProcs) procs.set(p.guid, p)
   for (const e of storyEvents) events.push({ ...e, device_id: d.id, hostname: d.hostname })
   events.sort((a, b) => b.ts - a.ts)

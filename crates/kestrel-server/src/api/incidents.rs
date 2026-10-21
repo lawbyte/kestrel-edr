@@ -634,6 +634,10 @@ pub async fn checklist(
             .and_then(|a| serde_json::from_value::<ResponseAction>(a).ok())
         {
             p.require(action.privilege())?;
+            // V-H2: checklist actions can originate from agent-reported
+            // outcomes ("Retry: …"), so they get the same validation as a
+            // manual command.
+            super::devices::validate_manual_action(&action)?;
             let comment = format!("Approved from incident checklist: {}", item.text);
             let aid = ingest::enqueue_command(
                 &st,

@@ -681,7 +681,7 @@ function persistence(ctx: Ctx): IncidentDetail {
   const payload = `${home(d)}\\AppData\\Roaming\\PdfTools\\pdfupd.exe`
   s.file(st, 9_000, payload, 'create')
   const taskName = '\\PdfTools Updater'
-  const task = s.ev(st, 11_000, { type: 'task_registered', name: taskName, op: 'created', user: d.logged_on_user, actions: [`"${payload}" /background`], hidden: true, triggers: ['logon', 'time'] })
+  const task = s.ev(st, 11_000, { type: 'task_registered', name: taskName, op: 'created', user: d.logged_on_user, actions: [`"${payload}" /background`], hidden: true, triggers: ['logon', 'time'], attribution: 'heuristic' })
   s.alert(st, 11_200, 'PS-05', 'PDF_Converter_Pro_Setup.exe registered a hidden scheduled task that starts an unsigned program from AppData at every logon.', { evidence: [task] })
   const runKey = `HKU\\${sid}\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`
   const ps = 'powershell.exe -w hidden -nop -enc JABjAD0ATgBlAHcALQBPAGIAagBlAGMAdAAgAE4AZQB0AC4AVwBlAGIAQwBsAGkAZQBuAHQA'
@@ -696,6 +696,7 @@ function persistence(ctx: Ctx): IncidentDetail {
     namespace: 'root\\subscription',
     filter: "SELECT * FROM __InstanceModificationEvent WITHIN 60 WHERE TargetInstance ISA 'Win32_PerfFormattedData_PerfOS_System'",
     consumer: `CommandLineEventConsumer="PdfToolsSync" "${payload}" /sync`,
+    attribution: 'none',
   })
   s.alert(st, 14_200, 'PS-08', 'A WMI permanent subscription runs pdfupd.exe through a CommandLineEventConsumer every few minutes.', {
     evidence: [wmi],

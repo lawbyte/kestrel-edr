@@ -17,7 +17,7 @@ import type {
   Severity,
   User,
 } from '@/api/types'
-import { HARDENING_CONTROLS, HARDENING_INFO, ROLE_PRIVILEGES, SEVERITY_RANK } from '@/lib/labels'
+import { actionPrivilege, HARDENING_CONTROLS, HARDENING_INFO, ROLE_PRIVILEGES, SEVERITY_RANK } from '@/lib/labels'
 import { evaluate, parseHunt } from '@/lib/hunt'
 import { toHuntRecord } from '@/lib/events'
 import { MockDb } from './db'
@@ -347,9 +347,16 @@ route('POST', '/devices/:id/actions', ({ params, body }) => {
   const b = body as { action: ResponseAction; incident_id?: string; comment?: string }
   if ((b.action.type === 'kill_process' || b.action.type === 'suspend_process' || b.action.type === 'resume_process') && !b.action.guid)
     throw bad('process actions need the process guid (a PID alone may be reused)')
+  requirePriv(u, actionPrivilege(b.action))
   const row = issueAction(d, b.action, u, b.comment ?? '', b.incident_id ?? null)
   return row
 })
+
+/** Mirrors the server: 403 unless the user's role grants priv (admin has *). */
+function requirePriv(u: User, priv: string) {
+  const privs = ROLE_PRIVILEGES[u.role] ?? ['read']
+  if (!privs.includes('*') && !privs.includes(priv)) throw new HttpError(403, 'forbidden', `You need the ${priv} privilege`)
+}
 
 function issueAction(d: Device, action: ResponseAction, u: User, comment: string, incidentId: string | null): ResponseActionRow {
   const row: ResponseActionRow = {
@@ -574,6 +581,8 @@ route('POST', '/incidents/:id/checklist/:item', ({ params, body }) => {
   const item = i.checklist.find((c) => c.id === params.item)
   if (!item) throw notFound('Checklist item')
   const done = (body as { done: boolean }).done
+  // Approving an action needs that action's privilege (remove_autorun: response.persistence, admin only).
+  if (done && item.kind === 'approve' && item.action) requirePriv(u, actionPrivilege(item.action))
   item.done = done
   if (done && item.kind === 'approve' && item.action) {
     const d = findDevice(i.device_id)

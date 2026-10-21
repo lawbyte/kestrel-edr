@@ -7,6 +7,7 @@
 pub mod api;
 pub mod audit;
 pub mod auth;
+pub mod autorun_policy;
 pub mod config;
 pub mod crypto;
 pub mod db;
@@ -15,6 +16,7 @@ pub mod grpc;
 pub mod incidents;
 pub mod ingest;
 pub mod jobs;
+pub mod mdsafe;
 pub mod models;
 pub mod netguard;
 pub mod notify;

@@ -11,13 +11,13 @@ import { Field, Input, inputClass } from '@/components/ui/input'
 import { Dropdown, DropdownContent, DropdownItem, DropdownSeparator, DropdownTrigger } from '@/components/ui/misc'
 import { useAuth } from '@/lib/auth'
 import { timeAgo } from '@/lib/format'
-import { ROLE_PRIVILEGES } from '@/lib/labels'
+import { PRIVILEGE_DESCRIPTION, ROLE_PRIVILEGES } from '@/lib/labels'
 import { cn } from '@/lib/utils'
 import { SettingsLoading, SettingsSection } from '../settings'
 
 const ROLE_INFO: Record<string, string> = {
   admin: 'Everything, including policies, users and settings',
-  analyst: 'Investigate and respond: incidents, response actions, exclusions and indicators',
+  analyst: 'Investigate and respond: incidents, response actions, exclusions and indicators (not persistence removal, which writes the registry as SYSTEM)',
   readonly: 'View only',
 }
 
@@ -118,7 +118,7 @@ export default function UsersTab() {
               <p className="text-xs text-fg-muted">{ROLE_INFO[r]}</p>
               <p className="mt-1 flex flex-wrap gap-1">
                 {privs.map((p) => (
-                  <code key={p} className="rounded border border-border bg-surface-2 px-1 text-[11px] text-fg-muted">
+                  <code key={p} title={PRIVILEGE_DESCRIPTION[p as keyof typeof PRIVILEGE_DESCRIPTION]} className="rounded border border-border bg-surface-2 px-1 text-[11px] text-fg-muted">
                     {p === '*' ? 'all privileges' : p}
                   </code>
                 ))}

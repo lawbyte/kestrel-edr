@@ -5,6 +5,7 @@ import { Link, useSearchParams } from 'react-router'
 import { toast } from 'sonner'
 import { api, qk } from '@/api/endpoints'
 import type { DeviceEvent, HuntResponse } from '@/api/types'
+import { ProvenanceBadges } from '@/components/badges'
 import { EmptyState, ErrorState, PageHeader } from '@/components/common'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger, Segmented } from '@/components/ui/misc'
@@ -359,7 +360,12 @@ function ResultRow({ e, open, onToggle }: { e: DeviceEvent; open: boolean; onTog
           </Link>
         </td>
         <td className="whitespace-nowrap px-3 py-1.5 text-xs">{EVENT_KIND_LABEL[e.type]}</td>
-        <td className="whitespace-nowrap px-3 py-1.5 font-mono text-[12px]">{img ? basename(img) : e.pid}</td>
+        <td className="whitespace-nowrap px-3 py-1.5 font-mono text-[12px]">
+          <span className="inline-flex items-center gap-1.5">
+            {e.type === 'file_activity' && e.remote_writer ? 'System' : img ? basename(img) : e.pid}
+            <ProvenanceBadges event={e} />
+          </span>
+        </td>
         <td className="max-w-[640px] truncate px-3 py-1.5 font-mono text-[12px] text-fg-muted">{describeEvent(e)}</td>
       </tr>
       {open ? (

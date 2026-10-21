@@ -53,6 +53,10 @@ pub async fn user_hasher(
 pub const EVENTS_LOST_ALERT_THRESHOLD: u64 = 500;
 /// Minimum spacing between two server-side tamper alerts of the same kind.
 pub const TAMPER_DEDUPE_MS: i64 = 3_600_000;
+/// V-L3: policy / rules version catch-up runs at most this often per device.
+pub const CATCH_UP_INTERVAL_MS: i64 = 10 * 60_000;
+/// V-L4: dead-letter payloads are kept up to this many bytes.
+pub const DEAD_LETTER_MAX_BYTES: usize = 64 * 1024;
 
 /// Process Hello: upsert device facts and build the initial messages
 /// (Welcome, Policy/Rules when stale, pending commands and messages).
@@ -132,7 +136,31 @@ pub async fn hello(
     }];
     let pid = policy_svc::device_policy_id(&state.db, device_id).await?;
     // Database restored from a backup? Never let agents ignore later changes.
-    policy_svc::catch_up_versions(&state.db, &pid, h.policy_version, h.rules_version).await?;
+    // V-L3: an agent reporting versions above the server's is also how a
+    // compromised agent would run the counters up, so it raises
+    // TP-SRV-VERSION, and catch-up runs at most once per device per 10 minutes.
+    if let Some(what) =
+        policy_svc::agent_ahead(&state.db, &pid, h.policy_version, h.rules_version).await?
+    {
+        raise_tamper(
+            state,
+            device_id,
+            "TP-SRV-VERSION",
+            "Agent reports a newer policy or rules version than the server",
+            Severity::Medium,
+            format!(
+                "The Kestrel agent on {} reports {what}. This is expected once after the server database was restored from a backup; otherwise the agent's state was tampered with or the agent is not genuine.",
+                h.hostname
+            ),
+        )
+        .await;
+        if claim_slot(state, device_id, "catch_up_versions", CATCH_UP_INTERVAL_MS).await? {
+            policy_svc::catch_up_versions(&state.db, &pid, h.policy_version, h.rules_version)
+                .await?;
+        } else {
+            tracing::warn!(%device_id, "version catch-up already ran for this device in the last 10 minutes; skipped");
+        }
+    }
     if let Some(p) = policy_svc::effective(&state.db, &pid).await? {
         if p.version != h.policy_version {
             out.push(ServerPayload::Policy(Box::new(p)));
@@ -378,8 +406,20 @@ pub async fn server_message_acked(
 }
 
 async fn tamper_due(state: &AppState, device_id: Uuid, rule: &str) -> anyhow::Result<bool> {
+    claim_slot(state, device_id, rule, TAMPER_DEDUPE_MS).await
+}
+
+/// Atomically claim a per-device rate-limit slot `key` (stored in
+/// `devices.tamper_state`): true when it was last claimed more than
+/// `window_ms` ago (or never).
+pub async fn claim_slot(
+    state: &AppState,
+    device_id: Uuid,
+    key: &str,
+    window_ms: i64,
+) -> anyhow::Result<bool> {
     let now = now_ms();
-    // Atomically claim the alert slot for this rule.
+    let (rule, dedupe) = (key, window_ms);
     let r = sqlx::query(
         "UPDATE devices SET tamper_state = tamper_state || jsonb_build_object($2::text, $3::bigint) \
          WHERE id = $1 AND COALESCE((tamper_state->>$2)::bigint, 0) < $4",
@@ -387,7 +427,7 @@ async fn tamper_due(state: &AppState, device_id: Uuid, rule: &str) -> anyhow::Re
     .bind(device_id)
     .bind(rule)
     .bind(now)
-    .bind(now - TAMPER_DEDUPE_MS)
+    .bind(now - dedupe)
     .execute(&state.db)
     .await?;
     Ok(r.rows_affected() == 1)
@@ -411,6 +451,55 @@ pub async fn raise_tamper(
         Ok(false) => {}
         Err(e) => tracing::error!(error = %e, "tamper dedupe failed"),
     }
+}
+
+/// V-L4: an agent message the database rejected for its content is acked (it
+/// can never succeed and would block the outbox) but kept as a dead letter,
+/// and `TP-SRV-INGEST` is raised (at most once per device per hour).
+pub async fn dead_letter(
+    state: &AppState,
+    device_id: Uuid,
+    hostname: &str,
+    seq: u64,
+    payload_type: &str,
+    error: &str,
+    raw: &[u8],
+) {
+    let truncated = raw.len() > DEAD_LETTER_MAX_BYTES;
+    let body = &raw[..raw.len().min(DEAD_LETTER_MAX_BYTES)];
+    let error: String = error
+        .chars()
+        .take(2000)
+        .collect::<String>()
+        .replace('\0', "");
+    if let Err(e) = sqlx::query(
+        "INSERT INTO ingest_dead_letters (device_id, seq, payload_type, error, received_at, payload, truncated) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7)",
+    )
+    .bind(device_id)
+    .bind(i64::try_from(seq).unwrap_or(i64::MAX))
+    .bind(payload_type)
+    .bind(&error)
+    .bind(now_ms())
+    .bind(body)
+    .bind(truncated)
+    .execute(&state.db)
+    .await
+    {
+        tracing::error!(%device_id, seq, error = %e, "failed to store dead letter");
+    }
+    raise_tamper(
+        state,
+        device_id,
+        "TP-SRV-INGEST",
+        "Agent message rejected by the server database",
+        Severity::Medium,
+        format!(
+            "A {payload_type} message from the Kestrel agent on {hostname} (seq {seq}) was rejected by the database because of its content and was dropped. \
+             It is kept in the ingest dead-letter table for review. Repeated rejections can hide alerts: check the agent version and what the endpoint is sending."
+        ),
+    )
+    .await;
 }
 
 pub async fn heartbeat(state: &AppState, s: &Session, hb: &Heartbeat) -> anyhow::Result<()> {
@@ -535,11 +624,14 @@ pub async fn heartbeat(state: &AppState, s: &Session, hb: &Heartbeat) -> anyhow:
 }
 
 pub async fn events(state: &AppState, s: &Session, events: &[Event]) -> anyhow::Result<()> {
+    let privacy = device_privacy(state, s.device_id).await?;
+    let prefixes = crate::scrub::norm_prefixes(&privacy);
+    let sc = scrub_for(state, &privacy, &prefixes);
     let rows: Vec<EventRow> = events
         .iter()
         .map(|e| {
             let mut e = e.clone();
-            crate::scrub::scrub_event(&mut e, None);
+            crate::scrub::scrub_event(&mut e, &sc);
             EventRow::from_event(s.device_id, &s.hostname, &e)
         })
         .collect();
@@ -553,10 +645,17 @@ pub async fn events(state: &AppState, s: &Session, events: &[Event]) -> anyhow::
 }
 
 pub async fn alert(state: &AppState, s: &Session, mut a: Alert) -> anyhow::Result<()> {
-    crate::scrub::scrub_alert(&mut a, user_hasher(state, s.device_id).await?);
+    let privacy = device_privacy(state, s.device_id).await?;
+    let prefixes = crate::scrub::norm_prefixes(&privacy);
+    crate::scrub::scrub_alert(&mut a, &scrub_for(state, &privacy, &prefixes));
+    // V-L4: the alert, its incident, actions and checklist are written in one
+    // transaction (`ingest_alert`) *before* anything else, so a data error
+    // can never leave a partial alert behind.
+    incidents::ingest_alert(state, s.device_id, a.clone()).await?;
     // Evidence also lands in the telemetry store so hunting sees it — but only
     // events the agent does not already upload as raw telemetry (otherwise
-    // every alert sharing an event would store another copy of it).
+    // every alert sharing an event would store another copy of it). Best
+    // effort: the alert itself is already stored.
     if !a.evidence.is_empty() {
         match evidence_to_store(state, s.device_id, &a.evidence).await {
             Ok(evidence) if !evidence.is_empty() => {
@@ -572,8 +671,20 @@ pub async fn alert(state: &AppState, s: &Session, mut a: Alert) -> anyhow::Resul
             Err(e) => tracing::warn!(error = %e, "failed to dedupe alert evidence"),
         }
     }
-    incidents::ingest_alert(state, s.device_id, a).await?;
     Ok(())
+}
+
+/// Server-side scrub settings for a device's privacy policy (V-L5).
+fn scrub_for<'a>(
+    state: &'a AppState,
+    privacy: &kestrel_common::Privacy,
+    prefixes: &'a [String],
+) -> crate::scrub::Scrub<'a> {
+    crate::scrub::Scrub {
+        users: privacy.hash_usernames.then_some(&state.mk),
+        prefixes,
+        capture_cmdline: privacy.capture_cmdline,
+    }
 }
 
 /// Evidence events that are neither covered by the device's raw-telemetry
@@ -633,6 +744,8 @@ pub async fn action_result(
 ) -> anyhow::Result<()> {
     let now = now_ms();
     let detail = crate::scrub::redact_secrets(&outcome.detail);
+    // V-L4: the status update and its side effects commit together.
+    let mut tx = state.db.begin().await?;
     let row: Option<(Option<Uuid>, serde_json::Value)> = sqlx::query_as(
         "UPDATE response_actions SET status = $3, completed_at = $4, result_detail = $5, artifact = $6, delivered_at = COALESCE(delivered_at, $4) \
          WHERE id = $1 AND device_id = $2 AND (completed_at IS NULL OR status IN ('pending','sent','expired')) RETURNING incident_id, action",
@@ -643,14 +756,13 @@ pub async fn action_result(
     .bind(now)
     .bind(&detail)
     .bind(outcome.artifact.as_deref().map(|a| a.chars().take(1024).collect::<String>()))
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await?;
     let Some((incident_id, action_v)) = row else {
         tracing::debug!(%command_id, "action result for unknown or already completed command");
         return Ok(());
     };
     let action: ResponseAction = serde_json::from_value(action_v).unwrap_or(outcome.action.clone());
-    let mut tx = state.db.begin().await?;
     if outcome.ok {
         match &action {
             ResponseAction::QuarantineFile { path, sha256 } => {
@@ -700,7 +812,7 @@ pub async fn action_result(
                 if outcome.ok { "Succeeded" } else { "Failed" },
                 incidents::describe_action(&action)
             ))
-            .bind(&detail)
+            .bind(crate::mdsafe::plain(&detail, 2000))
             .execute(&mut *tx)
             .await?;
         if outcome.ok {

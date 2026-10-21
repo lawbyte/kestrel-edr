@@ -47,16 +47,44 @@ pub struct AgentSvc {
     pub state: AppState,
 }
 
-/// A database "data exception" (SQLSTATE class 22: invalid text, out of
-/// range, bad JSON …) is caused by the message content and will fail again on
-/// every retry; connection or locking errors are transient.
+/// SQLSTATEs that mean "this message's content can never be stored"
+/// (V-L4): untranslatable character, character not in repertoire, invalid
+/// text representation, numeric value out of range, datetime field overflow
+/// and invalid datetime format. Everything else (connection, locking,
+/// constraint, other class-22 errors) is treated as transient.
+pub const PERMANENT_DATA_SQLSTATES: &[&str] =
+    &["22P05", "22021", "22P02", "22003", "22007", "22008"];
+
+/// Is `code` one of [`PERMANENT_DATA_SQLSTATES`]?
+pub fn is_permanent_sqlstate(code: &str) -> bool {
+    PERMANENT_DATA_SQLSTATES.contains(&code)
+}
+
+/// A database error whose SQLSTATE is in [`PERMANENT_DATA_SQLSTATES`] is
+/// caused by the message content and will fail again on every retry.
 fn is_permanent_data_error(e: &anyhow::Error) -> bool {
     e.chain().any(|c| {
         c.downcast_ref::<sqlx::Error>().is_some_and(|s| match s {
-            sqlx::Error::Database(d) => d.code().is_some_and(|c| c.starts_with("22")),
+            sqlx::Error::Database(d) => d.code().is_some_and(|c| is_permanent_sqlstate(&c)),
             _ => false,
         })
     })
+}
+
+/// Short name of an agent payload (dead letters, logs).
+fn payload_type(p: &AgentPayload) -> &'static str {
+    match p {
+        AgentPayload::Hello(_) => "hello",
+        AgentPayload::Heartbeat(_) => "heartbeat",
+        AgentPayload::Events { .. } => "events",
+        AgentPayload::Alert(_) => "alert",
+        AgentPayload::ActionResult { .. } => "action_result",
+        AgentPayload::ReviewRequest(_) => "review_request",
+        AgentPayload::Inventory(_) => "inventory",
+        AgentPayload::Ack { .. } => "ack",
+        AgentPayload::RenewCertificate { .. } => "renew_certificate",
+        AgentPayload::UpdateResult { .. } => "update_result",
+    }
 }
 
 pub fn decode_payload(compressed: bool, payload: &[u8]) -> Result<Vec<u8>, String> {
@@ -491,10 +519,11 @@ impl AgentService for AgentSvc {
                         }
                         continue;
                     }
-                    let payload = match decode_payload(msg.compressed, &msg.payload).and_then(
+                    let decoded = decode_payload(msg.compressed, &msg.payload);
+                    let payload = match decoded.as_deref().map_err(|e| e.clone()).and_then(
                         |raw| {
                             let mut v: serde_json::Value =
-                                serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
+                                serde_json::from_slice(raw).map_err(|e| e.to_string())?;
                             // PostgreSQL cannot store NUL; never let one wedge the stream.
                             let fixed = kestrel_common::wire::strip_nul(&mut v);
                             if fixed > 0 {
@@ -510,6 +539,7 @@ impl AgentService for AgentSvc {
                             None
                         }
                     };
+                    let ptype = payload.as_ref().map(payload_type).unwrap_or("malformed");
                     // A bug in one handler must not leave a dead stream registered:
                     // contain the panic and close the stream (the agent re-sends).
                     let dispatched = std::panic::AssertUnwindSafe(async {
@@ -599,9 +629,20 @@ impl AgentService for AgentSvc {
                         }
                         Err(e) if is_permanent_data_error(&e) => {
                             // The database rejected this message's *content*
-                            // (SQLSTATE class 22): re-sending can never succeed
-                            // and would block everything queued behind it. Ack it.
-                            tracing::error!(%device_id, seq, error = %e, "agent message rejected by the database; dropping it");
+                            // (see PERMANENT_DATA_SQLSTATES): re-sending can never
+                            // succeed and would block everything queued behind it.
+                            // Keep it as a dead letter, raise TP-SRV-INGEST, ack it.
+                            tracing::error!(%device_id, seq, error = %e, payload = ptype, "agent message rejected by the database; dead-lettered");
+                            ingest::dead_letter(
+                                &state,
+                                device_id,
+                                &sess.hostname,
+                                seq,
+                                ptype,
+                                &format!("{e:#}"),
+                                decoded.as_deref().unwrap_or(&[]),
+                            )
+                            .await;
                             hwm = seq;
                             let _ = sqlx::query("UPDATE devices SET last_agent_seq = GREATEST(last_agent_seq, $2) WHERE id = $1")
                                 .bind(device_id)

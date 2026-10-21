@@ -99,6 +99,11 @@ pub async fn create(
             "update_ring must be canary, early, broad or pinned",
         ));
     }
+    // V-L7: a ring other than the default decides which releases the group's
+    // devices receive, which is update governance.
+    if ring != "broad" {
+        p.require("updates.write")?;
+    }
     let id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO groups (id, name, description, policy_id, created_at, update_ring) VALUES ($1,$2,$3,$4,$5,$6)",
@@ -140,6 +145,14 @@ pub async fn update(
     p.require("devices.write")?;
     let id = parse_uuid(&id)?;
     let g = load_group(&st, id).await?;
+    // V-L7: moving a group between update rings (e.g. into `canary`) decides
+    // which releases its devices install: that is update governance. Checked
+    // before any field is written so a refused request changes nothing.
+    if let Some(ring) = &b.update_ring {
+        if *ring != g.update_ring {
+            p.require("updates.write")?;
+        }
+    }
     if let Some(n) = &b.name {
         let n = n.trim();
         if n.is_empty() || n.len() > 100 {

@@ -51,7 +51,7 @@ describe('serde shape compatibility', () => {
       [{ type: 'release_host' }, 'response.network'],
       [{ type: 'collect_triage' }, 'response.collect'],
       [{ type: 'apply_hardening' }, 'response.collect'],
-      [{ type: 'remove_autorun', kind: 'scheduled_task', location: '\\Updater' }, 'response.file'],
+      [{ type: 'remove_autorun', kind: 'scheduled_task', location: '\\Updater' }, 'response.persistence'],
     ]
     for (const [a, p] of cases) expect(actionPrivilege(a)).toBe(p)
     expect(describeAction({ type: 'block_destination', ip: '1.2.3.4', port: 443 })).toBe('Block 1.2.3.4:443')

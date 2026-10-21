@@ -114,6 +114,36 @@ pub async fn effective(db: &PgPool, policy_id: &str) -> anyhow::Result<Option<Po
     Ok(Some(p))
 }
 
+/// V-L3: describe how an agent's reported versions exceed the server's
+/// (`None` when they do not). The caller raises `TP-SRV-VERSION` and
+/// rate-limits [`catch_up_versions`] per device.
+pub async fn agent_ahead(
+    db: &PgPool,
+    policy_id: &str,
+    agent_policy: u64,
+    agent_rules: u64,
+) -> anyhow::Result<Option<String>> {
+    let agent_policy = i64::try_from(agent_policy).unwrap_or(i64::MAX);
+    let agent_rules = i64::try_from(agent_rules).unwrap_or(i64::MAX);
+    let cur: Option<(i64,)> = sqlx::query_as("SELECT version FROM policies WHERE id = $1")
+        .bind(policy_id)
+        .fetch_optional(db)
+        .await?;
+    let (rules,): (i64,) = sqlx::query_as("SELECT rules_version FROM settings WHERE id = 1")
+        .fetch_one(db)
+        .await?;
+    let mut parts = vec![];
+    if let Some((cur,)) = cur {
+        if agent_policy > cur {
+            parts.push(format!("policy version {agent_policy} (server: {cur})"));
+        }
+    }
+    if agent_rules > rules {
+        parts.push(format!("rules version {agent_rules} (server: {rules})"));
+    }
+    Ok((!parts.is_empty()).then(|| parts.join(" and ")))
+}
+
 /// Largest forward jump a single agent report may cause (see [`catch_up_versions`]).
 pub const MAX_VERSION_CATCH_UP: i64 = 1_000_000;
 
