@@ -79,8 +79,8 @@ Do not disable Defender, SmartScreen or the firewall.
 ## 2. Clone
 
 ```powershell
-git clone <your-kestrel-repo> kestrel
-cd kestrel
+git clone https://github.com/lawbyte/kestrel-edr.git
+cd kestrel-edr
 ```
 
 ## 3. Rust: format, lint and test

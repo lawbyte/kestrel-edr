@@ -3,16 +3,12 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/lawbyte/kestrel-edr/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.1.2-f38ba8?style=for-the-badge&labelColor=313244"></a>
-  <a href="https://github.com/lawbyte/kestrel-edr/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/lawbyte/kestrel-edr/ci.yml?branch=main&style=for-the-badge&label=CI&labelColor=313244&logo=githubactions&logoColor=white"></a>
-  <a href="https://lawbyte.github.io/kestrel-edr/"><img alt="Docs" src="https://img.shields.io/badge/docs-online-89b4fa?style=for-the-badge&labelColor=313244&logo=readthedocs&logoColor=white"></a>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-94e2d5?style=for-the-badge&labelColor=313244"></a>
-  <br>
-  <img alt="Windows 10 and 11" src="https://img.shields.io/badge/endpoint-Windows%2010%20%7C%2011-a6e3a1?style=for-the-badge&labelColor=313244&logo=windows&logoColor=white">
-  <img alt="Rust" src="https://img.shields.io/badge/agent-Rust-fab387?style=for-the-badge&labelColor=313244&logo=rust&logoColor=white">
-  <img alt="React" src="https://img.shields.io/badge/console-React%2019-89dceb?style=for-the-badge&labelColor=313244&logo=react&logoColor=white">
-  <img alt="Docker Compose" src="https://img.shields.io/badge/server-Docker%20Compose-b4befe?style=for-the-badge&labelColor=313244&logo=docker&logoColor=white">
-  <img alt="SigmaHQ" src="https://img.shields.io/badge/rules-54%20built--in%20%2B%2070%20Sigma-f9e2af?style=for-the-badge&labelColor=313244">
+  <a href="https://github.com/lawbyte/kestrel-edr/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/lawbyte/kestrel-edr/ci.yml?branch=main&style=flat&label=CI"></a>
+  <a href="https://lawbyte.github.io/kestrel-edr/"><img alt="Docs" src="https://img.shields.io/badge/docs-online-4357c9?style=flat"></a>
+  <a href="https://github.com/lawbyte/kestrel-edr/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.1.2-4357c9?style=flat"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-555c6b?style=flat"></a>
+  <img alt="Windows 10 and 11" src="https://img.shields.io/badge/endpoint-Windows%2010%20%7C%2011-555c6b?style=flat&logo=windows&logoColor=white">
+  <img alt="Rust" src="https://img.shields.io/badge/agent-Rust-555c6b?style=flat&logo=rust&logoColor=white">
 </p>
 
 <p align="center">
@@ -235,7 +231,7 @@ For data flow, the detection pipeline and the security model, see [docs/ARCHITEC
 ### 1. Server (Docker Compose)
 
 ```bash
-git clone <your-kestrel-repo> kestrel && cd kestrel/deploy
+git clone https://github.com/lawbyte/kestrel-edr.git && cd kestrel-edr/deploy
 cp .env.example .env
 sed -i "s|^KESTREL_MASTER_KEY=.*|KESTREL_MASTER_KEY=$(openssl rand -base64 32)|" .env
 $EDITOR .env        # KESTREL_PUBLIC_HOSTNAME, POSTGRES_PASSWORD, CLICKHOUSE_PASSWORD

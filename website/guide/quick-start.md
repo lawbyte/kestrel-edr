@@ -18,7 +18,7 @@ The agent kills processes, quarantines files, installs firewall (WFP) filters th
 On Linux:
 
 ```bash
-git clone <your-kestrel-repo> kestrel && cd kestrel/deploy
+git clone https://github.com/lawbyte/kestrel-edr.git && cd kestrel-edr/deploy
 cp .env.example .env
 sed -i "s|^KESTREL_MASTER_KEY=.*|KESTREL_MASTER_KEY=$(openssl rand -base64 32)|" .env
 $EDITOR .env        # KESTREL_PUBLIC_HOSTNAME, POSTGRES_PASSWORD, CLICKHOUSE_PASSWORD
@@ -27,7 +27,7 @@ $EDITOR .env        # KESTREL_PUBLIC_HOSTNAME, POSTGRES_PASSWORD, CLICKHOUSE_PAS
 On Windows (PowerShell, Docker Desktop running), generate the master key with .NET and paste it into `.env`:
 
 ```powershell
-cd kestrel\deploy
+cd kestrel-edr\deploy
 Copy-Item .env.example .env
 $b = New-Object byte[] 32
 [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)

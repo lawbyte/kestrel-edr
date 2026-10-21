@@ -5,7 +5,7 @@ One Docker Compose stack per organisation: `kestrel-server` (console + REST API 
 ## Install in 5 commands
 
 ```bash
-git clone <your-kestrel-repo> kestrel && cd kestrel/deploy
+git clone https://github.com/lawbyte/kestrel-edr.git && cd kestrel-edr/deploy
 cp .env.example .env
 sed -i "s|^KESTREL_MASTER_KEY=.*|KESTREL_MASTER_KEY=$(openssl rand -base64 32)|" .env
 $EDITOR .env        # KESTREL_PUBLIC_HOSTNAME, POSTGRES_PASSWORD, CLICKHOUSE_PASSWORD
