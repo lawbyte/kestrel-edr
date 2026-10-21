@@ -1071,7 +1071,7 @@ impl Ransomware {
                 h.dedup_key = Some(format!("{RW07}:remote"));
                 // Alert only, with the synthetic "unknown writer" subject
                 // (the engine refuses pid 4 subjects and any action on it).
-                let mut subject = crate::engine::unknown_subject(e.ts);
+                let mut subject = crate::engine::unknown_subject(e.ts, "rw07:smb-remote-writer");
                 subject.cmdline = "(remote client over SMB, via the System process)".into();
                 h.guid = subject.guid.clone();
                 h.process = Some(subject);
@@ -1428,7 +1428,7 @@ impl Family for Ransomware {
         if matches!(e.data, EventData::RegistrySet { .. }) {
             let attr = ctx.attribution(e);
             for h in out[start..].iter_mut() {
-                h.apply_attribution(attr, e.ts);
+                h.apply_attribution(attr, e);
             }
         }
     }

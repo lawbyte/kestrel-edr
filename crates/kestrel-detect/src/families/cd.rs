@@ -145,7 +145,7 @@ impl Family for CredDump {
         if attributed_kind {
             let attr = ctx.attribution(e);
             for h in out[start..].iter_mut() {
-                h.apply_attribution(attr, e.ts);
+                h.apply_attribution(attr, e);
             }
         }
     }

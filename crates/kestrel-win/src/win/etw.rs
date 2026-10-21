@@ -238,6 +238,9 @@ pub struct Counters {
     pub reg_watch_keys: AtomicU64,
     /// Task / service / WMI events emitted (after de-duplication).
     pub persist_events: AtomicU64,
+    /// Persistence records dropped because the enrichment queue was full
+    /// (re-review V-M9).
+    pub persist_dropped: AtomicU64,
 }
 
 /// Kernel-File callback state shared with the canary poller.

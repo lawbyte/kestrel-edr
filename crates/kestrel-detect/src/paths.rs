@@ -1282,7 +1282,8 @@ pub const CANARY_IGNORED_READERS: &[&str] = &[
 ];
 
 /// Does `proc_` read files for indexing / scanning / backup and therefore
-/// must not trip ST-16? Requires a trusted location and a **valid** signature:
+/// must not trip ST-16? Requires a SYSTEM token, a trusted location and a
+/// **valid** signature:
 /// either a Microsoft-signed image on [`CANARY_IGNORED_READERS`], or an
 /// allow-listed security / indexer / backup / management product
 /// ([`BENIGN_READERS`]) whose signer matches.
@@ -1323,6 +1324,14 @@ pub fn is_os_file_maintenance_host(proc_: &ProcessInfo, parent: Option<&ProcessI
 
 pub fn is_canary_ignored_reader(proc_: &ProcessInfo, parent: Option<&ProcessInfo>) -> bool {
     if is_untrusted_location_or_signature(proc_) || proc_.signed != SignatureState::Valid {
+        return false;
+    }
+    // V-M12: every exempt reader (indexer, Defender, backup engines, the
+    // allow-listed products) does its whole-disk reading as SYSTEM. One
+    // running with a user's token — FileHistory, sdclt, MpCmdRun or
+    // SearchProtocolHost started by the user, possibly suspended and
+    // injected — reads decoys like any other process.
+    if !crate::util::is_system_user(proc_.user.as_deref()) {
         return false;
     }
     let name = file_name(&proc_.image).to_ascii_lowercase();

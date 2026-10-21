@@ -95,7 +95,7 @@ impl FamilyHit {
     /// subject but strips every action against processes and files (only
     /// `RemoveAutorun` of the object stays); `None` also swaps the subject
     /// for the synthetic unknown writer so the engine can emit it.
-    pub fn apply_attribution(&mut self, attr: Attribution, ts: TimestampMs) {
+    pub fn apply_attribution(&mut self, attr: Attribution, e: &Event) {
         match attr {
             Attribution::Exact => {}
             Attribution::Heuristic => {
@@ -108,7 +108,7 @@ impl FamilyHit {
             Attribution::None => {
                 self.remediation_only = true;
                 self.strip_to_remediation();
-                let p = crate::engine::unknown_subject(ts);
+                let p = crate::engine::unknown_subject(e.ts, &crate::engine::changed_object(e));
                 self.guid = p.guid.clone();
                 self.process = Some(p);
                 self.summary.push_str(
@@ -297,6 +297,48 @@ pub(crate) fn attacker_named_quarantinable(path: &str, subject_user: Option<&str
         return false;
     };
     !tail.is_empty() && own_profile(profile, subject_user)
+}
+
+/// V-H4 / V-M5: may the engine propose quarantining a process image or a
+/// loaded DLL (`path`, signature state `signed`) whose process runs as
+/// `user`?
+/// * Never a validly signed file, anywhere: a benign signed binary that was
+///   started suspended and injected is the victim, not the payload.
+/// * In a shared location — `\ProgramData\`, `\Users\Public\`, another
+///   user's profile (any `\Users\<x>\` that is not the user's own) — only a
+///   file known to be unsigned or invalidly signed (`Unknown` is refused):
+///   such files belong to other products or other users.
+/// * Elsewhere (own profile, Temp, Downloads, removable media) anything not
+///   validly signed. The path-class / never-quarantine filters still apply.
+pub(crate) fn image_quarantinable(path: &str, signed: SignatureState, user: Option<&str>) -> bool {
+    if signed == SignatureState::Valid {
+        return false;
+    }
+    if shared_location(path, user) {
+        matches!(signed, SignatureState::Unsigned | SignatureState::Invalid)
+    } else {
+        true
+    }
+}
+
+/// `\ProgramData\…`, `\Users\Public\…` or a profile other than `user`'s own.
+fn shared_location(path: &str, user: Option<&str>) -> bool {
+    let n = crate::paths::normalize_path(path.trim().trim_matches('"'));
+    let mut dl = crate::util::strip_drive(&n);
+    // `\Device\HarddiskVolumeN\…`: judge the volume-relative rest.
+    if let Some(rest) = dl.strip_prefix(r"\device\") {
+        dl = rest.find('\\').map(|i| &rest[i..]).unwrap_or("");
+    }
+    if dl.starts_with(r"\programdata\") {
+        return true;
+    }
+    match dl.strip_prefix(r"\users\") {
+        Some(rest) => {
+            let profile = rest.split('\\').next().unwrap_or("");
+            !own_profile(profile, user)
+        }
+        None => false,
+    }
 }
 
 /// Is `profile` (lower-case folder name under `\Users\`) the profile of

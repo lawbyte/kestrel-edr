@@ -63,6 +63,12 @@ pub struct HostContext {
     pub hostname: String,
     /// Full path of the agent executable (never alert on / respond against it).
     pub agent_image: String,
+    /// PID of the running agent process (`std::process::id()`); 0 = unknown
+    /// (tests, simulation). When set, only the process with this pid *and*
+    /// the agent image is the agent (V-H1): another process started from the
+    /// same file (a user launching `kestrel-agent.exe`, possibly suspended
+    /// and injected) is an ordinary process, and so are its children.
+    pub agent_pid: u32,
     /// Kestrel server IPs (never blocked by isolation / destination blocks).
     pub server_ips: Vec<String>,
     /// System drive letter (from `%SystemRoot%`); `None` = `C`. Only images on

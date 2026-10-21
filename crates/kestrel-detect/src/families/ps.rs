@@ -2153,7 +2153,7 @@ impl Family for Persistence {
         if super::carries_attribution(e) {
             let attr = ctx.attribution(e);
             for h in out[start..].iter_mut() {
-                h.apply_attribution(attr, e.ts);
+                h.apply_attribution(attr, e);
             }
         }
         self.flush_late(ctx, start, out);

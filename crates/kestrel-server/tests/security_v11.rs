@@ -293,7 +293,11 @@ async fn dead_letters_and_narrow_sqlstates() {
     assert!(!kestrel_server::grpc::is_permanent_sqlstate("22012"));
 
     let agent = enrolled(&ts, "DL-PC").await;
-    let big = vec![b'x'; 70 * 1024];
+    // NEW-5: the payload is unscrubbed, so only metadata is stored; the
+    // database error is redacted where PostgreSQL echoes the input value.
+    let secret = br#"{"cmdline":"curl -u alice:Hunter2 https://x"}"#;
+    let mut big = secret.to_vec();
+    big.resize(70 * 1024, b'x');
     for seq in [7u64, 8] {
         kestrel_server::ingest::dead_letter(
             &ts.state,
@@ -301,13 +305,21 @@ async fn dead_letters_and_narrow_sqlstates() {
             "DL-PC",
             seq,
             "alert",
-            "error returned from database: invalid input syntax",
+            r#"error returned from database: invalid input syntax for type integer: "alice:Hunter2""#,
             &big,
         )
         .await;
     }
-    let rows: Vec<(i64, String, Vec<u8>, bool)> = sqlx::query_as(
-        "SELECT seq, payload_type, payload, truncated FROM ingest_dead_letters WHERE device_id = $1 ORDER BY seq",
+    let cols: Vec<(String,)> = sqlx::query_as(
+        "SELECT column_name::text FROM information_schema.columns WHERE table_name = 'ingest_dead_letters' ORDER BY column_name",
+    )
+    .fetch_all(&ts.state.db)
+    .await
+    .unwrap();
+    let cols: Vec<String> = cols.into_iter().map(|c| c.0).collect();
+    assert!(!cols.iter().any(|c| c == "payload"), "{cols:?}");
+    let rows: Vec<(i64, String, String, i64, String)> = sqlx::query_as(
+        "SELECT seq, payload_type, error, payload_bytes, payload_sha256 FROM ingest_dead_letters WHERE device_id = $1 ORDER BY seq",
     )
     .bind(agent.device_id)
     .fetch_all(&ts.state.db)
@@ -316,8 +328,17 @@ async fn dead_letters_and_narrow_sqlstates() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].0, 7);
     assert_eq!(rows[0].1, "alert");
-    assert_eq!(rows[0].2.len(), 64 * 1024);
-    assert!(rows[0].3);
+    assert!(!rows[0].2.contains("Hunter2"), "{}", rows[0].2);
+    assert!(rows[0].2.contains("invalid input syntax"), "{}", rows[0].2);
+    assert_eq!(rows[0].3, 70 * 1024);
+    {
+        use sha2::{Digest, Sha256};
+        assert_eq!(rows[0].4, hex::encode(Sha256::digest(&big)));
+    }
+    assert_eq!(
+        kestrel_server::ingest::redact_db_error(r#"bad "x" and "y"#),
+        r#"bad "<redacted>" and "<redacted>""#
+    );
     let (n,): (i64,) = sqlx::query_as(
         "SELECT count(*) FROM alerts WHERE device_id = $1 AND rule_id = 'TP-SRV-INGEST'",
     )
@@ -326,6 +347,67 @@ async fn dead_letters_and_narrow_sqlstates() {
     .await
     .unwrap();
     assert_eq!(n, 1, "TP-SRV-INGEST at most once per device per hour");
+
+    // NEW-5: per-device row cap (newest 1000 kept) and 30-day retention.
+    let now = kestrel_common::now_ms();
+    sqlx::query(
+        "INSERT INTO ingest_dead_letters (device_id, seq, payload_type, error, payload_bytes, payload_sha256, received_at)          SELECT $1, 100 + g, 'event', 'e', 1, 'h', $2 + g FROM generate_series(1, 1100) g",
+    )
+    .bind(agent.device_id)
+    .bind(now - 60_000)
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+    let other = enrolled(&ts, "DL-PC2").await;
+    sqlx::query(
+        "INSERT INTO ingest_dead_letters (device_id, seq, payload_type, error, payload_bytes, payload_sha256, received_at)          VALUES ($1, 1, 'event', 'e', 1, 'h', $2), ($1, 2, 'event', 'e', 1, 'h', $3)",
+    )
+    .bind(other.device_id)
+    .bind(now - 31 * 86_400_000)
+    .bind(now)
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+    kestrel_server::jobs::retention(&ts.state).await.unwrap();
+    let count = |d: Uuid| {
+        let db = ts.state.db.clone();
+        async move {
+            let (n,): (i64,) =
+                sqlx::query_as("SELECT count(*) FROM ingest_dead_letters WHERE device_id = $1")
+                    .bind(d)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            n
+        }
+    };
+    assert_eq!(count(agent.device_id).await, 1000);
+    let (min_seq,): (i64,) = sqlx::query_as(
+        "SELECT min(seq) FROM ingest_dead_letters WHERE device_id = $1 AND seq >= 100",
+    )
+    .bind(agent.device_id)
+    .fetch_one(&ts.state.db)
+    .await
+    .unwrap();
+    // 1102 rows: seq 7 and 8 (newest) plus the 998 newest generated ones.
+    assert_eq!(min_seq, 203, "the newest rows are kept");
+    assert_eq!(
+        count(other.device_id).await,
+        1,
+        "rows older than 30 days expire"
+    );
+    // The cap also applies on insert.
+    kestrel_server::ingest::dead_letter(
+        &ts.state,
+        agent.device_id,
+        "DL-PC",
+        5000,
+        "event",
+        "x",
+        b"{}",
+    )
+    .await;
+    assert_eq!(count(agent.device_id).await, 1000);
     ts.cleanup().await;
 }
 

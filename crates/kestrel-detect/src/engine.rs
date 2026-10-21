@@ -95,6 +95,10 @@ use std::sync::{Mutex, OnceLock};
 use uuid::Uuid;
 
 const DEDUP_MS: i64 = 10 * 60 * 1000;
+/// NEW-1: a removed autorun that comes back is removed again, at most once
+/// per this interval per object (a re-plant inside it is removed when it ends).
+const AUTORUN_REISSUE_MS: i64 = 30_000;
+const MAX_AUTORUN_REISSUE: usize = 4096;
 const ST02_WINDOW_MS: i64 = 60_000;
 const ST02_MIN_CATEGORIES: usize = 3;
 const ST04_WINDOW_MS: i64 = 300_000;
@@ -776,22 +780,46 @@ struct Hit {
     remediation_only: bool,
 }
 
-/// Guid of the synthetic subject used for persistence / credential changes
-/// whose writer is unknown (`Attribution::None`, pid 0).
-pub(crate) const UNKNOWN_WRITER_GUID: &str = "unattributed-writer";
+/// Guid prefix of the synthetic subject used for persistence / credential
+/// changes whose writer is unknown (`Attribution::None`, pid 0).
+pub(crate) const UNKNOWN_WRITER_PREFIX: &str = "unattributed:";
 
-/// Synthetic alert subject for an unattributed change: pid 0, no image, a
-/// fixed guid. `emit` accepts it only on `remediation_only` hits, so it can
-/// never be killed, suspended or quarantined (the action filter also refuses
-/// pid 0).
-pub(crate) fn unknown_subject(ts: TimestampMs) -> ProcessInfo {
-    let mut p = placeholder(&ProcessGuid(UNKNOWN_WRITER_GUID.into()), 0, ts);
+/// Synthetic alert subject for an unattributed change: pid 0, no image, and
+/// a guid derived from the changed object (`object`: registry key + value,
+/// task / service / WMI name; NEW-4), so engine de-dup state and server
+/// incident grouping never merge unrelated objects. `emit` accepts it only
+/// on `remediation_only` hits, so it can never be killed, suspended or
+/// quarantined (the action filter also refuses pid 0).
+pub(crate) fn unknown_subject(ts: TimestampMs, object: &str) -> ProcessInfo {
+    let id = crate::canary::fnv64(&object.trim().to_ascii_lowercase());
+    let mut p = placeholder(
+        &ProcessGuid(format!("{UNKNOWN_WRITER_PREFIX}{id:016x}")),
+        0,
+        ts,
+    );
     p.cmdline = "(unknown writer: the change could not be attributed to a process)".into();
     p
 }
 
 pub(crate) fn is_unknown_subject(p: &ProcessInfo) -> bool {
-    p.pid == 0 && p.guid.0 == UNKNOWN_WRITER_GUID && p.image.is_empty()
+    p.pid == 0 && p.guid.0.starts_with(UNKNOWN_WRITER_PREFIX) && p.image.is_empty()
+}
+
+/// Stable identity of the object an attributed-kind event changed (registry
+/// key + value, task path, service name, WMI binding), for
+/// [`unknown_subject`].
+pub(crate) fn changed_object(e: &Event) -> String {
+    match &e.data {
+        EventData::RegistrySet {
+            key, value_name, ..
+        } => format!("reg:{key}\\{value_name}"),
+        EventData::TaskRegistered(t) => format!("task:{}", t.name),
+        EventData::ServiceInstalled(s) => format!("svc:{}", s.name),
+        EventData::WmiSubscription(w) => {
+            format!("wmi:{}|{}|{}", w.namespace, w.filter, w.consumer)
+        }
+        _ => format!("event:{}:{}", e.kind().as_str(), e.guid.0),
+    }
 }
 
 impl Hit {
@@ -1090,6 +1118,9 @@ pub(crate) struct EngineState {
     canaries: Mutex<CanaryState>,
     out: Vec<Output>,
     last_evict: TimestampMs,
+    /// NEW-1: last time a `RemoveAutorun` (by fingerprint) was ordered, and a
+    /// re-issue held back by the rate limit (sent from `tick` when due).
+    autorun_reissue: HashMap<String, (TimestampMs, Option<ResponseAction>)>,
     /// RW / CD / PS rule families (see `families`).
     families: Vec<Box<dyn Family>>,
 }
@@ -1138,6 +1169,7 @@ impl EngineState {
             canaries: Mutex::new(CanaryState::default()),
             out: vec![],
             last_evict: 0,
+            autorun_reissue: HashMap::new(),
             families: crate::families::all(),
         };
         s.set_sigma(sigma);
@@ -1354,6 +1386,15 @@ impl EngineState {
             && normalize_path(image) == self.agent_image
     }
 
+    /// Is `p` the running agent? The agent image (full path with drive) and,
+    /// when the host context knows it, the agent's own pid (V-H1: a user can
+    /// start `kestrel-agent.exe` themselves — suspended, then injected — and
+    /// that process must be judged like any other). The image check alone
+    /// is only used when the pid is unknown (tests, simulation).
+    fn is_agent_identity(&self, p: &ProcessInfo) -> bool {
+        self.is_agent_image(&p.image) && (self.host.agent_pid == 0 || p.pid == self.host.agent_pid)
+    }
+
     /// Conservative variant for "never act on our own binary": the exact
     /// agent path, or a drive-less / device path whose rest matches it.
     fn may_be_agent_image(&self, path: &str) -> bool {
@@ -1373,9 +1414,10 @@ impl EngineState {
     ///   the sensor from the agent's own pid + creation-time record), and
     /// * `conhost.exe` (System32) attached to one of those children
     ///
-    /// count; the trust is never inherited further down the tree.
+    /// count; the trust is never inherited further down the tree. With a
+    /// known agent pid, "the agent image itself" means that pid only.
     fn note_agent(&mut self, info: &ProcessInfo, agent_spawned: bool) {
-        if self.is_agent_image(&info.image) {
+        if self.is_agent_identity(info) {
             self.agent_guids.insert(info.guid.clone());
             return;
         }
@@ -1422,7 +1464,7 @@ impl EngineState {
     /// The agent or a recorded agent child (families never take these as
     /// subjects; families have no TP rules).
     pub(crate) fn is_agent_process(&self, p: &ProcessInfo) -> bool {
-        self.is_agent_owned(&p.guid) || self.is_agent_image(&p.image)
+        self.is_agent_owned(&p.guid) || self.is_agent_identity(p)
     }
 
     /// Cached genuine lsass.exe (V-L1 / V-L14), see [`Self::note_lsass`].
@@ -1643,7 +1685,36 @@ impl EngineState {
             .collect()
     }
 
-    fn filter_actions(&self, actions: Vec<ResponseAction>) -> Vec<ResponseAction> {
+    /// V-H4 / V-M5: an engine-proposed quarantine of a process image (any
+    /// process in the table with that image) or of the DLL whose load
+    /// triggered the hit (`ev`) must pass
+    /// [`crate::families::image_quarantinable`] for every such process.
+    /// Paths that are neither (dropped files, attacker-named paths) are
+    /// judged by the rules that proposed them.
+    fn quarantine_image_ok(&self, path: &str, ev: Option<&Event>) -> bool {
+        use crate::families::image_quarantinable;
+        if let Some(e) = ev {
+            if let EventData::ImageLoad {
+                path: dll, signed, ..
+            } = &e.data
+            {
+                if crate::table::image_key(dll) == crate::table::image_key(path) {
+                    let user = self.table.get(&e.guid).and_then(|p| p.user.as_deref());
+                    return image_quarantinable(path, *signed, user);
+                }
+            }
+        }
+        self.table
+            .by_image(path)
+            .iter()
+            .all(|p| image_quarantinable(path, p.signed, p.user.as_deref()))
+    }
+
+    fn filter_actions(
+        &self,
+        actions: Vec<ResponseAction>,
+        ev: Option<&Event>,
+    ) -> Vec<ResponseAction> {
         let mut out: Vec<ResponseAction> = Vec::new();
         for a in actions {
             let keep = match &a {
@@ -1664,6 +1735,7 @@ impl EngineState {
                         && path_class_of(path, self.system_drive).is_user_writable()
                         && !self.may_be_agent_image(path)
                         && !never_quarantine(path)
+                        && self.quarantine_image_ok(path, ev)
                 }
                 ResponseAction::BlockDestination { ip, .. } => parse_ip(ip)
                     .is_some_and(|i| !self.server_ips.contains(&i.to_string()) && !i.is_loopback()),
@@ -1686,6 +1758,41 @@ impl EngineState {
         out
     }
 
+    /// NEW-1: rate limit for a re-issued `RemoveAutorun` of the same object.
+    /// Returns the action when it may go out now; otherwise it is held and
+    /// sent by [`Self::tick`] once the interval has passed, so a re-plant
+    /// inside the interval is still removed.
+    fn autorun_gate(&mut self, a: ResponseAction, now: TimestampMs) -> Option<ResponseAction> {
+        let fp = format!("{a:?}");
+        match self.autorun_reissue.get_mut(&fp) {
+            Some((last, pending)) if now >= *last && now - *last < AUTORUN_REISSUE_MS => {
+                *pending = Some(a);
+                None
+            }
+            Some((last, pending)) => {
+                *last = now;
+                *pending = None;
+                Some(a)
+            }
+            None => {
+                if self.autorun_reissue.len() < MAX_AUTORUN_REISSUE {
+                    self.autorun_reissue.insert(fp, (now, None));
+                }
+                Some(a)
+            }
+        }
+    }
+
+    /// Record a `RemoveAutorun` ordered with an alert (starts its rate-limit interval).
+    fn note_autorun_ordered(&mut self, a: &ResponseAction, now: TimestampMs) {
+        let fp = format!("{a:?}");
+        if let Some(e) = self.autorun_reissue.get_mut(&fp) {
+            *e = (now, None);
+        } else if self.autorun_reissue.len() < MAX_AUTORUN_REISSUE {
+            self.autorun_reissue.insert(fp, (now, None));
+        }
+    }
+
     /// Central emission path (see module docs).
     fn emit(&mut self, ev: &Event, mut hit: Hit) {
         let mode = match hit.mode_override {
@@ -1705,7 +1812,7 @@ impl EngineState {
             .take()
             .or_else(|| self.table.get(&hit.guid).cloned())
             .unwrap_or_else(|| placeholder(&hit.guid, ev.pid, ev.ts));
-        let agent_itself = self.is_agent_guid(&proc_.guid) || self.is_agent_image(&proc_.image);
+        let agent_itself = self.is_agent_guid(&proc_.guid) || self.is_agent_identity(&proc_);
         if !hit.tamper && (proc_.pid == 0 || proc_.pid == 4 || agent_itself) {
             // Remediation-only hits (unattributed registry / task changes,
             // V-H7) carry a synthetic "unknown writer" subject: they may
@@ -1744,19 +1851,57 @@ impl EngineState {
             .states
             .get(&hit.guid)
             .and_then(|s| s.last_fired(&dedup_key));
-        if last.is_some_and(|t| ev.ts >= t && ev.ts - t < DEDUP_MS) && related.is_empty() {
+        let mut deduped =
+            last.is_some_and(|t| ev.ts >= t && ev.ts - t < DEDUP_MS) && related.is_empty();
+        if deduped && protect {
+            // NEW-1: the same autorun hit again after Kestrel ordered its
+            // removal means it was re-planted. Alert once more (at most once
+            // per 10 min per subject and key) instead of staying silent.
+            let replanted = {
+                let rkey = format!("{dedup_key}#replanted");
+                let st = self.state(&hit.guid, ev.ts);
+                let was_removed = hit.actions.iter().any(|a| {
+                    matches!(a, ResponseAction::RemoveAutorun { .. })
+                        && st.ordered.contains(&format!("{a:?}"))
+                });
+                let recent = st
+                    .last_fired(&rkey)
+                    .is_some_and(|t| ev.ts >= t && ev.ts - t < DEDUP_MS);
+                if was_removed && !recent {
+                    st.set_fired(&rkey, ev.ts);
+                    true
+                } else {
+                    false
+                }
+            };
+            if replanted {
+                deduped = false;
+                hit.summary
+                    .push_str(" — the entry came back after Kestrel removed it");
+            }
+        }
+        if deduped {
             // One alert per rule / process / 10 min — but a re-hit in Protect
             // mode that brings *new* response actions (e.g. a new exfil
             // destination after the first kill failed) still executes them.
-            if mode == RuleMode::Protect && !hit.actions.is_empty() {
-                let actions = self.filter_actions(std::mem::take(&mut hit.actions));
-                let fresh: Vec<ResponseAction> = {
+            // A `RemoveAutorun` is idempotent (the agent re-reads the entry
+            // before acting) and is re-issued whenever the entry comes back,
+            // rate-limited per object (NEW-1).
+            if protect && !hit.actions.is_empty() {
+                let actions = self.filter_actions(std::mem::take(&mut hit.actions), Some(ev));
+                let mut fresh = Vec::new();
+                for a in actions {
+                    if matches!(a, ResponseAction::RemoveAutorun { .. }) {
+                        if let Some(a) = self.autorun_gate(a, ev.ts) {
+                            fresh.push(a);
+                        }
+                        continue;
+                    }
                     let st = self.state(&hit.guid, ev.ts);
-                    actions
-                        .into_iter()
-                        .filter(|a| st.ordered.len() < 256 && st.ordered.insert(format!("{a:?}")))
-                        .collect()
-                };
+                    if st.ordered.len() < 256 && st.ordered.insert(format!("{a:?}")) {
+                        fresh.push(a);
+                    }
+                }
                 for a in fresh {
                     if let ResponseAction::KillProcess { guid: Some(g), .. } = &a {
                         self.state(g, ev.ts).killed = true;
@@ -1833,7 +1978,12 @@ impl EngineState {
                     w.kill_at_expiry = true;
                 }
             }
-            actions = self.filter_actions(actions);
+            actions = self.filter_actions(actions, Some(ev));
+            for a in &actions {
+                if matches!(a, ResponseAction::RemoveAutorun { .. }) {
+                    self.note_autorun_ordered(a, ev.ts);
+                }
+            }
             for a in &actions {
                 if let ResponseAction::KillProcess { guid: Some(g), .. } = a {
                     self.state(g, ev.ts).killed = true;
@@ -1963,11 +2113,14 @@ impl EngineState {
                         tree: true,
                     }));
                     if w.quarantine {
-                        self.out
-                            .push(Output::Action(ResponseAction::QuarantineFile {
+                        let q = self.filter_actions(
+                            vec![ResponseAction::QuarantineFile {
                                 path: w.image.clone(),
                                 sha256: w.sha256.clone(),
-                            }));
+                            }],
+                            None,
+                        );
+                        self.out.extend(q.into_iter().map(Output::Action));
                     }
                 } else {
                     self.out.push(Output::Action(ResponseAction::ResumeProcess {
@@ -1979,6 +2132,20 @@ impl EngineState {
                 i += 1;
             }
         }
+        // NEW-1: autorun removals held back by the re-issue rate limit.
+        let due: Vec<ResponseAction> = self
+            .autorun_reissue
+            .values_mut()
+            .filter_map(|(last, pending)| {
+                if pending.is_some() && (now < *last || now - *last >= AUTORUN_REISSUE_MS) {
+                    *last = now;
+                    pending.take()
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.out.extend(due.into_iter().map(Output::Action));
         self.clickfix.retain(|c| c.until > now);
         while self
             .browser_stops
@@ -1997,6 +2164,8 @@ impl EngineState {
         if now - self.last_evict >= EVICT_INTERVAL_MS {
             self.last_evict = now;
             self.debug_ports.retain(|_, t| now - *t < DEBUG_PORT_TTL_MS);
+            self.autorun_reissue
+                .retain(|_, (t, p)| p.is_some() || (now >= *t && now - *t < AUTORUN_REISSUE_MS));
             for g in self.table.evict(now) {
                 self.states.remove(&g);
                 self.agent_guids.remove(&g);
@@ -3182,10 +3351,11 @@ impl EngineState {
         // ST-10 ClickFix RunMRU / TypedPaths
         let runmru = k.contains(r"\explorer\runmru");
         let typed = k.contains(r"\explorer\typedpaths");
-        // ST-10 kills the writer's children: needs the exact writer.
-        if (runmru || typed) && vn != "mrulist" && attr == Attribution::Exact {
+        // ST-10 always alerts; killing the writer's children needs the exact
+        // writer (NEW-2: Explorer's RunMRU writes are rarely `Exact`).
+        if (runmru || typed) && vn != "mrulist" {
             if let Some(bin) = runmru_lolbin(&d) {
-                self.on_clickfix_artifact(e, bin, runmru, data.unwrap_or(""));
+                self.on_clickfix_artifact(e, bin, runmru, data.unwrap_or(""), attr);
             }
         }
         // Tamper via registry
@@ -3233,20 +3403,42 @@ impl EngineState {
         }
     }
 
-    fn on_clickfix_artifact(&mut self, e: &Event, bin: &'static str, runmru: bool, raw: &str) {
-        let writer = self.proc_info(e);
+    fn on_clickfix_artifact(
+        &mut self,
+        e: &Event,
+        bin: &'static str,
+        runmru: bool,
+        raw: &str,
+        attr: Attribution,
+    ) {
+        // A guess landing on the agent (or its children) means "unknown".
+        let attr = if attr == Attribution::Heuristic && self.is_agent_owned(&e.guid) {
+            Attribution::None
+        } else {
+            attr
+        };
+        let exact = attr == Attribution::Exact;
+        let writer = if attr == Attribution::None {
+            unknown_subject(e.ts, &changed_object(e))
+        } else {
+            self.proc_info(e)
+        };
         let protect = self.mode(ST10) == RuleMode::Protect;
-        let children: Vec<ProcessInfo> = self
-            .table
-            .children_of(&writer.guid)
-            .into_iter()
-            .filter(|c| {
-                c.exit_ts.is_none()
-                    && (e.ts - c.start_ts).abs() <= CLICKFIX_WINDOW_MS
-                    && file_name_lower(&c.image).starts_with(bin)
-            })
-            .cloned()
-            .collect();
+        // Only the exact writer's spawned chain is a kill target.
+        let children: Vec<ProcessInfo> = if exact {
+            self.table
+                .children_of(&writer.guid)
+                .into_iter()
+                .filter(|c| {
+                    c.exit_ts.is_none()
+                        && (e.ts - c.start_ts).abs() <= CLICKFIX_WINDOW_MS
+                        && file_name_lower(&c.image).starts_with(bin)
+                })
+                .cloned()
+                .collect()
+        } else {
+            vec![]
+        };
         let surface = if runmru {
             "the Run dialog (RunMRU)"
         } else {
@@ -3260,6 +3452,17 @@ impl EngineState {
             hit.actions.push(kill(c, true));
         }
         hit.extra_evidence.push(e.clone());
+        if !exact {
+            // Alert only: no kills, no pending kill window for the guess.
+            hit.remediation_only = true;
+            hit.summary.push_str(if attr == Attribution::None {
+                " (the writer could not be attributed; alert only)"
+            } else {
+                " (the writer was inferred by correlation; alert only)"
+            });
+            self.emit(e, hit);
+            return;
+        }
         if protect && self.clickfix.len() < 64 {
             self.clickfix.push(ClickfixPending {
                 writer: writer.guid.clone(),
@@ -3396,8 +3599,19 @@ impl EngineState {
     // ------------------------------------------------------------------
 
     fn eval_sigma(&mut self, e: &Event) {
+        // NEW-3: on registry / task / service / WMI events the subject may be
+        // a correlation guess or unknown; such hits never carry actions.
+        let mut attr = if crate::families::carries_attribution(e) {
+            crate::families::attribution_of(e)
+        } else {
+            Attribution::Exact
+        };
         if self.is_agent_owned(&e.guid) {
-            return;
+            if attr != Attribution::Heuristic {
+                return;
+            }
+            // A guess landing on the agent: the writer is unknown (V-H6).
+            attr = Attribution::None;
         }
         let proc_ = self.table.get(&e.guid);
         let parent = proc_.and_then(|p| self.table.parent_of(p));
@@ -3415,7 +3629,11 @@ impl EngineState {
             .collect();
         for i in matched {
             let meta = self.sigma[i].meta.clone();
-            let p = self.proc_info(e);
+            let p = if attr == Attribution::None {
+                unknown_subject(e.ts, &changed_object(e))
+            } else {
+                self.proc_info(e)
+            };
             let mut hit = Hit::new(
                 &meta.id,
                 &p.guid,
@@ -3430,7 +3648,24 @@ impl EngineState {
             hit.name = Some(meta.name.clone());
             hit.author = meta.author.clone();
             hit.attack = Some(meta.attack.clone());
-            hit.actions.push(kill(&p, true));
+            if attr == Attribution::Exact {
+                hit.actions.push(kill(&p, true));
+            } else {
+                // Alert only, whatever the rule's mode (`Off` still silences it).
+                if self.mode(&meta.id) == RuleMode::Off {
+                    continue;
+                }
+                hit.mode_override = Some(RuleMode::Audit);
+                hit.remediation_only = true;
+                hit.summary.push_str(if attr == Attribution::None {
+                    " (writer unknown; alert only)"
+                } else {
+                    " (writer inferred by correlation; alert only)"
+                });
+                if attr == Attribution::None {
+                    hit.process = Some(p.clone());
+                }
+            }
             self.state(&p.guid, e.ts).add_evidence(e);
             self.emit(e, hit);
         }

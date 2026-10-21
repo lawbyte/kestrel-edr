@@ -151,6 +151,13 @@ pub async fn retention(st: &AppState) -> anyhow::Result<()> {
         .bind(now)
         .execute(&st.db)
         .await?;
+    // NEW-5: dead letters (metadata only) expire and are capped per device.
+    let dl = sqlx::query("DELETE FROM ingest_dead_letters WHERE received_at < $1")
+        .bind(now - ingest::DEAD_LETTER_RETENTION_DAYS * 86_400_000)
+        .execute(&st.db)
+        .await?
+        .rows_affected()
+        + ingest::cap_dead_letters(&st.db, None).await?;
     st.oidc_pending.retain(|_, p| now - p.created < 600_000);
     st.login_limiter.prune(15 * 60_000);
     st.login_throttle.prune(now);
@@ -159,6 +166,7 @@ pub async fn retention(st: &AppState) -> anyhow::Result<()> {
         alerts = a,
         incidents = i,
         audit = au,
+        dead_letters = dl,
         "retention applied"
     );
     Ok(())

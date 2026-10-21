@@ -571,15 +571,19 @@ fn canary_backup_and_av_readers_are_ignored() {
     ] {
         let mut e = engine(Policy::default());
         let _ = e.canaries(r"C:\Users\alice");
-        e.process(&start(
-            0,
-            "bk",
-            140,
-            img,
-            "x",
-            None,
-            SignatureState::Valid,
-            Some(signer),
+        // V-M12: exempt readers run as SYSTEM.
+        e.process(&as_user(
+            start(
+                0,
+                "bk",
+                140,
+                img,
+                "x",
+                None,
+                SignatureState::Valid,
+                Some(signer),
+            ),
+            r"NT AUTHORITY\SYSTEM",
         ));
         let decoy = e.armed_canaries()[0].clone();
         let out = e.process(&read(1, "bk", 140, &format!("C:{decoy}\\Login Data")));

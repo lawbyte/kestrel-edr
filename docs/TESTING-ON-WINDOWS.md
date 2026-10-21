@@ -4,6 +4,25 @@ This is a lab plan for checking the Windows layer end to end on real hardware or
 
 > Use a **disposable VM with snapshots**, not a work machine. Several steps kill processes, quarantine files or isolate the host. Use a browser profile with dummy logins only.
 
+## Automated disposable lab (QEMU/KVM in WSL2)
+
+On a Windows 11 *Home* workstation (no Hyper-V Manager, no Windows Sandbox) the lab runs as a QEMU/KVM guest inside the WSL2 Kali distro, which exposes `/dev/kvm`. Everything is scripted in `scripts/vm/`:
+
+| Script | What it does |
+|---|---|
+| `vm.sh install` | Unattended Windows 11 Enterprise **Evaluation** install from `~/kestrel-vm/win11.iso` (90-day eval from the Microsoft Evaluation Center): `autounattend.xml` + `firstboot.ps1` create `labadmin` (SSH key auth, OpenSSH Server) and the standard user `employee` (autologon), then snapshot `clean`. About 20 minutes with KVM. |
+| `vm.sh start \| stop \| snapshot NAME \| revert NAME \| ssh \| put \| get \| screenshot` | Lifecycle, qcow2 snapshots, PowerShell over SSH, file copy, PNG of the console. `stop` shuts Windows down over SSH and waits; a hard kill can leave a disk that no longer boots. |
+| `api.sh login \| get \| post \| put` | Minimal REST client (session cookie + CSRF) for creating enrollment tokens, switching policies, reading alerts and hunting. |
+| `emulate.ps1 -Setup \| -Id <rule> \| -Id all-audit \| -Cleanup` | Benign emulations. Steps that must run as the standard user go through an interactive scheduled task in `employee`'s session; the "stealer" is `labsim.exe` (a copy of PowerShell in `%LOCALAPPDATA%\KestrelLab`). |
+| `emulate-cmd.cmd <rule>` | Command-line emulations (vssadmin, bcdedit, wevtutil, sc, reg, comsvcs on **notepad**). Batch files are not AMSI-scanned, so Defender does not block the lab script itself; it may still block a step, which is worth knowing. |
+
+The guest reaches the server at `10.0.2.2` (QEMU user networking → WSL2 localhost → Docker Desktop), so `KESTREL_PUBLIC_HOSTNAME` must include `10.0.2.2`.
+
+Lab facts learned on real Windows (2026-10-21):
+* Defender flags `kestrel-agent.exe` as `Trojan:Win32/Cryware.B` (heuristic on the credential-store path tables). In the lab, `C:\Program Files\Kestrel` is excluded; production needs signing + a Microsoft false-positive submission (see HANDOFF).
+* A clean Windows has no `VCRUNTIME140.dll`: binaries are linked with the static CRT (`.cargo/config.toml`).
+* OpenSSH sessions have no console: `timeout.exe` refuses to run (use `ping -n`), and `ProtectedData` `CurrentUser` fails (network logon).
+
 ## 0. Lab layout
 
 | Machine | Role |

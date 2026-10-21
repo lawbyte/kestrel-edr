@@ -668,7 +668,15 @@ fn dedup_per_autorun_location() {
         ps_ids(&e.process(&reg(1, "w", 10, &run_key(), "a", cmd))),
         ["PS-02"]
     );
-    assert!(ps_ids(&e.process(&reg(2, "w", 10, &run_key(), "a", cmd))).is_empty());
+    // NEW-1: the same value set again after its removal was ordered is a
+    // re-plant: one more alert, then silence for the de-dup window.
+    let out = e.process(&reg(2, "w", 10, &run_key(), "a", cmd));
+    assert_eq!(ps_ids(&out), ["PS-02"]);
+    assert!(
+        first(&out, "PS-02").alert.summary.contains("came back"),
+        "{}",
+        dump(&out)
+    );
     assert!(
         ps_ids(&e.process(&reg(3, "w", 10, &run_key(), "A", cmd))).is_empty(),
         "case-insensitive"

@@ -17,6 +17,7 @@ fn host() -> HostContext {
         boot_id: "boot-1".into(),
         hostname: "FIN-LAPTOP-07".into(),
         agent_image: r"C:\Program Files\Kestrel\kestrel-agent.exe".into(),
+        agent_pid: 0,
         server_ips: vec!["203.0.113.10".into()],
         system_drive: Some('c'),
     }
@@ -496,10 +497,9 @@ fn cd02_cd08_werfaultsecure_outside_system32() {
         let d = alert_for(&out, rule, "wfs-1");
         assert_eq!(d.alert.severity, Severity::Critical);
         assert_eq!(killed(&d.actions), vec!["wfs-1"], "{rule}");
-        assert_eq!(
-            quarantined(&d.actions),
-            vec![r"C:\Users\Public\wfs\WerFaultSecure.exe"]
-        );
+        // V-H4 / V-M5: a validly signed (Microsoft) copy is never
+        // quarantined, wherever it sits; the process is still killed.
+        assert!(quarantined(&d.actions).is_empty(), "{rule}");
     }
 }
 

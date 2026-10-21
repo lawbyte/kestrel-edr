@@ -29,11 +29,13 @@ impl SensorHandle for Sensors {
         SensorStats {
             etw_ok: c.sessions_ok.load(Ordering::Relaxed),
             // ETW EventsLost + events Kestrel had to drop (internal queue / agent channel full).
-            // + file-activity operations dropped by the aggregator's caps.
+            // + file-activity operations dropped by the aggregator's caps
+            // + persistence records dropped by the enrichment queue (V-M9).
             events_lost: c.etw_events_lost.load(Ordering::Relaxed)
                 + c.raw_dropped.load(Ordering::Relaxed)
                 + c.out_dropped.load(Ordering::Relaxed)
-                + c.file_agg_dropped.load(Ordering::Relaxed),
+                + c.file_agg_dropped.load(Ordering::Relaxed)
+                + c.persist_dropped.load(Ordering::Relaxed),
             buffers_lost: c.etw_buffers_lost.load(Ordering::Relaxed),
             events_total: c.emitted.load(Ordering::Relaxed),
             sysmon_present: c.sysmon_present.load(Ordering::Relaxed),
@@ -350,6 +352,7 @@ fn watchdog(
                 reg_unattributed = counters.reg_unattributed.load(Ordering::Relaxed),
                 reg_watch_keys = counters.reg_watch_keys.load(Ordering::Relaxed),
                 persist_events = counters.persist_events.load(Ordering::Relaxed),
+                persist_dropped = counters.persist_dropped.load(Ordering::Relaxed),
                 "sensor health"
             );
         }

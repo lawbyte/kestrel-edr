@@ -55,8 +55,10 @@ pub const EVENTS_LOST_ALERT_THRESHOLD: u64 = 500;
 pub const TAMPER_DEDUPE_MS: i64 = 3_600_000;
 /// V-L3: policy / rules version catch-up runs at most this often per device.
 pub const CATCH_UP_INTERVAL_MS: i64 = 10 * 60_000;
-/// V-L4: dead-letter payloads are kept up to this many bytes.
-pub const DEAD_LETTER_MAX_BYTES: usize = 64 * 1024;
+/// NEW-5: dead letters (metadata only) older than this are deleted.
+pub const DEAD_LETTER_RETENTION_DAYS: i64 = 30;
+/// NEW-5: each device keeps at most its newest this-many dead letters.
+pub const DEAD_LETTER_MAX_PER_DEVICE: i64 = 1000;
 
 /// Process Hello: upsert device facts and build the initial messages
 /// (Welcome, Policy/Rules when stale, pending commands and messages).
@@ -453,9 +455,37 @@ pub async fn raise_tamper(
     }
 }
 
+/// Database error text with every double-quoted part (where PostgreSQL
+/// echoes the offending input value) redacted, capped at 2000 chars. NEW-5:
+/// nothing of the unscrubbed payload may reach the dead-letter table.
+pub fn redact_db_error(error: &str) -> String {
+    let mut out = String::with_capacity(error.len().min(2000));
+    let mut quoted = false;
+    for c in error.chars() {
+        if c == '"' {
+            if !quoted {
+                out.push_str("\"<redacted>\"");
+            }
+            quoted = !quoted;
+        } else if !quoted && !c.is_control() {
+            out.push(c);
+        }
+        if out.chars().count() >= 2000 {
+            break;
+        }
+    }
+    out
+}
+
 /// V-L4: an agent message the database rejected for its content is acked (it
-/// can never succeed and would block the outbox) but kept as a dead letter,
-/// and `TP-SRV-INGEST` is raised (at most once per device per hour).
+/// can never succeed and would block the outbox) but recorded as a dead
+/// letter, and `TP-SRV-INGEST` is raised (at most once per device per hour).
+///
+/// Re-review NEW-5: the payload was decoded but never went through the
+/// server-side privacy scrub, so only metadata is stored — type, seq, the
+/// (redacted) error, the payload's byte length and SHA-256 — never the
+/// content. Each device keeps its newest [`DEAD_LETTER_MAX_PER_DEVICE`] rows;
+/// rows expire after [`DEAD_LETTER_RETENTION_DAYS`] (see `jobs::retention`).
 pub async fn dead_letter(
     state: &AppState,
     device_id: Uuid,
@@ -465,28 +495,27 @@ pub async fn dead_letter(
     error: &str,
     raw: &[u8],
 ) {
-    let truncated = raw.len() > DEAD_LETTER_MAX_BYTES;
-    let body = &raw[..raw.len().min(DEAD_LETTER_MAX_BYTES)];
-    let error: String = error
-        .chars()
-        .take(2000)
-        .collect::<String>()
-        .replace('\0', "");
+    use sha2::{Digest, Sha256};
+    let error = redact_db_error(error);
+    let sha = hex::encode(Sha256::digest(raw));
+    let payload_type: String = payload_type.chars().take(64).collect();
     if let Err(e) = sqlx::query(
-        "INSERT INTO ingest_dead_letters (device_id, seq, payload_type, error, received_at, payload, truncated) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7)",
+        "INSERT INTO ingest_dead_letters (device_id, seq, payload_type, error, payload_bytes, payload_sha256, received_at)          VALUES ($1,$2,$3,$4,$5,$6,$7)",
     )
     .bind(device_id)
     .bind(i64::try_from(seq).unwrap_or(i64::MAX))
-    .bind(payload_type)
+    .bind(&payload_type)
     .bind(&error)
+    .bind(i64::try_from(raw.len()).unwrap_or(i64::MAX))
+    .bind(&sha)
     .bind(now_ms())
-    .bind(body)
-    .bind(truncated)
     .execute(&state.db)
     .await
     {
         tracing::error!(%device_id, seq, error = %e, "failed to store dead letter");
+    }
+    if let Err(e) = cap_dead_letters(&state.db, Some(device_id)).await {
+        tracing::error!(%device_id, error = %e, "failed to cap dead letters");
     }
     raise_tamper(
         state,
@@ -496,10 +525,23 @@ pub async fn dead_letter(
         Severity::Medium,
         format!(
             "A {payload_type} message from the Kestrel agent on {hostname} (seq {seq}) was rejected by the database because of its content and was dropped. \
-             It is kept in the ingest dead-letter table for review. Repeated rejections can hide alerts: check the agent version and what the endpoint is sending."
+             Its metadata (type, sequence number, size, SHA-256, database error) is kept in the ingest dead-letter table for review; the content is not stored. Repeated rejections can hide alerts: check the agent version and what the endpoint is sending."
         ),
     )
     .await;
+}
+
+/// Keep only the newest [`DEAD_LETTER_MAX_PER_DEVICE`] dead letters of one
+/// device (or of every device). Returns the number of rows deleted.
+pub async fn cap_dead_letters(db: &sqlx::PgPool, device_id: Option<Uuid>) -> sqlx::Result<u64> {
+    Ok(sqlx::query(
+        "DELETE FROM ingest_dead_letters d USING (              SELECT id FROM (                  SELECT id, row_number() OVER (PARTITION BY device_id ORDER BY received_at DESC, id DESC) AS rn                  FROM ingest_dead_letters WHERE $1::uuid IS NULL OR device_id = $1              ) r WHERE r.rn > $2          ) old WHERE d.id = old.id",
+    )
+    .bind(device_id)
+    .bind(DEAD_LETTER_MAX_PER_DEVICE)
+    .execute(db)
+    .await?
+    .rows_affected())
 }
 
 pub async fn heartbeat(state: &AppState, s: &Session, hb: &Heartbeat) -> anyhow::Result<()> {

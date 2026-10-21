@@ -353,6 +353,7 @@ fn audit_only_engine(boot_id: String) -> Result<kestrel_detect::Engine> {
         agent_image: std::env::current_exe()
             .map(|p| p.display().to_string())
             .unwrap_or_default(),
+        agent_pid: std::process::id(),
         server_ips: vec![],
         system_drive: std::env::var("SystemDrive")
             .ok()

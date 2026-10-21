@@ -17,6 +17,7 @@ fn host() -> HostContext {
         boot_id: "boot-1".into(),
         hostname: "FIN-LAPTOP-07".into(),
         agent_image: AGENT.into(),
+        agent_pid: 0,
         server_ips: vec!["203.0.113.10".into()],
         system_drive: Some('c'),
     }

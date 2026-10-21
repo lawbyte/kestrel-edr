@@ -21,6 +21,7 @@ fn fired(replay: &str) -> BTreeSet<String> {
         boot_id: SIM_BOOT_ID.into(),
         hostname: "SIM-WKS-01".into(),
         agent_image: r"C:\Program Files\Kestrel\kestrel-agent.exe".into(),
+        agent_pid: 0,
         server_ips: vec!["192.0.2.1".into()],
         system_drive: Some('c'),
     };

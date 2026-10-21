@@ -214,7 +214,7 @@ impl Translator {
         }
         // Flush whatever is held.
         self.release(i64::MAX);
-        self.flush_reg(i64::MAX, true);
+        self.flush_reg(now_ms(), true);
         self.flush_persist(i64::MAX, true);
     }
 
@@ -1023,7 +1023,7 @@ impl Translator {
             } => {
                 if self.pending_reg.len() >= MAX_PENDING_REG {
                     // Bounded: emit everything pending instead of growing.
-                    self.flush_reg(i64::MAX, true);
+                    self.flush_reg(now, true);
                 }
                 self.pending_reg.push_back(PendingReg {
                     deadline: now + PENDING_WAIT_MS,
@@ -1188,18 +1188,26 @@ impl Translator {
             {
                 continue; // already emitted from ETW with the full key
             }
-            // V-H6: all candidates in the window are ranked; a value-name-only
-            // match is Heuristic. Wait for the deadline before settling for a
-            // heuristic answer (a KeyObject-exact write may still arrive).
+            // V-H6 / NEW-1: all candidates in the window are ranked; one
+            // distinct writer pid is Exact, two or more Heuristic. Always wait
+            // for the deadline: a competing write delivered late must still
+            // be counted, or the first (decoy) write would look unambiguous.
             // V-H7: a re-created / renamed watched key joins exact-only.
-            let settled = self.reg_join.has_exact(&p.key, &p.value_name, p.op, p.ts);
-            if !settled && !force && p.deadline > now {
+            if !force && p.deadline > now {
                 keep.push_back(p);
                 continue;
             }
-            let writer = self
+            let premature = p.deadline > now;
+            let mut writer = self
                 .reg_join
                 .attribute(&p.key, &p.value_name, p.op, p.ts, p.reopened);
+            // A forced flush (pending queue full — attacker-inducible) decides
+            // before the window closed: never Exact then.
+            if premature {
+                if let Some(w) = writer.as_mut() {
+                    w.attribution = Attribution::Heuristic;
+                }
+            }
             let data = match p.op {
                 RegistryOp::Set => p.data.as_deref().and_then(|d| render_sysmon(p.ty, d)),
                 _ => None,

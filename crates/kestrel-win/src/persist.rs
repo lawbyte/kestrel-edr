@@ -497,6 +497,191 @@ impl Dedup {
     }
 }
 
+// ------------------------------------------------------------ enrichment queue
+
+/// Records waiting for enrichment (re-review V-M9: was 512).
+pub const ENRICH_QUEUE_CAP: usize = 4096;
+/// Task names remembered as "seen created" (FIFO-bounded).
+const SEEN_CREATED_CAP: usize = 16_384;
+
+/// Drop priority of a queued record: the lowest is dropped first when the
+/// queue is full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DropRank {
+    /// Delete of a task never seen created (the cheapest flood: register and
+    /// delete junk tasks).
+    UnseenDelete = 0,
+    /// Update of a task never seen created.
+    UnseenUpdate = 1,
+    /// Delete of a task seen created.
+    Delete = 2,
+    /// Task create, update of a task seen created, service install, WMI
+    /// binding: never dropped in favour of the above.
+    Keep = 3,
+}
+
+struct Queued<T> {
+    seq: u64,
+    rank: DropRank,
+    /// Lower-cased task name (tasks only).
+    task_lc: Option<String>,
+    delete: bool,
+    item: T,
+}
+
+/// Bounded, prioritised queue between the persistence callbacks and the
+/// enrichment worker (re-review V-M9). Pure logic (unit-tested on Linux).
+///
+/// * Records that need enrichment (task create / update, service) are
+///   *heavy*; the others (task delete, WMI) need no XML and are *light*.
+/// * [`pop`](Self::pop) serves heavy records first, except that a light
+///   record for the same task name that was queued earlier is released
+///   first, so per-task order (delete → re-create) is preserved.
+/// * When full, the record with the lowest [`DropRank`] (incoming one on a
+///   tie) is dropped and counted in [`dropped`](Self::dropped).
+/// * [`delete_pending`](Self::delete_pending) lets the worker skip the
+///   retry sleep / COM fallback for a task whose delete is already queued.
+pub struct EnrichQueue<T> {
+    cap: usize,
+    next_seq: u64,
+    heavy: VecDeque<Queued<T>>,
+    light: VecDeque<Queued<T>>,
+    seen_created: std::collections::HashSet<String>,
+    seen_order: VecDeque<String>,
+    pub dropped: u64,
+}
+
+impl<T> EnrichQueue<T> {
+    pub fn new(cap: usize) -> Self {
+        Self {
+            cap: cap.max(1),
+            next_seq: 0,
+            heavy: VecDeque::new(),
+            light: VecDeque::new(),
+            seen_created: Default::default(),
+            seen_order: VecDeque::new(),
+            dropped: 0,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.heavy.len() + self.light.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn note_created(&mut self, name_lc: &str) {
+        if self.seen_created.contains(name_lc) {
+            return;
+        }
+        if self.seen_order.len() >= SEEN_CREATED_CAP {
+            if let Some(old) = self.seen_order.pop_front() {
+                self.seen_created.remove(&old);
+            }
+        }
+        self.seen_created.insert(name_lc.to_string());
+        self.seen_order.push_back(name_lc.to_string());
+    }
+
+    /// Queue `item` (described by `record`). Returns the record that was
+    /// dropped to make room (the incoming one or a queued one), if any.
+    pub fn push(&mut self, record: &PersistRecord, item: T) -> Option<T> {
+        let (task_lc, op) = match record {
+            PersistRecord::Task { name, op, .. } => (Some(name.to_ascii_lowercase()), Some(*op)),
+            _ => (None, None),
+        };
+        if let (Some(n), Some(TaskOp::Created)) = (&task_lc, op) {
+            self.note_created(n);
+        }
+        let seen = task_lc
+            .as_deref()
+            .is_some_and(|n| self.seen_created.contains(n));
+        let rank = match op {
+            Some(TaskOp::Deleted) if !seen => DropRank::UnseenDelete,
+            Some(TaskOp::Updated) if !seen => DropRank::UnseenUpdate,
+            Some(TaskOp::Deleted) => DropRank::Delete,
+            _ => DropRank::Keep,
+        };
+        let delete = op == Some(TaskOp::Deleted);
+        let heavy = matches!(
+            record,
+            PersistRecord::Service(_) | PersistRecord::Task { .. }
+        ) && !delete;
+        let mut evicted = None;
+        if self.len() >= self.cap {
+            // Lowest rank in the queue (oldest on a tie).
+            let victim = self
+                .heavy
+                .iter()
+                .enumerate()
+                .map(|(i, q)| (q.rank, q.seq, true, i))
+                .chain(
+                    self.light
+                        .iter()
+                        .enumerate()
+                        .map(|(i, q)| (q.rank, q.seq, false, i)),
+                )
+                .min();
+            self.dropped += 1;
+            match victim {
+                Some((r, _, is_heavy, i)) if r < rank => {
+                    let q = if is_heavy {
+                        self.heavy.remove(i)
+                    } else {
+                        self.light.remove(i)
+                    };
+                    evicted = q.map(|q| q.item);
+                }
+                _ => return Some(item),
+            }
+        }
+        let q = Queued {
+            seq: self.next_seq,
+            rank,
+            task_lc,
+            delete,
+            item,
+        };
+        self.next_seq += 1;
+        if heavy {
+            self.heavy.push_back(q);
+        } else {
+            self.light.push_back(q);
+        }
+        evicted
+    }
+
+    /// Next record to process: heavy first (see the type docs).
+    pub fn pop(&mut self) -> Option<T> {
+        let Some(h) = self.heavy.front() else {
+            return self.light.pop_front().map(|q| q.item);
+        };
+        let (seq, name) = (h.seq, h.task_lc.clone());
+        if let Some(name) = name {
+            if let Some(i) = self
+                .light
+                .iter()
+                .position(|q| q.seq < seq && q.task_lc.as_deref() == Some(name.as_str()))
+            {
+                return self.light.remove(i).map(|q| q.item);
+            }
+        }
+        self.heavy.pop_front().map(|q| q.item)
+    }
+
+    /// Is a delete of `task_name` waiting in the queue?
+    pub fn delete_pending(&self, task_name: &str) -> bool {
+        self.light.iter().any(|q| {
+            q.delete
+                && q.task_lc
+                    .as_deref()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(task_name))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -721,5 +906,118 @@ mod tests {
         // copy only when the hash matches too.
         assert!(!d.seen(&create.dedup_key_with(Some(&benign)), 1_220));
         assert!(d.seen(&create.dedup_key_with(Some(&evil)), 1_215));
+    }
+
+    fn task(name: &str, op: TaskOp) -> PersistRecord {
+        PersistRecord::Task {
+            name: name.to_string(),
+            op,
+            user: None,
+        }
+    }
+
+    fn push(q: &mut EnrichQueue<String>, name: &str, op: TaskOp) -> Option<String> {
+        let tag = format!("{op:?}:{name}");
+        q.push(&task(name, op), tag)
+    }
+
+    /// V-M9: creates are processed first, but per-task order is kept.
+    #[test]
+    fn enrich_queue_serves_creates_first_in_task_order() {
+        let mut q = EnrichQueue::new(16);
+        assert!(push(&mut q, r"\Junk1", TaskOp::Deleted).is_none());
+        assert!(push(&mut q, r"\Evil", TaskOp::Deleted).is_none());
+        assert!(push(&mut q, r"\Junk2", TaskOp::Deleted).is_none());
+        assert!(push(&mut q, r"\EVIL", TaskOp::Created).is_none());
+        q.push(&PersistRecord::Wmi(WmiBinding::default()), "wmi".into());
+        assert!(push(&mut q, r"\Other", TaskOp::Created).is_none());
+        // The earlier delete of \Evil is released before its re-create.
+        assert_eq!(q.pop().unwrap(), r"Deleted:\Evil");
+        assert_eq!(q.pop().unwrap(), r"Created:\EVIL");
+        assert_eq!(q.pop().unwrap(), r"Created:\Other");
+        assert_eq!(q.pop().unwrap(), r"Deleted:\Junk1");
+        assert_eq!(q.pop().unwrap(), r"Deleted:\Junk2");
+        assert_eq!(q.pop().unwrap(), "wmi");
+        assert!(q.pop().is_none() && q.is_empty());
+    }
+
+    /// V-M9: a full queue drops deletes / updates of never-seen tasks before
+    /// creates; a create is never displaced by them.
+    #[test]
+    fn enrich_queue_overflow_policy() {
+        let mut q = EnrichQueue::new(4);
+        assert!(push(&mut q, r"\Seen", TaskOp::Created).is_none());
+        assert!(push(&mut q, r"\J1", TaskOp::Deleted).is_none());
+        assert!(push(&mut q, r"\J2", TaskOp::Updated).is_none());
+        assert!(push(&mut q, r"\Seen", TaskOp::Deleted).is_none());
+        assert_eq!(q.len(), 4);
+        // Full. A create evicts the unseen delete first...
+        assert_eq!(
+            push(&mut q, r"\Evil", TaskOp::Created).as_deref(),
+            Some(r"Deleted:\J1")
+        );
+        // ...then the unseen update...
+        assert_eq!(
+            push(&mut q, r"\Evil2", TaskOp::Created).as_deref(),
+            Some(r"Updated:\J2")
+        );
+        // ...then the delete of a seen task.
+        assert_eq!(
+            push(&mut q, r"\Evil3", TaskOp::Created).as_deref(),
+            Some(r"Deleted:\Seen")
+        );
+        // Only creates left: the incoming one is dropped (never a queued
+        // create), and junk deletes never get in.
+        assert_eq!(
+            push(&mut q, r"\Evil4", TaskOp::Created).as_deref(),
+            Some(r"Created:\Evil4")
+        );
+        assert_eq!(
+            push(&mut q, r"\J3", TaskOp::Deleted).as_deref(),
+            Some(r"Deleted:\J3")
+        );
+        assert_eq!(
+            push(&mut q, r"\J4", TaskOp::Updated).as_deref(),
+            Some(r"Updated:\J4")
+        );
+        assert_eq!(q.dropped, 6);
+        let mut out = Vec::new();
+        while let Some(x) = q.pop() {
+            out.push(x);
+        }
+        assert_eq!(
+            out,
+            [
+                r"Created:\Seen",
+                r"Created:\Evil",
+                r"Created:\Evil2",
+                r"Created:\Evil3"
+            ]
+        );
+        // An update of a task seen created ranks with creates.
+        let mut q = EnrichQueue::new(1);
+        assert!(push(&mut q, r"\Seen", TaskOp::Created).is_none());
+        q.pop();
+        assert!(push(&mut q, r"\Junk", TaskOp::Deleted).is_none());
+        assert_eq!(
+            push(&mut q, r"\SEEN", TaskOp::Updated).as_deref(),
+            Some(r"Deleted:\Junk")
+        );
+    }
+
+    /// V-M9: the worker skips the retry sleep for a task whose delete is
+    /// already queued; deletes themselves need no enrichment.
+    #[test]
+    fn enrich_queue_reports_pending_delete() {
+        let mut q = EnrichQueue::new(8);
+        push(&mut q, r"\Flood\T1", TaskOp::Created);
+        assert!(!q.delete_pending(r"\Flood\T1"));
+        push(&mut q, r"\Flood\T1", TaskOp::Deleted);
+        assert!(q.delete_pending(r"\flood\t1"));
+        assert!(!q.delete_pending(r"\Flood\T2"));
+        assert_eq!(q.pop().unwrap(), r"Created:\Flood\T1");
+        assert!(q.delete_pending(r"\Flood\T1"));
+        assert_eq!(q.pop().unwrap(), r"Deleted:\Flood\T1");
+        assert!(!q.delete_pending(r"\Flood\T1"));
     }
 }

@@ -760,6 +760,8 @@ pub async fn start(
         agent_image: std::env::current_exe()
             .map(|p| p.display().to_string())
             .unwrap_or_default(),
+        // V-H1: only this process (pid + image) is the agent.
+        agent_pid: std::process::id(),
         server_ips,
         system_drive: Some(system_drive),
     };
