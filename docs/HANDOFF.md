@@ -298,3 +298,18 @@ Not yet exercised in the lab: an employee clicking **Allow** on the consent prom
 **Admin notes:**
 * A device needs both an install profile and a policy that allow remote access. Existing policies default to *no remote access*.
 * The generated installer uses the first name in `KESTREL_PUBLIC_HOSTNAME`, which must be an address the endpoints can reach.
+
+## Local "turn protection off" switch: lab results (1.1.4, Windows 11 VM, 2026-10-21)
+
+Driven through `\.\pipe\kestrel-tray` as the standard-user employee, the same way the tray app talks to the agent.
+
+| Check | Result |
+|---|---|
+| Wrong token refused, attempts left reported, TP-06 raised | PASS |
+| Detection only, 15 min: console status `paused` with user, mode and end time; TP-06 Medium | PASS |
+| Stealer emulation while off: ST-02 Critical, ST-01, PS-02 alerted in Audit with no actions | PASS |
+| Turn back on from the tray without a token; TP-06 Info | PASS |
+| Completely off: all Kestrel ETW sessions stopped; IT turns protection back on from the console (`resume_protection`): 5 sessions back | PASS |
+| Pause survives a reboot (same end time); turn back on afterwards | PASS |
+| Lockout after 5 wrong tokens (1 min, countdown), TP-06 High | PASS |
+| Protection really resumed: Protect mode removed the lab harness's hidden PowerShell scheduled task right after turn-on | PASS |
