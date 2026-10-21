@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ColumnDef } from '@tanstack/react-table'
-import { ChevronDown, Layers } from 'lucide-react'
+import { ChevronDown, Layers, ShieldOff } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { toast } from 'sonner'
@@ -15,6 +15,7 @@ import { Dropdown, DropdownContent, DropdownItem, DropdownTrigger, Kbd, Tooltip 
 import { useAuth } from '@/lib/auth'
 import { DATA_CATEGORY_LABEL, SEVERITY_LABEL } from '@/lib/labels'
 import { formatDateTime, timeAgo } from '@/lib/format'
+import { protectionOffNote } from '@/lib/pause'
 import { basename, cn } from '@/lib/utils'
 import { ExclusionDialog } from './exclusions'
 
@@ -62,6 +63,12 @@ export default function Alerts() {
                 <ModeBadge mode={a.mode} />
               </div>
               <p className="mt-0.5 truncate text-xs text-fg-muted">{a.summary}</p>
+              {a.protection_off ? (
+                <p className="mt-0.5 flex items-center gap-1 text-xs text-warn">
+                  <ShieldOff className="size-3.5 shrink-0" aria-hidden />
+                  <span className="truncate">{protectionOffNote(a.protection_off)}</span>
+                </p>
+              ) : null}
               {a.rule_author ? <p className="text-[11px] text-fg-subtle">Rule by {a.rule_author}</p> : null}
             </div>
           )

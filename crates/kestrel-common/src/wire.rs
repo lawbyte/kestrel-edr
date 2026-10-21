@@ -64,6 +64,11 @@ pub enum AgentPayload {
         session_id: Uuid,
         msg: LiveAgentMsg,
     },
+    /// Protection turned off / back on locally, a pause shortened by policy,
+    /// or a wrong uninstall token entered in the tray (never the token).
+    /// Older servers drop it as malformed (and ack it); the state is also in
+    /// `AgentHealth.pause`.
+    Pause(crate::pause::PauseReport),
 }
 
 /// Server → agent.
@@ -141,6 +146,9 @@ pub struct Hello {
     /// agents older than profiles = no remote access).
     #[serde(default)]
     pub remote_ceiling: Option<RemoteAccessProfile>,
+    /// Protection turned off locally (tray switch), if it is now.
+    #[serde(default)]
+    pub pause: Option<crate::pause::PauseState>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -205,6 +213,9 @@ pub struct AgentHealth {
     /// (ceiling ∩ policy).
     #[serde(default)]
     pub remote_effective: Option<RemoteAccessProfile>,
+    /// Protection turned off locally (tray switch); `None` = protection on.
+    #[serde(default)]
+    pub pause: Option<crate::pause::PauseState>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

@@ -349,6 +349,12 @@ impl Inner {
     ) -> (bool, String, Option<String>) {
         let plain = |(ok, d): (bool, String)| (ok, d, None);
         match action {
+            // Handled by the agent core (it owns the pause state).
+            ResponseAction::ResumeProtection => (
+                false,
+                "resume_protection is handled by the agent, not the platform".into(),
+                None,
+            ),
             ResponseAction::KillProcess { pid, guid, tree } => plain(respond::kill(
                 *pid,
                 self.guid_expect(guid),

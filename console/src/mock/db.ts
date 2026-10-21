@@ -86,6 +86,14 @@ export class MockDb {
     // FIN-LT-014 has LSA protection in effect (it refused the dumper in the CD-06 scenario).
     const ppl = this.devices.find((d) => d.hostname === 'FIN-LT-014')
     if (ppl?.health.hardening) Object.assign(ppl.health.hardening, { lsa_protection: true, lsa_protection_pending_reboot: false })
+    // MKT-LT-008: the user turned protection off (detection only) for 4 hours with the uninstall token.
+    const mkt = this.devices.find((d) => d.hostname === 'MKT-LT-008')
+    if (mkt) {
+      const pause = { mode: 'detection_only' as const, since_ms: NOW - 2 * HOUR, until_ms: NOW + 2 * HOUR, by_user: mkt.logged_on_user ?? `${mkt.hostname}\\Administrator` }
+      mkt.health.pause = pause
+      mkt.pause = pause
+      mkt.last_seen = NOW - 20_000
+    }
     for (const r of [...BUILTIN_RULES, ...FAMILY_RULES]) this.rules.set(r.id, r)
     for (const r of [...CUSTOM_RULES, ...PACK_RULES]) {
       const { source, enabled_custom, ...meta } = r
@@ -183,6 +191,13 @@ export class MockDb {
 
   refreshDevices() {
     for (const d of this.devices) {
+      // A timed pause ends by itself (the agent reports it; here it just expires).
+      const p = d.health.pause
+      if (p && p.until_ms != null && p.until_ms <= Date.now()) {
+        d.health.pause = null
+        this.log(null, 'device.protection_on', d.hostname, { hostname: d.hostname, mode: p.mode, since_ms: p.since_ms, until_ms: p.until_ms, by_user: '', reason: 'expired' })
+      }
+      d.pause = d.health.pause ?? null
       d.status = computeStatus(d)
       d.open_incidents = this.incidents.filter((i) => i.device_id === d.id && (i.status === 'open' || i.status === 'in_progress')).length
     }
@@ -360,6 +375,15 @@ export class MockDb {
       [NOW - 2 * HOUR + 21 * MIN, DANIEL, 'response.request', 'SAL-LT-022', { action: 'collect_triage' }],
       [NOW - 25 * MIN, PRIYA, 'auth.login', PRIYA.email, { method: 'oidc' }],
     ]
+    const mkt = this.devices.find((d) => d.hostname === 'MKT-LT-008')
+    if (mkt?.health.pause) {
+      const p = mkt.health.pause
+      evs.push(
+        [p.since_ms - 3 * MIN, null, 'device.protection_off_denied', mkt.hostname, { hostname: mkt.hostname, by_user: p.by_user, failures: 1, locked_until_ms: null }],
+        [p.since_ms, null, 'device.protection_off', mkt.hostname, { hostname: mkt.hostname, mode: p.mode, since_ms: p.since_ms, until_ms: p.until_ms, by_user: p.by_user }],
+      )
+      evs.sort((x, y) => x[0] - y[0])
+    }
     for (const [ts, a, act, tgt, det] of evs) this.log(a, act, tgt, det, ts)
   }
 

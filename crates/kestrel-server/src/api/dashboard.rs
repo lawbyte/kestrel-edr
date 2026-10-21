@@ -141,7 +141,7 @@ pub async fn get_dashboard(State(st): State<AppState>, p: Principal) -> ApiResul
     .await?;
 
     Ok(Json(json!({
-        "devices": {"total": total, "online": get("online"), "offline": get("offline"), "isolated": get("isolated"), "degraded": get("degraded")},
+        "devices": {"total": total, "online": get("online"), "offline": get("offline"), "isolated": get("isolated"), "degraded": get("degraded"), "paused": get("paused")},
         "incidents": {"open": open, "critical": critical, "high": high, "mttr_hours_30d": mttr.map(|m| (m * 10.0).round() / 10.0)},
         "alerts_24h": alerts_24h,
         "blocked_24h": blocked_24h,

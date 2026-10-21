@@ -18,12 +18,14 @@ import { HARDENING_CONTROLS, HARDENING_INFO, RULE_CATEGORY_ORDER } from '@/lib/l
 import { cn } from '@/lib/utils'
 import { normaliseProfile, validateProfile } from '@/lib/remote-profile'
 import { RemoteProfileEditor } from '@/components/remote/profile-editor'
+import { LocalPauseEditor } from '@/components/local-pause-editor'
 
 const SECTIONS = [
   { id: 'rules', label: 'Detection rules' },
   { id: 'suspend', label: 'Suspend on suspicion' },
   { id: 'containment', label: 'Isolation & indicator blocks' },
   { id: 'sensors', label: 'Sensors' },
+  { id: 'local-pause', label: 'Local turn-off' },
   { id: 'hardening', label: 'Windows hardening' },
   { id: 'privacy', label: 'Privacy' },
   { id: 'telemetry', label: 'Telemetry' },
@@ -169,6 +171,10 @@ function Editor({ original, catalog }: { original: Policy; catalog: RuleRow[] })
           </Section>
 
           <SensorsSection value={p.sensors ?? DEFAULT_SENSORS} onChange={(v) => set('sensors', v)} readOnly={readOnly} />
+
+          <Section id="local-pause" title="Local turn-off" description="Lets an employee or on-site technician turn protection off for a while from the Kestrel tray app, for example to install a tool that Kestrel blocks. It needs the device’s uninstall token and is always reported to you.">
+            <LocalPauseEditor value={p.local_pause} onChange={(v) => set('local_pause', v)} readOnly={readOnly} />
+          </Section>
 
           <HardeningSection p={p} onChange={(h) => set('hardening', h)} readOnly={readOnly} />
 

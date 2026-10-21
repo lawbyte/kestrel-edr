@@ -140,6 +140,7 @@ It never overwrites existing files, and it never follows junctions or symbolic l
   * TP-03: AMSI provider or FeatureBits changes.
   * TP-04: changes to the service registry key or agent files.
   * TP-05: event loss.
+  * TP-06: protection turned off locally with the tray switch (uninstall token), turned back on, or a wrong token entered. Raised by the agent itself (`crates/kestrel-agent/src/pause.rs`), see `docs/contracts.md` "Local turn-off".
 
   An administrator can still defeat a user-mode agent. These rules make that loud and visible; they cannot make it impossible.
 * **Response safety.**

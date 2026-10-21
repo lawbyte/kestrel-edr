@@ -84,6 +84,8 @@ describe("StatusTab", () => {
     hostname: "PC-1",
     last_check: null,
     remote_session: session,
+    pause: null,
+    local_pause: null,
   };
   const props = { kind: "protected" as const, recentBlocks: 0, check: { phase: "idle" as const }, onQuickCheck: noop, onDismissCheck: noop, onGo: noop };
 

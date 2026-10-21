@@ -106,6 +106,9 @@ pub enum ResponseAction {
         #[serde(default)]
         restore_data: Option<String>,
     },
+    /// Turn protection back on after it was turned off locally with the
+    /// tray switch. Handled by the agent itself (no-op when not off).
+    ResumeProtection,
 }
 
 /// Persistence mechanism targeted by [`ResponseAction::RemoveAutorun`].
@@ -142,6 +145,7 @@ impl ResponseAction {
             ResponseAction::Scan { .. } => "scan",
             ResponseAction::CollectTriage => "collect_triage",
             ResponseAction::RemoveAutorun { .. } => "remove_autorun",
+            ResponseAction::ResumeProtection => "resume_protection",
         }
     }
 
@@ -164,7 +168,8 @@ impl ResponseAction {
             | ResponseAction::ReleaseHost => "response.network",
             ResponseAction::ApplyHardening
             | ResponseAction::Scan { .. }
-            | ResponseAction::CollectTriage => "response.collect",
+            | ResponseAction::CollectTriage
+            | ResponseAction::ResumeProtection => "response.collect",
         }
     }
 }

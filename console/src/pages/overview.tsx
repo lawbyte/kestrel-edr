@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip as RTooltip, XAxis, YAxis } from 'recharts'
 import { api, qk } from '@/api/endpoints'
-import type { Dashboard, HardeningControl } from '@/api/types'
+import type { Dashboard, DeviceStatus, HardeningControl } from '@/api/types'
 import { DeviceStatusBadge, IncidentStatusBadge, PriorityScore, SeverityBadge, SeverityIcon } from '@/components/badges'
 import { Card, EmptyState, ErrorState, PageHeader } from '@/components/common'
 import { Skeleton, Tooltip } from '@/components/ui/misc'
@@ -81,6 +81,7 @@ function OverviewBody({ d }: { d: Dashboard }) {
             <MiniStat to="/devices?status=offline" label="offline" n={d.devices.offline} status="offline" />
             <MiniStat to="/devices?status=degraded" label="degraded" n={d.devices.degraded} status="degraded" />
             <MiniStat to="/devices?status=isolated" label="isolated" n={d.devices.isolated} status="isolated" />
+            {d.devices.paused ? <MiniStat to="/devices?status=paused" label="protection off" n={d.devices.paused} status="paused" /> : null}
           </div>
         </Kpi>
         <Kpi label="Open incidents" to="/incidents" value={d.incidents.open}>
@@ -200,7 +201,7 @@ function Kpi({ label, value, unit, to, children }: { label: string; value: numbe
   )
 }
 
-function MiniStat({ to, label, n, status }: { to: string; label: string; n: number; status: 'online' | 'offline' | 'degraded' | 'isolated' }) {
+function MiniStat({ to, label, n, status }: { to: string; label: string; n: number; status: DeviceStatus }) {
   return (
     <Link to={to} className={cn('inline-flex items-center gap-1 hover:underline', n === 0 && 'opacity-60')} aria-label={`${n} ${label}`}>
       <DeviceStatusBadge status={status} className="text-xs [&>span:last-child]:hidden" />

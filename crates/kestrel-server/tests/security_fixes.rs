@@ -99,6 +99,7 @@ fn alert(rule: &str) -> Alert {
         data_at_risk: vec![DataCategory::BrowserPasswords],
         evidence: vec![],
         actions: vec![],
+        protection_off: None,
     }
 }
 

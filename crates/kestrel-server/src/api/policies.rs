@@ -160,6 +160,12 @@ pub async fn replace(
     pol.remote_access
         .validate()
         .map_err(|e| ApiError::bad_request(format!("invalid remote_access: {e}")))?;
+    if !(1..=kestrel_common::pause::PAUSE_MAX_MINUTES_CAP).contains(&pol.local_pause.max_minutes) {
+        return Err(ApiError::bad_request(format!(
+            "local_pause.max_minutes must be between 1 and {}",
+            kestrel_common::pause::PAUSE_MAX_MINUTES_CAP
+        )));
+    }
     // Exclusions and IOCs are managed through /exclusions and /iocs.
     pol.exclusions.clear();
     pol.iocs.clear();

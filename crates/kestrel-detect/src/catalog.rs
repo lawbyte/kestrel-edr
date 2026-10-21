@@ -1,7 +1,7 @@
-//! Metadata for the builtin rules (ST-01…ST-16 stealer rules, TP-01…TP-05
+//! Metadata for the builtin rules (ST-01…ST-16 stealer rules, TP-01…TP-06
 //! tamper rules) and the IOC pseudo-rules. Logic lives in `engine.rs`.
 
-use kestrel_common::{RuleCategory, RuleKind, RuleMeta, RuleMode, Severity};
+use kestrel_common::{RuleCategory, RuleKind, RuleMeta, RuleMode, Severity, TimestampMs};
 
 pub const ST01: &str = "ST-01";
 pub const ST02: &str = "ST-02";
@@ -24,6 +24,7 @@ pub const TP02: &str = "TP-02";
 pub const TP03: &str = "TP-03";
 pub const TP04: &str = "TP-04";
 pub const TP05: &str = "TP-05";
+pub const TP06: &str = "TP-06";
 
 /// IOC pseudo-rule ids (alerts produced by policy IOCs).
 pub const IOC_HASH: &str = "IOC-HASH";
@@ -219,7 +220,171 @@ pub fn builtin_catalog() -> Vec<RuleMeta> {
             "Alert only",
             &[],
             &["Extreme system load"]),
+        meta(TP06, "Protection turned off on the device",
+            "Protection was turned off locally with the tray switch and the device's uninstall token (detection only: no automatic response and hardening not enforced; completely off: sensors stopped). Also raised, at lower severity, when protection comes back on and when a wrong uninstall token is entered. Raised by the agent itself, never by an event; it cannot be excluded.",
+            Tamper, Medium, &["T1562.001"], false,
+            "Alert only (medium for detection only, high for completely off); IT can turn protection back on from the device page",
+            &["https://attack.mitre.org/techniques/T1562/001/"],
+            &["A technician turning protection off on purpose to install or troubleshoot software (check who, when and for how long)"]),
     ]
+}
+
+/// What the local protection switch did (input of [`protection_alert`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProtectionSwitch {
+    /// Protection turned off (`state` = the new pause).
+    Off(kestrel_common::PauseState),
+    /// Protection back on (`state` = the pause that ended).
+    On {
+        state: kestrel_common::PauseState,
+        reason: kestrel_common::pause::PauseEndReason,
+    },
+    /// A policy change shortened the pause.
+    Clamped(kestrel_common::PauseState),
+    /// The agent (re)started with protection still turned off.
+    StillOff(kestrel_common::PauseState),
+    /// A wrong uninstall token was entered.
+    WrongToken {
+        failures: u32,
+        locked_until_ms: Option<TimestampMs>,
+        by_user: String,
+    },
+}
+
+/// "45 minutes", "2 hours", "1 minute" (rounded up to whole minutes).
+fn minutes_phrase(ms: i64) -> String {
+    let mins = (ms.max(0) + 59_999) / 60_000;
+    if mins >= 60 && mins % 60 == 0 {
+        let h = mins / 60;
+        format!("{h} hour{}", if h == 1 { "" } else { "s" })
+    } else {
+        format!("{mins} minute{}", if mins == 1 { "" } else { "s" })
+    }
+}
+
+fn duration_phrase(s: &kestrel_common::PauseState) -> String {
+    match s.until_ms {
+        None => "until it is turned back on".into(),
+        Some(u) => format!("for {}", minutes_phrase(u - s.since_ms)),
+    }
+}
+
+/// `TP-06` alert for a change of the local protection switch. Mode Audit,
+/// never carries actions. `subject` is the acting process (the agent, with
+/// the tray user as `user`). Severity: off = medium (detection only) /
+/// high (completely off); wrong token = medium, high when a lockout starts;
+/// back on and shortened = info.
+pub fn protection_alert(
+    sw: &ProtectionSwitch,
+    subject: kestrel_common::ProcessInfo,
+    now: TimestampMs,
+) -> kestrel_common::Alert {
+    use kestrel_common::pause::PauseEndReason;
+    use kestrel_common::PauseMode;
+    let by = |u: &str| {
+        if u.is_empty() {
+            String::new()
+        } else {
+            format!(" by {u}")
+        }
+    };
+    let (severity, summary, off) = match sw {
+        ProtectionSwitch::Off(s) => (
+            if s.mode == PauseMode::Full {
+                Severity::High
+            } else {
+                Severity::Medium
+            },
+            format!(
+                "Protection was turned off on this PC{} ({}) {} with the uninstall token in the tray app",
+                by(&s.by_user),
+                s.mode.label(),
+                duration_phrase(s)
+            ),
+            Some(s.mode),
+        ),
+        ProtectionSwitch::On { state, reason } => (
+            Severity::Info,
+            format!(
+                "Protection was turned back on ({}); it had been turned off{} ({}) for {}",
+                match reason {
+                    PauseEndReason::Manual => "from the tray app",
+                    PauseEndReason::Expired => "the chosen time ran out",
+                    PauseEndReason::Console => "by IT from the console",
+                    PauseEndReason::Policy => "a policy change no longer allows the turn-off",
+                },
+                by(&state.by_user),
+                state.mode.label(),
+                minutes_phrase(now - state.since_ms)
+            ),
+            None,
+        ),
+        ProtectionSwitch::StillOff(s) => (
+            if s.mode == PauseMode::Full {
+                Severity::High
+            } else {
+                Severity::Medium
+            },
+            format!(
+                "The Kestrel agent started with protection still turned off on this PC ({}, turned off{} {})",
+                s.mode.label(),
+                by(&s.by_user),
+                match s.until_ms {
+                    None => "until it is turned back on".to_string(),
+                    Some(u) => format!("until {} from now", minutes_phrase(u - now)),
+                }
+            ),
+            Some(s.mode),
+        ),
+        ProtectionSwitch::Clamped(s) => (
+            Severity::Info,
+            format!(
+                "A policy change shortened the turn-off of protection on this PC ({}); it now turns back on automatically in {}",
+                s.mode.label(),
+                minutes_phrase(s.until_ms.unwrap_or(now) - now)
+            ),
+            Some(s.mode),
+        ),
+        ProtectionSwitch::WrongToken {
+            failures,
+            locked_until_ms,
+            by_user,
+        } => (
+            if locked_until_ms.is_some() {
+                Severity::High
+            } else {
+                Severity::Medium
+            },
+            format!(
+                "A wrong uninstall token was entered{} in the tray app to turn protection off ({failures} failed attempt{} in a row){}",
+                by(by_user),
+                if *failures == 1 { "" } else { "s" },
+                if locked_until_ms.is_some() {
+                    "; the switch is locked for a while"
+                } else {
+                    ""
+                }
+            ),
+            None,
+        ),
+    };
+    kestrel_common::Alert {
+        id: uuid::Uuid::now_v7(),
+        ts: now,
+        rule_id: TP06.into(),
+        rule_name: "Protection turned off on the device".into(),
+        rule_author: None,
+        severity,
+        attack: vec!["T1562.001".into()],
+        mode: RuleMode::Audit,
+        summary,
+        process: subject,
+        ancestry: vec![],
+        data_at_risk: vec![],
+        evidence: vec![],
+        actions: vec![],
+        protection_off: off,
+    }
 }
 
 /// RuleMeta for an IOC pseudo-rule (not part of the catalog).
@@ -241,12 +406,12 @@ mod tests {
     #[test]
     fn catalog_shape() {
         let c = builtin_catalog();
-        assert_eq!(c.len(), 21);
+        assert_eq!(c.len(), 22);
         let ids: Vec<_> = c.iter().map(|m| m.id.as_str()).collect();
         for i in 1..=16 {
             assert!(ids.contains(&format!("ST-{i:02}").as_str()));
         }
-        for i in 1..=5 {
+        for i in 1..=6 {
             assert!(ids.contains(&format!("TP-{i:02}").as_str()));
         }
         for m in &c {
@@ -263,7 +428,86 @@ mod tests {
             assert!(!m.attack.is_empty());
             assert!(!m.protect_action.is_empty());
         }
+        let tp06 = c.iter().find(|m| m.id == "TP-06").unwrap();
+        assert_eq!(tp06.default_mode, RuleMode::Audit);
+        assert_eq!(tp06.category, RuleCategory::Tamper);
         let st10 = c.iter().find(|m| m.id == "ST-10").unwrap();
         assert!(st10.attack.contains(&"T1204.004".to_string()));
+    }
+
+    fn subject() -> kestrel_common::ProcessInfo {
+        kestrel_common::ProcessInfo {
+            guid: kestrel_common::ProcessGuid("kestrel-agent:pause".into()),
+            pid: 1,
+            ppid: 0,
+            parent_guid: None,
+            image: r"C:\Program Files\Kestrel\kestrel-agent.exe".into(),
+            cmdline: String::new(),
+            user: Some(r"W\employee".into()),
+            integrity: None,
+            start_ts: 0,
+            exit_ts: None,
+            signer: None,
+            signed: kestrel_common::SignatureState::Unknown,
+            sha256: None,
+            motw_zone: None,
+            file_size: None,
+            path_class: kestrel_common::PathClass::ProgramFiles,
+        }
+    }
+
+    #[test]
+    fn tp06_alerts() {
+        use kestrel_common::pause::PauseEndReason;
+        use kestrel_common::{PauseMode, PauseState};
+        let s = PauseState {
+            mode: PauseMode::DetectionOnly,
+            since_ms: 0,
+            until_ms: Some(3_600_000),
+            by_user: r"W\employee".into(),
+        };
+        let a = protection_alert(&ProtectionSwitch::Off(s.clone()), subject(), 0);
+        assert_eq!(a.rule_id, "TP-06");
+        assert_eq!(a.mode, RuleMode::Audit);
+        assert_eq!(a.severity, Severity::Medium);
+        assert!(a.actions.is_empty());
+        assert_eq!(a.protection_off, Some(PauseMode::DetectionOnly));
+        assert!(a.summary.contains("detection only"), "{}", a.summary);
+        assert!(a.summary.contains("for 1 hour"), "{}", a.summary);
+        let full = PauseState {
+            mode: PauseMode::Full,
+            until_ms: None,
+            ..s.clone()
+        };
+        let a = protection_alert(&ProtectionSwitch::Off(full), subject(), 0);
+        assert_eq!(a.severity, Severity::High);
+        assert!(a.summary.contains("until it is turned back on"));
+        let a = protection_alert(
+            &ProtectionSwitch::On {
+                state: s.clone(),
+                reason: PauseEndReason::Console,
+            },
+            subject(),
+            30 * 60_000,
+        );
+        assert_eq!(a.severity, Severity::Info);
+        assert_eq!(a.protection_off, None);
+        assert!(
+            a.summary.contains("by IT") && a.summary.contains("30 minutes"),
+            "{}",
+            a.summary
+        );
+        let a = protection_alert(
+            &ProtectionSwitch::WrongToken {
+                failures: 5,
+                locked_until_ms: Some(60_000),
+                by_user: String::new(),
+            },
+            subject(),
+            0,
+        );
+        assert_eq!(a.severity, Severity::High);
+        assert!(a.summary.contains("5 failed attempts"));
+        assert!(!a.summary.contains("kun_"));
     }
 }

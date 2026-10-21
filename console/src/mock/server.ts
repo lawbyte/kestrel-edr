@@ -21,14 +21,15 @@ import { actionPrivilege, HARDENING_CONTROLS, HARDENING_INFO, ROLE_PRIVILEGES, S
 import { evaluate, parseHunt } from '@/lib/hunt'
 import { toHuntRecord } from '@/lib/events'
 import { MockDb } from './db'
-import { DAY, HOUR, MIN, NOW, POLICY_UPDATED, inventoryFor, policySummary } from './fleet'
+import { DAY, HOUR, MIN, NOW, POLICY_UPDATED, computeStatus, inventoryFor, policySummary } from './fleet'
 import { liveIncident } from './scenarios'
 import { fullAlerts, toAlertRow } from './story'
 import { hexId, int, uuid } from './rng'
 import { MockUpdates, UpdateError, seedUpdates } from './updates'
 import { parseManifest } from '@/lib/updates'
+import { reconcilePause } from '@/lib/pause'
 import type { GroupUpdateRing, UpdateRing } from '@/api/types'
-import { GROUP_UPDATE_RINGS } from '@/api/types'
+import { GROUP_UPDATE_RINGS, LOCAL_PAUSE_DEFAULTS, PAUSE_MAX_MINUTES_CAP } from '@/api/types'
 import type { EnrollmentToken, FileUploadResult, RemoteAccessProfile, RemoteErrorCode } from '@/api/types'
 import { ApiError, apiErrorFrom } from '@/api/client'
 import { blockedPrefix, fileOpDenied, hoursContain, isNoneProfile, normaliseProfile, presetOf, profileSummary, validateProfile, type FileOpClass } from '@/lib/remote-profile'
@@ -246,6 +247,7 @@ route('GET', '/dashboard', (): Dashboard => {
       offline: devs.filter((d) => d.status === 'offline').length,
       isolated: devs.filter((d) => d.status === 'isolated').length,
       degraded: devs.filter((d) => d.status === 'degraded').length,
+      paused: devs.filter((d) => d.status === 'paused').length,
     },
     incidents: { open: open.length, critical: open.filter((i) => i.severity === 'critical').length, high: open.filter((i) => i.severity === 'high').length, mttr_hours_30d: Math.round(mttr * 10) / 10 },
     alerts_24h: db.alerts.filter((a) => a.ts > now - DAY).length,
@@ -479,6 +481,20 @@ function issueAction(d: Device, action: ResponseAction, u: User, comment: string
         case 'scan':
           row.result_detail = `YARA-X scan: ${int(20, 400)} files, 0 matches`
           break
+        case 'resume_protection': {
+          // Mirrors the agent: ends the local pause (no-op when not paused) and reports it.
+          const p = d.health.pause
+          if (!p) {
+            row.result_detail = 'Protection was already on'
+            break
+          }
+          d.health.pause = null
+          d.pause = null
+          d.status = computeStatus(d)
+          row.result_detail = 'Protection turned back on'
+          db.log(null, 'device.protection_on', d.hostname, { hostname: d.hostname, mode: p.mode, since_ms: p.since_ms, until_ms: p.until_ms, by_user: '', reason: 'console' })
+          break
+        }
         case 'apply_hardening':
           row.result_detail = 'Hardening re-applied: all desired controls in effect'
           for (const k of Object.keys(d.health.hardening ?? {})) {
@@ -791,10 +807,23 @@ route('PUT', '/policies/:id', ({ params, body }) => {
     throw bad('Isolation auto-release must be between 0 (never) and 720 hours')
   if (!Number.isInteger(p.ioc_block_ttl_secs) || p.ioc_block_ttl_secs < 60 || p.ioc_block_ttl_secs > 30 * 86400)
     throw bad('Indicator block lifetime must be between 1 minute and 30 days')
+  const lp = p.local_pause
+  if (lp && (!Number.isInteger(lp.max_minutes) || lp.max_minutes < 1 || lp.max_minutes > PAUSE_MAX_MINUTES_CAP)) throw bad('Longest turn-off must be between 1 minute and 7 days')
   const next = { ...p, id: params.id, version: db.policies[i].version + 1 }
   db.policies[i] = next
   POLICY_UPDATED[next.id] = Date.now()
   for (const d of db.devices) if (d.policy_id === next.id) d.policy_name = next.name
+  // Mirrors the agent applying the new policy to an active local pause.
+  for (const d of db.devices) {
+    const cur = d.health.pause
+    if (d.policy_id !== next.id || !cur) continue
+    const now = Date.now()
+    const r = reconcilePause({ ...LOCAL_PAUSE_DEFAULTS, ...(next.local_pause ?? {}) }, cur, now)
+    d.health.pause = r
+    d.pause = r
+    if (!r) db.log(null, 'device.protection_on', d.hostname, { hostname: d.hostname, mode: cur.mode, since_ms: cur.since_ms, until_ms: cur.until_ms, by_user: '', reason: 'policy' })
+    else if (r.until_ms !== cur.until_ms) db.log(null, 'device.protection_off_clamped', d.hostname, { hostname: d.hostname, mode: r.mode, since_ms: r.since_ms, until_ms: r.until_ms, by_user: r.by_user })
+  }
   db.log(u, 'policy.update', next.name, { version: next.version })
   return next
 })

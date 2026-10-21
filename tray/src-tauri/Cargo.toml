@@ -1,6 +1,6 @@
 [package]
 name = "kestrel-tray"
-version = "1.1.3"
+version = "1.1.4"
 description = "Kestrel EDR employee tray app"
 authors = ["Azka (lawbyte)"]
 license = "Apache-2.0"
@@ -34,7 +34,7 @@ anyhow = "1"
 log = "0.4"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Wdk_System_SystemServices", "Win32_Foundation", "Win32_System_Pipes", "Win32_System_SystemInformation"] }
+windows-sys = { version = "0.61", features = ["Wdk_System_SystemServices", "Win32_Foundation", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [dev-dependencies]
 # Contract test: the mirrored protocol types must match the agent's exactly.

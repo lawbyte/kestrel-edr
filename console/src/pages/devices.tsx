@@ -31,8 +31,8 @@ export default function Devices() {
   const latest = useMemo(() => (list.data?.items ?? []).map((d) => d.agent_version).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))[0], [list.data])
   const items = (list.data?.items ?? []).filter((d) => !groups.length || groups.includes(d.group_id ?? ''))
   const counts = useMemo(() => {
-    const c: Record<DeviceStatus, number> = { online: 0, offline: 0, degraded: 0, isolated: 0 }
-    for (const d of list.data?.items ?? []) c[d.status]++
+    const c: Record<DeviceStatus, number> = { online: 0, offline: 0, degraded: 0, isolated: 0, paused: 0 }
+    for (const d of list.data?.items ?? []) c[d.status] = (c[d.status] ?? 0) + 1
     return c
   }, [list.data])
 
@@ -115,7 +115,7 @@ export default function Devices() {
     <div className="flex h-full flex-col">
       <PageHeader
         title="Devices"
-        description={list.data ? `${list.data.total} enrolled · ${counts.online} online, ${counts.offline} offline, ${counts.degraded} degraded, ${counts.isolated} isolated` : 'Enrolled Windows endpoints'}
+        description={list.data ? `${list.data.total} enrolled · ${counts.online} online, ${counts.offline} offline, ${counts.degraded} degraded, ${counts.isolated} isolated${counts.paused ? `, ${counts.paused} with protection off` : ''}` : 'Enrolled Windows endpoints'}
         actions={
           <>
             <Button size="sm" onClick={() => downloadText('kestrel-devices.csv', toCsv(items.map((d) => ({ hostname: d.hostname, status: d.status, user: d.logged_on_user, os: `${d.os_name} ${d.os_build}`, agent: d.agent_version, last_seen: new Date(d.last_seen).toISOString(), group: d.group_name, policy: d.policy_name, open_incidents: d.open_incidents, ip: d.ip_addresses.join(' ') }))))}>

@@ -14,11 +14,13 @@ import type {
   Integrity,
   KEvent,
   NetworkRow,
+  PauseMode,
   ProcessInfo,
   ResponseAction,
   ResponseActionRow,
   RuleMeta,
   RuleMode,
+  Severity,
   SignatureState,
   TimelineEntry,
   TreeNode,
@@ -55,6 +57,10 @@ export interface AlertOpts {
   /** Automatic response the agent took (Protect mode), dt relative to the alert. */
   auto?: { action: ResponseAction; ok?: boolean; detail: string; after?: number; artifact?: string }[]
   mode?: RuleMode
+  /** Protection was turned off on the device when the alert fired (forced to Audit). */
+  protectionOff?: PauseMode
+  /** Override the rule's severity (TP-06 is medium for detection only, high for completely off, info for turned back on). */
+  severity?: Severity
 }
 
 export interface FinalizeOpts {
@@ -193,7 +199,7 @@ export class Story {
   alert(n: TreeNode, dt: number, ruleId: string, summary: string, o: AlertOpts = {}): AlertDetail {
     const meta = this.rules.get(ruleId)
     if (!meta) throw new Error(`unknown rule ${ruleId}`)
-    const mode = o.mode ?? this.ruleModes[ruleId] ?? meta.default_mode
+    const mode = o.protectionOff ? 'audit' : (o.mode ?? this.ruleModes[ruleId] ?? meta.default_mode)
     const ts = this.t(dt)
     const outcomes: ActionOutcome[] = (o.auto ?? []).map((a) => ({ action: a.action, ok: a.ok ?? true, detail: a.detail, ts: ts + (a.after ?? 400), artifact: a.artifact ?? null }))
     for (const out of outcomes) {
@@ -224,7 +230,7 @@ export class Story {
       rule_id: ruleId,
       rule_name: meta.name,
       rule_author: meta.kind === 'builtin' ? null : (meta.author ?? null),
-      severity: meta.severity,
+      severity: o.severity ?? meta.severity,
       attack: meta.attack ?? [],
       mode,
       summary,
@@ -237,6 +243,7 @@ export class Story {
       device_id: this.dev.id,
       hostname: this.dev.hostname,
       status: 'new',
+      ...(o.protectionOff ? { protection_off: o.protectionOff } : {}),
     }
     if (!n.alert_rule_ids.includes(ruleId)) n.alert_rule_ids.push(ruleId)
     this.alerts.push(a)
@@ -377,5 +384,6 @@ export function toAlertRow(a: AlertDetail) {
     data_at_risk: a.data_at_risk ?? [],
     actions: a.actions ?? [],
     status: a.status,
+    protection_off: a.protection_off ?? null,
   }
 }

@@ -1,4 +1,4 @@
-import type { ActivityItem, ConsentRequest, RemoteSessionNotice, TrayStatus } from "../protocol";
+import type { ActivityItem, ConsentRequest, PauseMode, PauseResult, RemoteSessionNotice, TrayStatus } from "../protocol";
 
 export interface Ack {
   ok: boolean;
@@ -36,6 +36,10 @@ export interface KestrelApi {
   getPendingConsents(): Promise<ConsentRequest[]>;
   /** Send Allow / Deny to the agent; resolves with its Ack. */
   respondConsent(requestId: string, allow: boolean): Promise<Ack>;
+  /** Turn protection off with the uninstall token (`minutes: null` = until turned back on). Older agents reject with kind "agent". */
+  pauseProtection(token: string, mode: PauseMode, minutes: number | null): Promise<PauseResult>;
+  /** Turn protection back on (no token). */
+  resumeProtection(): Promise<PauseResult>;
   onConnection(cb: (c: { connected: boolean; reason: string | null }) => void): Promise<Unlisten>;
   onNavigate(cb: (tab: Tab) => void): Promise<Unlisten>;
   onQuickCheck(cb: () => void): Promise<Unlisten>;

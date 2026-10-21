@@ -103,14 +103,27 @@ impl Client {
     }
 
     pub async fn connect(&self) -> Result<Conn, ClientError> {
+        self.connect_checked(false).await
+    }
+
+    /// `strict`: the request carries a secret (the uninstall token), so on
+    /// Windows the pipe server must also be the installed `kestrel-agent.exe`
+    /// next to this tray, not just any session-0 process (a service account
+    /// such as NETWORK SERVICE could add a pipe instance and collect it).
+    async fn connect_checked(&self, strict: bool) -> Result<Conn, ClientError> {
         let stream: Box<dyn Stream> = match &self.backend {
             Backend::Pipe => {
                 #[cfg(windows)]
                 {
-                    Box::new(win::open_pipe().await?)
+                    let pipe = win::open_pipe().await?;
+                    if strict {
+                        win::verify_agent_image(&pipe)?;
+                    }
+                    Box::new(pipe)
                 }
                 #[cfg(not(windows))]
                 {
+                    let _ = strict;
                     return Err(ClientError::Unavailable("named pipes need Windows".into()));
                 }
             }
@@ -139,7 +152,8 @@ impl Client {
         req: &TrayRequest,
         timeout: Duration,
     ) -> Result<TrayResponse, ClientError> {
-        let mut conn = self.connect().await?;
+        let strict = matches!(req, TrayRequest::PauseProtection { .. });
+        let mut conn = self.connect_checked(strict).await?;
         let fut = async {
             send(&mut conn, req).await?;
             match read_response(&mut conn).await? {
@@ -152,7 +166,8 @@ impl Client {
         };
         tokio::time::timeout(timeout, fut)
             .await
-            .map_err(|_| ClientError::Timeout(format!("{req:?}")))?
+            // Only the op name: a request may carry the uninstall token.
+            .map_err(|_| ClientError::Timeout(req.op().to_string()))?
     }
 }
 
@@ -261,6 +276,18 @@ async fn subscribe_ack(
     }
 }
 
+/// Is `actual` (the pipe server's image, `QueryFullProcessImageNameW`) the
+/// agent `expected` next to the tray? Case-insensitive, `\\?\` ignored.
+pub fn same_image(actual: &str, expected: &std::path::Path) -> bool {
+    fn norm(s: &str) -> String {
+        let s = s.trim().replace('/', "\\");
+        let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+        s.to_ascii_lowercase()
+    }
+    let e = norm(&expected.to_string_lossy());
+    !e.is_empty() && norm(actual) == e
+}
+
 /// Exponential backoff with jitter: 1s, 2s, 4s … capped at 30s.
 pub fn backoff(attempt: u32) -> Duration {
     let base = 1000u64.saturating_mul(1u64 << attempt.min(5)).min(30_000);
@@ -299,6 +326,55 @@ mod win {
         };
         verify_server(&client)?;
         Ok(client)
+    }
+
+    /// Before sending the uninstall token: the server process must be the
+    /// installed agent image (`kestrel-agent.exe` in the tray's own folder,
+    /// which only administrators can write).
+    pub fn verify_agent_image(client: &NamedPipeClient) -> Result<(), ClientError> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        if cfg!(debug_assertions) && std::env::var_os("KESTREL_TRAY_ALLOW_USER_SERVER").is_some() {
+            return Ok(());
+        }
+        let refuse = |why: &str| {
+            log::warn!("refusing to send the token: {why}");
+            Err(ClientError::Unavailable(
+                "could not verify that the Kestrel service answers on the tray pipe".into(),
+            ))
+        };
+        let mut pid: u32 = 0;
+        if unsafe { GetNamedPipeServerProcessId(client.as_raw_handle() as _, &mut pid) } == 0
+            || pid == 0
+        {
+            return refuse("no server process id");
+        }
+        let ph = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if ph.is_null() {
+            return refuse("server process not accessible");
+        }
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = unsafe { QueryFullProcessImageNameW(ph, 0, buf.as_mut_ptr(), &mut len) };
+        unsafe { CloseHandle(ph) };
+        if ok == 0 {
+            return refuse("server image unknown");
+        }
+        let actual = String::from_utf16_lossy(&buf[..(len as usize).min(buf.len())]);
+        let expected = match std::env::current_exe() {
+            Ok(p) => p.with_file_name("kestrel-agent.exe"),
+            Err(_) => return refuse("own path unknown"),
+        };
+        if !super::same_image(&actual, &expected) {
+            return refuse(&format!(
+                "server image {actual} is not {}",
+                expected.display()
+            ));
+        }
+        Ok(())
     }
 
     /// Only trust a pipe served from session 0 (Windows services). Interactive
@@ -519,6 +595,129 @@ mod tests {
             panic!("expected notification")
         };
         assert_eq!(item.action_taken, "Remote session started");
+    }
+
+    #[test]
+    fn same_image_matches_installed_agent_only() {
+        let exp = std::path::Path::new(r"C:\Program Files\Kestrel\kestrel-agent.exe");
+        assert!(same_image(
+            r"C:\Program Files\Kestrel\kestrel-agent.exe",
+            exp
+        ));
+        assert!(same_image(
+            r"\\?\c:\program files\kestrel\KESTREL-AGENT.EXE",
+            exp
+        ));
+        assert!(!same_image(r"C:\Users\Public\kestrel-agent.exe", exp));
+        assert!(!same_image(r"C:\Windows\System32\svchost.exe", exp));
+        assert!(!same_image("", std::path::Path::new("")));
+    }
+
+    async fn ask(c: &Client, req: TrayRequest) -> PauseResult {
+        match c.request(&req, Duration::from_secs(5)).await.unwrap() {
+            TrayResponse::PauseResult(r) => r,
+            other => panic!("expected pause_result, got {other:?}"),
+        }
+    }
+
+    fn pause(token: &str, mode: PauseMode, minutes: Option<u32>) -> TrayRequest {
+        TrayRequest::PauseProtection {
+            token: TokenInput(token.into()),
+            mode,
+            minutes,
+        }
+    }
+
+    #[tokio::test]
+    async fn pause_wrong_tokens_lock_out() {
+        let c = Client::new(Backend::Mock(Arc::new(crate::mock::MockAgent::new())));
+        for left in (1..=4).rev() {
+            let r = ask(&c, pause("nope", PauseMode::DetectionOnly, Some(60))).await;
+            assert_eq!(
+                (r.ok, r.error, r.attempts_left),
+                (false, Some(PauseError::WrongToken), Some(left))
+            );
+        }
+        let r = ask(&c, pause("nope", PauseMode::DetectionOnly, Some(60))).await;
+        assert_eq!(r.error, Some(PauseError::LockedOut));
+        let until = r.locked_until_ms.unwrap();
+        let left = until - now_ms();
+        assert!(left > 55_000 && left <= 60_000, "{left}");
+        // Even the right token is refused while locked, and status says so.
+        let r = ask(
+            &c,
+            pause(crate::mock::MOCK_TOKEN, PauseMode::DetectionOnly, Some(60)),
+        )
+        .await;
+        assert_eq!(r.error, Some(PauseError::LockedOut));
+        let TrayResponse::Status(s) = c
+            .request(&TrayRequest::Status, Duration::from_secs(2))
+            .await
+            .unwrap()
+        else {
+            panic!("status")
+        };
+        assert_eq!(s.local_pause.unwrap().locked_until_ms, Some(until));
+        assert!(s.pause.is_none());
+    }
+
+    #[tokio::test]
+    async fn pause_policy_success_and_resume() {
+        let mock = Arc::new(crate::mock::MockAgent::new());
+        let c = Client::new(Backend::Mock(mock.clone()));
+        let mut sub = open_subscription(&c, &[], Duration::from_secs(2))
+            .await
+            .unwrap();
+        let r = ask(
+            &c,
+            pause(crate::mock::MOCK_TOKEN, PauseMode::DetectionOnly, Some(7)),
+        )
+        .await;
+        assert_eq!(
+            (r.error, r.denied),
+            (
+                Some(PauseError::NotAllowed),
+                Some(PauseDenied::DurationNotAllowed)
+            )
+        );
+        let r = ask(&c, pause(crate::mock::MOCK_TOKEN, PauseMode::Full, None)).await;
+        assert!(r.ok, "{r:?}");
+        let state = r.state.unwrap();
+        assert_eq!((state.mode, state.until_ms), (PauseMode::Full, None));
+        let TrayResponse::Notification(item) = read_response(&mut sub.conn).await.unwrap().unwrap()
+        else {
+            panic!("expected notification")
+        };
+        assert_eq!(item.action_taken, "Protection turned off");
+        let r = ask(&c, pause(crate::mock::MOCK_TOKEN, PauseMode::Full, None)).await;
+        assert_eq!(r.error, Some(PauseError::AlreadyOff));
+        let r = ask(&c, TrayRequest::ResumeProtection).await;
+        assert!(r.ok && r.state.is_none());
+        let r = ask(&c, TrayRequest::ResumeProtection).await;
+        assert_eq!(r.error, Some(PauseError::NotOff));
+    }
+
+    #[tokio::test]
+    async fn pause_on_older_agent_is_an_agent_error() {
+        let c = Client::new(Backend::Mock(Arc::new(crate::mock::MockAgent::legacy())));
+        let TrayResponse::Status(s) = c
+            .request(&TrayRequest::Status, Duration::from_secs(2))
+            .await
+            .unwrap()
+        else {
+            panic!("status")
+        };
+        assert!(s.local_pause.is_none());
+        let r = c
+            .request(
+                &pause("kun_secret", PauseMode::DetectionOnly, Some(15)),
+                Duration::from_secs(2),
+            )
+            .await;
+        let Err(ClientError::Agent(m)) = r else {
+            panic!("expected agent error, got {r:?}")
+        };
+        assert!(!m.contains("kun_secret"));
     }
 
     #[tokio::test]

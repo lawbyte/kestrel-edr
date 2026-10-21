@@ -729,8 +729,33 @@ function persistence(ctx: Ctx): IncidentDetail {
   })
 }
 
+/** MKT-LT-008: protection turned off (detection only) from the tray; an unsigned installer then ran in Audit only. */
+function protectionOff(ctx: Ctx): IncidentDetail | null {
+  const d = ctx.dev('MKT-LT-008')
+  const p = d.health.pause
+  if (!p) return null
+  const s = new Story(d, p.since_ms, ctx.rules, ctx.modes(d))
+  const ex = s.proc(null, EXPLORER, 'C:\\Windows\\Explorer.EXE', { dt: -2 * HOUR, pid: 3620, signer: MS, quiet: true })
+  const agent = 'C:\\Program Files\\Kestrel\\kestrel-agent.exe'
+  const ag = s.proc(null, agent, `"${agent}" service`, { dt: -3 * DAY, pid: 2212, signer: 'Kestrel Labs Pte. Ltd.', signed: 'valid', quiet: true })
+  const who = p.by_user
+  s.alert(ag, 0, 'TP-06', `${who} turned protection off (detection only) for 4 h with the uninstall token. Kestrel keeps detecting but takes no automatic action until protection comes back on.`, { severity: 'medium' })
+  const img = `${home(d)}\\Downloads\\FontBase-Pro-Setup.exe`
+  const inst = s.proc(ex, img, `"${img}"`, { dt: 14 * MIN, size: 48_201_216, motw: 3, exitDt: 16 * MIN })
+  s.alert(inst, 14 * MIN + 400, 'ST-12', 'An unsigned installer downloaded a minute earlier ran from Downloads while protection was turned off.', {
+    evidence: [s.events.find((e) => e.guid === inst.guid)!],
+    protectionOff: 'detection_only',
+  })
+  return s.finalize({
+    status: 'open',
+    contained: false,
+    storyline: `**${who}** turned Kestrel protection off on **${d.hostname}** from the tray, using the device's uninstall token, in **detection only** mode for 4 hours. Fourteen minutes later an **unsigned font-manager installer** ran from Downloads. Kestrel recorded it but took no automatic action because protection was off. Check with the user that the install was approved, then turn protection back on from the device page.`,
+  })
+}
+
 export function buildIncidents(ctx: Ctx, all: Device[]): IncidentDetail[] {
-  return [lumma(ctx), abe(ctx), debugKey(ctx), canary(ctx), vidar(ctx), backupFp(ctx), acreed(ctx), filefix(ctx), tamper(ctx), ransomware(ctx), credDump(ctx), lsassBlocked(ctx), persistence(ctx), ...noise(ctx, all)]
+  const off = protectionOff(ctx)
+  return [...(off ? [off] : []), lumma(ctx), abe(ctx), debugKey(ctx), canary(ctx), vidar(ctx), backupFp(ctx), acreed(ctx), filefix(ctx), tamper(ctx), ransomware(ctx), credDump(ctx), lsassBlocked(ctx), persistence(ctx), ...noise(ctx, all)]
 }
 
 /** A fresh incident injected while the console is open, to exercise live updates. */

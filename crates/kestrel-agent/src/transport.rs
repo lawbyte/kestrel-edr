@@ -225,6 +225,7 @@ async fn session(core: &Arc<Core>, backoff: &mut Backoff, st: &mut SessionState)
         outbox_epoch: core.store.outbox_epoch(),
         capabilities: capabilities(core),
         remote_ceiling: Some(core.remote_ceiling()),
+        pause: core.pause_for_upload(),
     });
     tx.send(envelope(0, &hello)?)
         .await

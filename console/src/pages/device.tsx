@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, CheckCircle2, ChevronLeft, CircleDashed, Copy, KeyRound, Loader2, PowerOff, RefreshCw, RotateCw, XCircle } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, ChevronLeft, CircleDashed, Copy, KeyRound, Loader2, PowerOff, RefreshCw, RotateCw, ShieldOff, XCircle } from 'lucide-react'
 import { toast } from 'sonner'
 import { useMemo, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
@@ -10,6 +10,7 @@ import { Card, EmptyState, ErrorState, KeyValue, LoadingRows, Mono } from '@/com
 import { ProcessDetail, ProcessTree } from '@/components/process-tree'
 import { ActionButton, ConfirmActionDialog, liftBlockSpec, type ActionSpec } from '@/components/response-actions'
 import { SearchInput } from '@/components/filters'
+import { ProtectionOffBanner } from '@/components/protection-off'
 import { CopyButton } from '@/components/copy-button'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent } from '@/components/ui/dialog'
@@ -21,6 +22,8 @@ import { describeEvent } from '@/lib/events'
 import { formatBytes, formatDateTime, formatTime, formatUptime, timeAgo } from '@/lib/format'
 import { basename, cn } from '@/lib/utils'
 import { visibleRemoteTabs } from '@/lib/remote-tabs'
+import { localPauseSummary, protectionOffNote } from '@/lib/pause'
+import { localPauseOf } from '@/components/local-pause-editor'
 import { normaliseProfile, profileSummary, profileUnrestricted } from '@/lib/remote-profile'
 import { RemoteDesktop } from '@/components/remote/remote-desktop'
 import { FileManager } from '@/components/remote/file-manager'
@@ -85,6 +88,7 @@ function DeviceView({ d }: { d: DeviceDetail }) {
       </div>
 
       <div className="space-y-5 p-6">
+        <ProtectionOffBanner device={dev} onPick={setAction} />
         <DuplicateBanner d={d} />
         <div className="grid items-start gap-5 lg:grid-cols-3">
           <Card title="Sensor health" className="lg:col-span-2">
@@ -147,6 +151,11 @@ function DeviceView({ d }: { d: DeviceDetail }) {
                       <SeverityBadge severity={a.severity} />
                       <span className="font-mono text-xs text-fg-muted">{a.rule_id}</span>
                       <span className="min-w-0 flex-1 truncate text-sm">{a.summary}</span>
+                      {a.protection_off ? (
+                        <span className="inline-flex items-center gap-1 text-xs text-warn" title={protectionOffNote(a.protection_off)}>
+                          <ShieldOff className="size-3.5" aria-hidden /> Protection was off
+                        </span>
+                      ) : null}
                       <span className="text-xs text-fg-subtle">{timeAgo(a.ts)}</span>
                     </Link>
                   </li>
@@ -439,6 +448,7 @@ function EffectiveSettings({ d }: { d: DeviceDetail }) {
     ['Isolation auto-release', p.isolation_auto_release_hours ? `After ${p.isolation_auto_release_hours} h without server contact` : 'Never', src],
     ['Indicator block lifetime', formatTtl(p.ioc_block_ttl_secs), src],
     ['Indicator block scope', p.ioc_block_host_wide ? 'Every program' : 'Offending program only', src],
+    ['Local turn-off', localPauseSummary(localPauseOf(p.local_pause)), src],
     ['Remote access (policy)', profileSummary(normaliseProfile(p.remote_access)), `${src}, capped by the install profile`],
     ['Exclusions in effect', String(p.exclusions.length), `${src} + global exclusions`],
     ['Indicators in effect', String(p.iocs.length), 'Global indicator list'],

@@ -1,6 +1,6 @@
 # Detection rules
 
-Kestrel ships 54 built-in behavioural rules and a 70-rule SigmaHQ pack. This table is taken from the engine's catalog (`Engine::catalog()`, `crates/kestrel-detect/src/catalog.rs` and `families/`). **Protect** in the Default column marks the *safe on day one* set; everything else starts in Audit. The console's **Rules** page shows each rule's full logic, ATT&CK techniques, Protect action, references and known false positives.
+Kestrel ships 55 built-in behavioural rules and a 70-rule SigmaHQ pack. This table is taken from the engine's catalog (`Engine::catalog()`, `crates/kestrel-detect/src/catalog.rs` and `families/`). **Protect** in the Default column marks the *safe on day one* set; everything else starts in Audit. The console's **Rules** page shows each rule's full logic, ATT&CK techniques, Protect action, references and known false positives.
 
 <Shot src="img/diagrams/detection-flow.svg" alt="Detection and response flow" />
 
@@ -93,8 +93,11 @@ Persistence rules in Protect remove the autorun after backing up the original in
 | TP-03 | AMSI tampering | Critical | Audit |
 | TP-04 | Agent service or file tampering | Critical | Audit |
 | TP-05 | Telemetry loss | High | Audit |
+| TP-06 | Protection turned off on the device | Medium (High when completely off) | Audit |
 
 Exclusions never apply to TP rules. The agent's watchdog restarts stopped ETW sessions.
+
+`TP-06` is raised by the agent itself, never by an event: when someone turns protection off with the tray switch and the uninstall token (Medium for detection only, High for completely off), at Info level when protection comes back on or a policy change shortens the turn-off, and when a wrong uninstall token is entered (Medium, High when the switch locks). It never acts. See [Employee tray app](/guide/tray) and [Policies](/console/policies).
 
 ## Other rule ids
 
@@ -107,6 +110,7 @@ Exclusions never apply to TP rules. The agent's watchdog restarts stopped ETW se
 | `TP-SRV-OUTBOX-RESET` | Server: the agent started a new outbox. |
 | `TP-SRV-EVENTS-LOST` | Server: more than 500 ETW events lost between heartbeats. |
 | `TP-SRV-ETW` | Server: the agent reports its ETW session down. |
+| `TP-SRV-PAUSE-OVERDUE` | Server: the agent still reports protection turned off 10 minutes after the chosen end time. |
 | `TP-SRV-DUP-ENROLL` | Server: a new enrollment reuses the hardware UUID of a recently active device. |
 
 ## False positives

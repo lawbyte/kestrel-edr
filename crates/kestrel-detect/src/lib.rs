@@ -126,12 +126,28 @@ impl Engine {
 
     /// Feed one event (in timestamp order per process).
     pub fn process(&mut self, event: &Event) -> Vec<Output> {
-        self.inner.process(event)
+        let outs = self.inner.process(event);
+        self.inner.gate(outs)
     }
 
     /// Advance time: expire correlation state and resolve suspend windows.
     pub fn tick(&mut self, now: TimestampMs) -> Vec<Output> {
-        self.inner.tick(now)
+        let outs = self.inner.tick(now);
+        self.inner.gate(outs)
+    }
+
+    /// Local "turn protection off" switch (`kestrel_common::pause`): while
+    /// `Some`, every alert is forced to Audit and marked
+    /// `Alert::protection_off`, and no response action is output except
+    /// `ResumeProcess`. Entering a pause returns `ResumeProcess` for every
+    /// process held in a suspend window.
+    pub fn set_paused(&mut self, mode: Option<kestrel_common::PauseMode>) -> Vec<Output> {
+        self.inner.set_paused(mode)
+    }
+
+    /// The pause in force (see [`Engine::set_paused`]).
+    pub fn paused(&self) -> Option<kestrel_common::PauseMode> {
+        self.inner.paused()
     }
 
     pub fn processes(&self) -> &ProcessTable {
@@ -190,7 +206,8 @@ impl Engine {
         facts: ProcessFacts,
         now: TimestampMs,
     ) -> Vec<Output> {
-        self.inner.enrich_process(guid, facts, now)
+        let outs = self.inner.enrich_process(guid, facts, now);
+        self.inner.gate(outs)
     }
 }
 

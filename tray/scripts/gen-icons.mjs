@@ -58,6 +58,10 @@ const tray = {
     <path d="M10.6 21 h11 a3.6 3.6 0 0 0 0 -7.2 a5.4 5.4 0 0 0 -10.4 1.2 a3 3 0 0 0 -0.6 6 Z" fill="#fff"/>
     <path d="M8.5 9.5 L24 25" stroke="#6B7280" stroke-width="4.2" stroke-linecap="round"/>
     <path d="M8.5 9.5 L24 25" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/>`,
+  // Hollow amber outline shield + pause bars (protection turned off on this PC
+  // with the uninstall token). Hollow like "unavailable": not protecting.
+  paused: `<path d="${TRAY_SHIELD}" fill="#fff" fill-opacity=".92" stroke="#C98A00" stroke-width="2.6" stroke-linejoin="round"/>
+    <path d="M12.6 10.5 V20.5 M19.4 10.5 V20.5" stroke="#7A4C00" stroke-width="3.6" stroke-linecap="round"/>`,
   // Hollow red outline shield + cross (service not running / pipe unavailable)
   unavailable: `<path d="${TRAY_SHIELD}" fill="#fff" fill-opacity=".92" stroke="#C42B1C" stroke-width="2.6" stroke-linejoin="round"/>
     <path d="M11.5 11 L20.5 20 M20.5 11 L11.5 20" stroke="#C42B1C" stroke-width="3.4" stroke-linecap="round"/>`,

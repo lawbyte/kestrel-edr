@@ -3,7 +3,10 @@
 //! Runs per user at logon, unprivileged, single instance. Shows protection state
 //! in the notification area, a flyout window (Status / Activity / Help & privacy),
 //! and Windows toasts for pushed notifications. Talks to the agent service over
-//! the tray protocol only; it has no ability to change protection.
+//! the tray protocol only. The one thing it can change is the local "turn
+//! protection off" switch, and only with the device's uninstall token (checked
+//! by the agent); turning protection back on never needs one. The token is
+//! never logged: requests are only ever named by `TrayRequest::op`.
 
 pub mod client;
 pub mod consent;
@@ -28,6 +31,10 @@ const MAIN: &str = "main";
 const TRAY_ID: &str = "kestrel";
 const REQ_TIMEOUT: Duration = Duration::from_secs(10);
 const QUICK_CHECK_TIMEOUT: Duration = Duration::from_secs(180);
+/// The agent checks the token (and rate-limits it) before it answers.
+const PAUSE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Longest token the tray sends (uninstall tokens are far shorter).
+const MAX_TOKEN_LEN: usize = 512;
 const STATUS_POLL: Duration = Duration::from_secs(30);
 
 // Frontend event names.
@@ -81,8 +88,11 @@ fn state(app: &AppHandle) -> tauri::State<'_, AppState> {
 
 // ---- Tray icon ---------------------------------------------------------------
 
-fn tray_png(s: Option<ProtectionState>) -> &'static [u8] {
-    match s {
+fn tray_png(s: Option<&TrayStatus>) -> &'static [u8] {
+    if s.is_some_and(|s| s.pause.is_some()) {
+        return include_bytes!("../icons/tray/paused.png");
+    }
+    match s.map(|s| s.state) {
         Some(ProtectionState::Protected) => include_bytes!("../icons/tray/protected.png"),
         Some(ProtectionState::Attention) => include_bytes!("../icons/tray/attention.png"),
         Some(ProtectionState::Isolated) => include_bytes!("../icons/tray/isolated.png"),
@@ -112,12 +122,10 @@ fn tray_tooltip(s: Option<&TrayStatus>) -> String {
                 .collect()
         }
         Some(st) => {
-            let label = match st.state {
-                ProtectionState::Protected => "Protected",
-                ProtectionState::Attention => "Protected. Something was blocked",
-                ProtectionState::Isolated => "Network limited by IT",
-                ProtectionState::Degraded => "Protection partly working",
-                ProtectionState::Offline => "Protected, not connected to IT",
+            let label = match (st.pause.as_ref(), st.state) {
+                (Some(p), _) if p.mode == PauseMode::Full => "Protection is off (completely)",
+                (Some(_), _) => "Protection is off (detection only)",
+                (None, state) => state_label(state),
             };
             let org = if st.org_name.is_empty() {
                 String::new()
@@ -130,9 +138,19 @@ fn tray_tooltip(s: Option<&TrayStatus>) -> String {
     }
 }
 
+fn state_label(state: ProtectionState) -> &'static str {
+    match state {
+        ProtectionState::Protected => "Protected",
+        ProtectionState::Attention => "Protected. Something was blocked",
+        ProtectionState::Isolated => "Network limited by IT",
+        ProtectionState::Degraded => "Protection partly working",
+        ProtectionState::Offline => "Protected, not connected to IT",
+    }
+}
+
 fn update_tray(app: &AppHandle, status: Option<&TrayStatus>) {
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        match Image::from_bytes(tray_png(status.map(|s| s.state))) {
+        match Image::from_bytes(tray_png(status)) {
             Ok(img) => {
                 let _ = tray.set_icon(Some(img));
             }
@@ -275,6 +293,76 @@ async fn request_review(
             note_err(&app, &e);
             Err(e)
         }
+    }
+}
+
+/// Turn protection off with the device's uninstall token. The agent checks
+/// the token, the policy (`mode`, `minutes`; `None` = until turned back on)
+/// and the lockout, and answers with a `PauseResult` either way. An older
+/// agent answers `Error` (`ClientError::Agent`). The token is moved straight
+/// into the request and never logged or echoed in an error.
+#[tauri::command]
+async fn pause_protection(
+    app: AppHandle,
+    token: String,
+    mode: PauseMode,
+    minutes: Option<u32>,
+) -> Result<PauseResult, ClientError> {
+    let token = TokenInput(token.trim().to_string());
+    if token.0.is_empty() {
+        return Err(ClientError::Protocol("the token is required".into()));
+    }
+    if token.0.len() > MAX_TOKEN_LEN {
+        return Err(ClientError::Protocol("the token is too long".into()));
+    }
+    let req = TrayRequest::PauseProtection {
+        token,
+        mode,
+        minutes,
+    };
+    pause_request(&app, &req).await
+}
+
+/// Turn protection back on (never needs a token).
+#[tauri::command]
+async fn resume_protection(app: AppHandle) -> Result<PauseResult, ClientError> {
+    pause_request(&app, &TrayRequest::ResumeProtection).await
+}
+
+async fn pause_request(app: &AppHandle, req: &TrayRequest) -> Result<PauseResult, ClientError> {
+    let client = state(app).client.clone();
+    let res = client.request(req, PAUSE_TIMEOUT).await;
+    // Status (pause state, lockout) changes with every answer: refresh it so
+    // the tray icon and tooltip follow right away.
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = get_status(app2).await;
+    });
+    match res {
+        Ok(TrayResponse::PauseResult(r)) => Ok(r),
+        Ok(other) => Err(ClientError::Protocol(format!(
+            "unexpected response to {}: {}",
+            req.op(),
+            response_kind(&other)
+        ))),
+        Err(e) => {
+            note_err(app, &e);
+            Err(e)
+        }
+    }
+}
+
+/// Response variant name, for error messages.
+fn response_kind(r: &TrayResponse) -> &'static str {
+    match r {
+        TrayResponse::Status(_) => "status",
+        TrayResponse::Activity { .. } => "activity",
+        TrayResponse::Ack { .. } => "ack",
+        TrayResponse::Notification(_) => "notification",
+        TrayResponse::Error { .. } => "error",
+        TrayResponse::RemoteSession(_) => "remote_session",
+        TrayResponse::ConsentRequest(_) => "consent_request",
+        TrayResponse::PauseResult(_) => "pause_result",
     }
 }
 
@@ -731,7 +819,9 @@ pub fn run() {
             mica_enabled,
             hide_window,
             get_pending_consents,
-            respond_consent
+            respond_consent,
+            pause_protection,
+            resume_protection
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -814,6 +904,21 @@ mod tests {
             tray_tooltip(Some(&s)),
             "Kestrel: Protected\nNusantara Logistik"
         );
+    }
+
+    #[test]
+    fn tooltip_and_icon_say_protection_is_off() {
+        let mut s = mock::sample_status(ProtectionState::Attention);
+        let paused: &[u8] = include_bytes!("../icons/tray/paused.png");
+        assert_ne!(tray_png(Some(&s)), paused);
+        s.pause = Some(mock::sample_pause(PauseMode::DetectionOnly, false));
+        assert!(tray_tooltip(Some(&s)).starts_with("Kestrel: Protection is off (detection only)"));
+        assert_eq!(tray_png(Some(&s)), paused);
+        s.pause = Some(mock::sample_pause(PauseMode::Full, true));
+        assert!(tray_tooltip(Some(&s)).contains("Protection is off (completely)"));
+        // An IT remote session is still named first.
+        s.remote_session = Some(mock::sample_remote_session(true));
+        assert!(tray_tooltip(Some(&s)).starts_with("Kestrel: IT is connected"));
     }
 
     #[test]

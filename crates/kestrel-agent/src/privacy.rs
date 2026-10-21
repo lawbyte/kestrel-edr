@@ -676,6 +676,7 @@ mod tests {
             data_at_risk: vec![],
             evidence: vec![ps(cmd, r"C:\x.exe", r"CORP\alice")],
             actions: vec![],
+            protection_off: None,
         };
         let p = Privacy {
             capture_cmdline: false,

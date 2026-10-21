@@ -2,6 +2,57 @@
 
 Read `CLAUDE.md` first. This run took Kestrel from "compiled and simulated" to "validated on real Windows, broader malware coverage, release candidate". Decisions with reasons are in `docs/DECISIONS.md`; the security reviews are `docs/security-review-2026-10-21.md` (v1.0) and `docs/security-review-v1.1-2026-10-21.md` (v1.1, independent).
 
+## Local "turn protection off" switch (2026-10-21) - tray, agent, server, console
+
+Owner request; design and as-built decisions are in `docs/DECISIONS.md` (entry "local turn protection off switch" and its addenda). Contract: `docs/contracts.md` "Local turn-off (tray switch)". Not committed.
+
+* **Tray:** "Turn off protection" asks for the uninstall token, the mode (detection only; completely off only if the policy allows it) and the duration (15 min, 1 h, 4 h, 8 h capped by policy; "until turned back on" only if allowed). The amber "Protection is off" card has "Turn protection back on" (no token).
+* **Agent** (`crates/kestrel-agent/src/pause.rs`):
+  * Checks the token with Argon2id. Wrong tokens: 5, then a lockout of 1 min that doubles up to 1 h, per device, persisted.
+  * The pause is persisted and auto-resumes, also after downtime. Policy changes end or clamp it.
+  * Detection only = engine gate plus agent gate, so no automatic action runs and hardening is not enforced. Full = sensors stopped.
+  * Reports: `TP-06` alerts and `AgentPayload::Pause` reports.
+* **Engine:** `Engine::set_paused` and output gate; `TP-06` in the catalog.
+* **Server:**
+  * Device status `paused` (migration 0008) and `pause` in the device API; `protection_off` on alerts.
+  * The `resume_protection` action (`response.collect`).
+  * Audit entries `device.protection_off`, `device.protection_on`, `device.protection_off_clamped` and `device.protection_off_denied`.
+  * `TP-SRV-PAUSE-OVERDUE`. ETW heuristics stay quiet while the device is completely off.
+* **Console:**
+  * Device banner with the turn-on button.
+  * Paused badge and filter.
+  * Policy editor "Local turn-off" section.
+  * Alert note.
+  * Mock data.
+* **Docs:** `website/guide/tray.md`, `website/console/devices.md`, `website/console/policies.md`, `website/reference/rules.md`, README, ARCHITECTURE. Screenshots are in `website/public/img/tray/` (turn-off-dialog, turn-off-dialog-full, turn-off-wrong-token, protection-off) and `website/public/img/console/` (device-protection-off, policy-local-turnoff, devices-paused).
+* **Review:** an independent hostile review was run and the findings were fixed. The rest are recorded in DECISIONS:
+  * the tray verifies the pipe server image before sending the token;
+  * `TP-06` fires again when the agent starts while protection is off;
+  * a failed sensor restart after a full pause still raises `TP-SRV-ETW`;
+  * an overdue pause raises an alert;
+  * the lockout escalation survives a clock rollback;
+  * the sensor restart check now runs under the lock.
+
+**Verification (this PC):**
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all -- --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass |
+| `cargo test --workspace` (with Postgres) | pass; new tests in `kestrel-common` `pause`, `kestrel-detect` `tests/pause.rs` + catalog, `kestrel-agent` `pause` + `pause_tests.rs`, `kestrel-server` `tests/local_pause.rs` |
+| Console tests / lint / build | pass (177 tests) |
+| Tray tests / build | pass (87 tests) |
+| `tray/src-tauri` fmt / clippy / test | pass |
+| Website `npm run build` (style check) | pass |
+
+**Needs lab validation (Windows VM, never this PC):**
+
+* **Real turn-off over the named pipe.** Includes the new server image check in the tray: `kestrel-tray.exe` must sit next to `kestrel-agent.exe`, and a standard user must be able to `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` the SYSTEM service.
+* **Full mode stops the ETW sessions cleanly** without raising `TP-01` or `TP-05`, and they restart on resume.
+* **Hardening is not re-applied while off** and is re-applied after turn-on.
+* **The pause survives a reboot** and auto-resumes after one.
+* **TP-06 shows in the console end to end**, with the audit entries.
+
 ## Fresh-install fixes (2026-10-21, after 1.1.2) — hidden decoys, "degraded" at install, ST-01 on Widgets
 
 Three findings from a fresh 1.1.2 install in the lab VM. Details and evidence are in `docs/DECISIONS.md` (entry "fresh install of 1.1.2"). Not committed.

@@ -24,6 +24,8 @@ pub enum EngineCtl {
     Policy(Box<Policy>),
     Rules(RuleBundle, oneshot::Sender<Result<(), String>>),
     PlantCanaries,
+    /// Local "turn protection off" switch: `Some` = paused in that mode.
+    Pause(Option<kestrel_common::PauseMode>),
 }
 
 enum Job {
@@ -313,6 +315,12 @@ async fn detect_loop(
                     let _ = tx.send(r.map_err(|e| e.to_string()));
                 }
                 EngineCtl::PlantCanaries => plant_canaries(&core, &mut engine),
+                EngineCtl::Pause(m) => {
+                    match std::panic::catch_unwind(AssertUnwindSafe(|| engine.set_paused(m))) {
+                        Ok(outs) => route(&mut disp, outs),
+                        Err(_) => tracing::error!("engine panicked applying the pause"),
+                    }
+                }
             },
             Some(le) = enrich.recv() => {
                 // H7 / M12: facts that missed the first-run budget, or a
@@ -604,6 +612,7 @@ mod tests {
             data_at_risk: cats,
             evidence: vec![],
             actions,
+            protection_off: None,
         }
     }
 

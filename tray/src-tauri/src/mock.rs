@@ -16,6 +16,15 @@
 //! `KESTREL_TRAY_MOCK_CONSENT=desktop|view|files` pushes an IT consent request
 //! ~5 s after the first subscription (60 s timeout; only to `remote_consent`
 //! subscribers). Allowing it starts a matching remote session.
+//!
+//! Local "turn protection off" switch. **Mock uninstall token: `kun_mock_token`**
+//! (see [`MOCK_TOKEN`]). Five wrong tokens lock the switch for 1 minute,
+//! doubling up to 1 hour, like the agent. `KESTREL_TRAY_MOCK_PAUSE` picks the
+//! policy and the starting state: `open` (default: every mode and "until
+//! turned back on" allowed), `basic` (agent defaults: detection only, timed
+//! only), `disabled` (switch not allowed), `active` (already off, detection
+//! only, ~80 min left), `active_full` (already completely off, until turned
+//! back on), `locked` (lockout in force for 4 minutes).
 
 use crate::protocol::*;
 use std::sync::Mutex;
@@ -40,6 +49,51 @@ struct Inner {
     consents: Vec<ConsentRequest>,
     consent_demo: Option<(RemoteKind, bool)>,
     consent_demo_started: bool,
+    /// Consecutive wrong uninstall tokens (reset by a lockout or success).
+    pause_failures: u32,
+    /// Lockouts so far (each doubles the next one).
+    pause_lockouts: u32,
+}
+
+/// Uninstall token the mock accepts.
+pub const MOCK_TOKEN: &str = "kun_mock_token";
+const PAUSE_MAX_FAILURES: u32 = 5;
+const PAUSE_LOCKOUT_BASE_MS: i64 = 60_000;
+const PAUSE_LOCKOUT_MAX_MS: i64 = 3_600_000;
+const MOCK_USER: &str = r"NUSANTARA\dewi.lestari";
+
+/// Offer for the mock policy: `open` = everything allowed (all UI visible).
+pub fn sample_pause_offer(open: bool) -> PauseOffer {
+    PauseOffer {
+        enabled: true,
+        allow_full: open,
+        minutes: vec![15, 60, 240, 480],
+        allow_until_resumed: open,
+        locked_until_ms: None,
+    }
+}
+
+/// A sample active pause for the mock and tests.
+pub fn sample_pause(mode: PauseMode, until_resumed: bool) -> PauseState {
+    let now = now_ms();
+    PauseState {
+        mode,
+        since_ms: now - 40 * MIN,
+        until_ms: (!until_resumed).then_some(now + 80 * MIN),
+        by_user: MOCK_USER.into(),
+    }
+}
+
+fn pause_fail(error: PauseError, message: &str) -> PauseResult {
+    PauseResult {
+        ok: false,
+        error: Some(error),
+        message: message.into(),
+        attempts_left: None,
+        locked_until_ms: None,
+        denied: None,
+        state: None,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -79,6 +133,8 @@ pub fn sample_status(state: ProtectionState) -> TrayStatus {
         hostname: "LT-JKT-0142".into(),
         last_check: Some(now - 2 * 24 * 60 * MIN),
         remote_session: None,
+        pause: None,
+        local_pause: Some(sample_pause_offer(true)),
     }
 }
 
@@ -212,6 +268,23 @@ impl MockAgent {
             Ok("files") => Some((RemoteKind::Files, false)),
             _ => None,
         };
+        match std::env::var("KESTREL_TRAY_MOCK_PAUSE").as_deref() {
+            Ok("basic") => status.local_pause = Some(sample_pause_offer(false)),
+            Ok("disabled") => {
+                status.local_pause = Some(PauseOffer {
+                    enabled: false,
+                    ..Default::default()
+                })
+            }
+            Ok("active") => status.pause = Some(sample_pause(PauseMode::DetectionOnly, false)),
+            Ok("active_full") => status.pause = Some(sample_pause(PauseMode::Full, true)),
+            Ok("locked") => {
+                if let Some(o) = status.local_pause.as_mut() {
+                    o.locked_until_ms = Some(now_ms() + 4 * MIN);
+                }
+            }
+            _ => {}
+        }
         let (push, _) = broadcast::channel(32);
         MockAgent {
             inner: Mutex::new(Inner {
@@ -224,16 +297,164 @@ impl MockAgent {
                 consents: Vec::new(),
                 consent_demo,
                 consent_demo_started: false,
+                pause_failures: 0,
+                pause_lockouts: 0,
             }),
             push,
         }
     }
 
-    /// A mock that behaves like an agent from before `subscribe_with` existed.
+    /// A mock that behaves like an agent from before `subscribe_with` existed
+    /// (and before the local pause switch: no `local_pause`, `Error` for its ops).
     pub fn legacy() -> Self {
         let m = Self::new();
-        m.inner.lock().unwrap().legacy = true;
+        {
+            let mut g = m.inner.lock().unwrap();
+            g.legacy = true;
+            g.status.pause = None;
+            g.status.local_pause = None;
+        }
         m
+    }
+
+    /// Turn protection off (`PauseProtection`), checked like the agent:
+    /// lockout, policy, then the token.
+    fn pause(&self, token: &TokenInput, mode: PauseMode, minutes: Option<u32>) -> PauseResult {
+        let now = now_ms();
+        let mut g = self.inner.lock().unwrap();
+        self.expire_pause(&mut g, now);
+        let offer = g.status.local_pause.clone().unwrap_or_default();
+        if let Some(until) = offer.locked_until_ms.filter(|u| *u > now) {
+            return PauseResult {
+                locked_until_ms: Some(until),
+                ..pause_fail(PauseError::LockedOut, "Too many wrong tokens.")
+            };
+        }
+        let denied = |d| PauseResult {
+            denied: Some(d),
+            ..pause_fail(
+                PauseError::NotAllowed,
+                "Not allowed by your organisation's policy.",
+            )
+        };
+        if !offer.enabled {
+            return denied(PauseDenied::Disabled);
+        }
+        if let Some(p) = &g.status.pause {
+            return PauseResult {
+                state: Some(p.clone()),
+                ..pause_fail(PauseError::AlreadyOff, "Protection is already off.")
+            };
+        }
+        if mode == PauseMode::Full && !offer.allow_full {
+            return denied(PauseDenied::ModeNotAllowed);
+        }
+        let duration_ok = match minutes {
+            None => offer.allow_until_resumed,
+            Some(m) => offer.minutes.contains(&m),
+        };
+        if !duration_ok {
+            return denied(PauseDenied::DurationNotAllowed);
+        }
+        if token.0.trim() != MOCK_TOKEN {
+            g.pause_failures += 1;
+            if g.pause_failures >= PAUSE_MAX_FAILURES {
+                g.pause_failures = 0;
+                let shift = g.pause_lockouts.min(6);
+                g.pause_lockouts += 1;
+                let until = now + (PAUSE_LOCKOUT_BASE_MS << shift).min(PAUSE_LOCKOUT_MAX_MS);
+                if let Some(o) = g.status.local_pause.as_mut() {
+                    o.locked_until_ms = Some(until);
+                }
+                return PauseResult {
+                    locked_until_ms: Some(until),
+                    ..pause_fail(PauseError::LockedOut, "Too many wrong tokens.")
+                };
+            }
+            return PauseResult {
+                attempts_left: Some(PAUSE_MAX_FAILURES - g.pause_failures),
+                ..pause_fail(PauseError::WrongToken, "Wrong token.")
+            };
+        }
+        g.pause_failures = 0;
+        if let Some(o) = g.status.local_pause.as_mut() {
+            o.locked_until_ms = None;
+        }
+        let state = PauseState {
+            mode,
+            since_ms: now,
+            until_ms: minutes.map(|m| now + i64::from(m) * MIN),
+            by_user: MOCK_USER.into(),
+        };
+        g.status.pause = Some(state.clone());
+        let item = ActivityItem {
+            id: Uuid::new_v4(),
+            ts: now,
+            title: match mode {
+                PauseMode::DetectionOnly => {
+                    "Protection was turned off on this PC (detection only)".into()
+                }
+                PauseMode::Full => "Protection was turned off completely on this PC".into(),
+            },
+            body: format!(
+                "{MOCK_USER} turned Kestrel's protection off with the uninstall token. IT has been told."
+            ),
+            severity: Severity::High,
+            alert_id: None,
+            file: None,
+            action_taken: "Protection turned off".into(),
+            review: None,
+        };
+        g.items.insert(0, item.clone());
+        drop(g);
+        let _ = self.push.send(TrayResponse::Notification(item));
+        PauseResult {
+            ok: true,
+            error: None,
+            message: "Protection is off.".into(),
+            attempts_left: None,
+            locked_until_ms: None,
+            denied: None,
+            state: Some(state),
+        }
+    }
+
+    /// Turn protection back on (`ResumeProtection`, no token).
+    fn resume(&self) -> PauseResult {
+        let mut g = self.inner.lock().unwrap();
+        if g.status.pause.take().is_none() {
+            return pause_fail(PauseError::NotOff, "Protection is already on.");
+        }
+        let item = turned_on_item(&format!(
+            "{MOCK_USER} turned protection back on from the tray."
+        ));
+        g.items.insert(0, item.clone());
+        drop(g);
+        let _ = self.push.send(TrayResponse::Notification(item));
+        PauseResult {
+            ok: true,
+            error: None,
+            message: "Protection is back on.".into(),
+            attempts_left: None,
+            locked_until_ms: None,
+            denied: None,
+            state: None,
+        }
+    }
+
+    /// End a timed pause that has run out (the agent does this on a timer).
+    fn expire_pause(&self, g: &mut Inner, now: TimestampMs) {
+        if g.status
+            .pause
+            .as_ref()
+            .is_some_and(|p| p.until_ms.is_some_and(|u| now >= u))
+        {
+            g.status.pause = None;
+            let item =
+                turned_on_item("The chosen time ran out, so Kestrel turned protection back on.");
+            g.items.insert(0, item.clone());
+            let _ = self.push.send(TrayResponse::Notification(item));
+        }
     }
 
     /// Simulate IT asking the employee for consent (pushed to `remote_consent`
@@ -492,7 +713,11 @@ impl MockAgent {
 
     async fn handle(&self, req: TrayRequest) -> TrayResponse {
         match req {
-            TrayRequest::Status => TrayResponse::Status(self.inner.lock().unwrap().status.clone()),
+            TrayRequest::Status => {
+                let mut g = self.inner.lock().unwrap();
+                self.expire_pause(&mut g, now_ms());
+                TrayResponse::Status(g.status.clone())
+            }
             TrayRequest::Activity { limit } => {
                 let g = self.inner.lock().unwrap();
                 TrayResponse::Activity {
@@ -545,7 +770,39 @@ impl MockAgent {
             TrayRequest::ConsentResponse { request_id, allow } => {
                 self.answer_consent(request_id, allow)
             }
+            TrayRequest::PauseProtection { .. } | TrayRequest::ResumeProtection
+                if self.inner.lock().unwrap().legacy =>
+            {
+                // Exactly what an older agent says about an op it doesn't know.
+                TrayResponse::Error {
+                    message: format!("bad request: unknown variant `{}`", req.op()),
+                }
+            }
+            TrayRequest::PauseProtection {
+                token,
+                mode,
+                minutes,
+            } => {
+                // A short delay on every attempt, as a real token check takes a moment.
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                TrayResponse::PauseResult(self.pause(&token, mode, minutes))
+            }
+            TrayRequest::ResumeProtection => TrayResponse::PauseResult(self.resume()),
         }
+    }
+}
+
+fn turned_on_item(body: &str) -> ActivityItem {
+    ActivityItem {
+        id: Uuid::new_v4(),
+        ts: now_ms(),
+        title: "Protection is back on".into(),
+        body: body.into(),
+        severity: Severity::Low,
+        alert_id: None,
+        file: None,
+        action_taken: "Protection turned back on".into(),
+        review: None,
     }
 }
 

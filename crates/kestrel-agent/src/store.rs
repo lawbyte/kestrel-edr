@@ -50,7 +50,8 @@ impl Priority {
             AgentPayload::Alert(_)
             | AgentPayload::ActionResult { .. }
             | AgentPayload::ReviewRequest(_)
-            | AgentPayload::UpdateResult { .. } => Priority::High,
+            | AgentPayload::UpdateResult { .. }
+            | AgentPayload::Pause(_) => Priority::High,
         }
     }
 }
@@ -68,6 +69,7 @@ pub fn payload_kind(p: &AgentPayload) -> &'static str {
         AgentPayload::RenewCertificate { .. } => "renew_certificate",
         AgentPayload::UpdateResult { .. } => "update_result",
         AgentPayload::Live { .. } => "live",
+        AgentPayload::Pause(_) => "pause",
     }
 }
 

@@ -1324,3 +1324,161 @@ code {
 .consent-result {
   flex: none;
 }
+
+/* ---- Protection turned off (local switch) -------------------------------- */
+/* Amber like "attention", but a hollow shield with pause bars and the words
+   "Protection is off": never colour alone. */
+.hero--paused {
+  --field: var(--attention-field);
+  --ink: var(--attention-ink);
+  border-color: color-mix(in srgb, var(--attention) 45%, transparent);
+}
+.shield--paused {
+  --c: var(--attention);
+}
+.shield--paused .shield__hollow {
+  stroke-width: 2;
+}
+.shield--paused .shield__glyph-stroke--ink {
+  stroke: var(--attention-ink);
+}
+.dot--paused {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--attention);
+}
+.hero__facts {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.hero__facts li + li {
+  margin-top: 2px;
+  color: var(--text-2);
+}
+.hero__error {
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: var(--unavailable-ink);
+}
+.pausebar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 12px 12px 12px 14px;
+  border-radius: 8px;
+  background: var(--layer);
+  border: 1px solid var(--stroke);
+}
+.pausebar__icon {
+  display: grid;
+  place-items: center;
+  color: var(--text-2);
+}
+.pausebar__text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.pausebar__title {
+  font-weight: 600;
+}
+.pausebar__sub {
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--text-2);
+}
+
+/* Dialog form controls */
+.pause-dialog .field + .field,
+.pause-dialog .field + .pause-warning,
+.pause-dialog .pause-warning + .field {
+  margin-top: 14px;
+}
+.field__input,
+.pause-dialog select {
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 1px solid var(--stroke-strong);
+  border-bottom: 1px solid var(--text-3);
+  border-radius: 4px;
+  background: var(--layer-alt);
+  color: var(--text);
+  font: 14px/20px var(--font);
+}
+.field__input:focus,
+.pause-dialog select:focus {
+  outline: none;
+  border-bottom: 2px solid var(--accent);
+  padding-bottom: 4px;
+}
+.field__label code {
+  font-family: var(--font-mono);
+  font-weight: 400;
+}
+.pause-modes {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.pause-modes legend {
+  padding: 0;
+  margin-bottom: 6px;
+}
+.radio {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--stroke);
+  border-radius: 6px;
+  background: var(--layer);
+  cursor: pointer;
+}
+.radio + .radio {
+  margin-top: 6px;
+}
+.radio:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.radio input {
+  margin: 3px 0 0;
+  accent-color: var(--accent);
+}
+.radio > span {
+  display: flex;
+  flex-direction: column;
+}
+.radio__label {
+  font-weight: 600;
+  font-size: 13px;
+}
+.radio__detail {
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--text-2);
+}
+.pause-warning {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 4px;
+  background: var(--attention-field);
+  border: 1px solid color-mix(in srgb, var(--attention) 50%, transparent);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 16px;
+}
+.pause-warning > svg {
+  flex: none;
+  margin-top: 1px;
+  color: var(--attention-ink);
+}

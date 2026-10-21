@@ -1161,6 +1161,10 @@ pub(crate) struct EngineState {
     autorun_reissue: HashMap<String, (TimestampMs, Option<ResponseAction>)>,
     /// RW / CD / PS rule families (see `families`).
     families: Vec<Box<dyn Family>>,
+    /// Protection turned off locally (tray switch): every hit is forced to
+    /// Audit and no response action leaves the engine except resuming a
+    /// suspended process.
+    paused: Option<kestrel_common::PauseMode>,
 }
 
 fn kind_bit(k: EventKind) -> u32 {
@@ -1210,6 +1214,7 @@ impl EngineState {
             last_evict: 0,
             autorun_reissue: HashMap::new(),
             families: crate::families::all(),
+            paused: None,
         };
         s.set_sigma(sigma);
         s.update_policy(policy);
@@ -1239,6 +1244,56 @@ impl EngineState {
             }
         }
         self.policy = p;
+    }
+
+    /// Turn the local pause on (`Some`) or off (`None`). Entering a pause
+    /// releases every open suspend window (`ResumeProcess`), drops held-back
+    /// autorun removals and pending ClickFix kills, so nothing queued before
+    /// the switch acts while protection is off.
+    pub fn set_paused(&mut self, mode: Option<kestrel_common::PauseMode>) -> Vec<Output> {
+        self.paused = mode;
+        if mode.is_some() {
+            for w in std::mem::take(&mut self.suspends) {
+                self.out.push(Output::Action(ResponseAction::ResumeProcess {
+                    pid: w.pid,
+                    guid: Some(w.guid),
+                }));
+            }
+            for (_, pending) in self.autorun_reissue.values_mut() {
+                *pending = None;
+            }
+            for c in self.clickfix.iter_mut() {
+                c.protect = false;
+            }
+        }
+        let outs = std::mem::take(&mut self.out);
+        self.gate(outs)
+    }
+
+    pub fn paused(&self) -> Option<kestrel_common::PauseMode> {
+        self.paused
+    }
+
+    /// While paused only `ResumeProcess` may leave the engine (undoing a
+    /// suspend is never containment) and alerts carry no actions.
+    pub fn gate(&self, outs: Vec<Output>) -> Vec<Output> {
+        if self.paused.is_none() {
+            return outs;
+        }
+        outs.into_iter()
+            .filter_map(|o| match o {
+                Output::Action(a @ ResponseAction::ResumeProcess { .. }) => Some(Output::Action(a)),
+                Output::Action(_) => None,
+                Output::Alert(mut d) => {
+                    d.actions.clear();
+                    if d.alert.mode == RuleMode::Protect {
+                        d.alert.mode = RuleMode::Audit;
+                    }
+                    d.alert.protection_off = self.paused;
+                    Some(Output::Alert(d))
+                }
+            })
+            .collect()
     }
 
     pub fn update_rules(&mut self, b: RuleBundle) -> Result<(), DetectError> {
@@ -1934,6 +1989,12 @@ impl EngineState {
         if mode == RuleMode::Off {
             return;
         }
+        // Protection turned off locally: detect and report only.
+        let mode = if self.paused.is_some() && mode == RuleMode::Protect {
+            RuleMode::Audit
+        } else {
+            mode
+        };
         let proc_ = hit
             .process
             .take()
@@ -2172,6 +2233,7 @@ impl EngineState {
             data_at_risk,
             evidence,
             actions: vec![],
+            protection_off: self.paused,
         };
         self.out.push(Output::Alert(Detection { alert, actions }));
     }

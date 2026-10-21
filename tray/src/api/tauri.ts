@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { parseActivityItem, parseConsentRequest, parseRemoteSession, parseStatus, type ActivityItem, type TrayStatus } from "../protocol";
+import { parseActivityItem, parseConsentRequest, parsePauseResult, parseRemoteSession, parseStatus, type ActivityItem, type TrayStatus } from "../protocol";
 import type { Ack, KestrelApi, Tab, WindowMode } from "./types";
 
 // Data from the backend is re-validated with the same parsers used for the
@@ -28,6 +28,13 @@ export const tauriApi: KestrelApi = {
     return (await invoke<unknown[]>("get_pending_consents")).map(parseConsentRequest);
   },
   respondConsent: (requestId, allow) => invoke<Ack>("respond_consent", { requestId, allow }),
+  // The token goes straight to the backend; it is never logged or stored here.
+  async pauseProtection(token, mode, minutes) {
+    return parsePauseResult(await invoke("pause_protection", { token, mode, minutes }));
+  },
+  async resumeProtection() {
+    return parsePauseResult(await invoke("resume_protection"));
+  },
   onConnection: (cb) => listen<{ connected: boolean; reason: string | null }>("kestrel://connection", (e) => cb(e.payload)),
   onNavigate: (cb) => listen<Tab>("kestrel://navigate", (e) => cb(e.payload)),
   onQuickCheck: (cb) => listen("kestrel://quick-check", () => cb()),

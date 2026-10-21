@@ -4,7 +4,8 @@
 //! [`TrayRequest`]s; the agent answers each with exactly one [`TrayResponse`],
 //! and after `Subscribe` it also pushes `Notification`s on the same pipe.
 //! The tray runs unprivileged; the pipe DACL allows Authenticated Users to
-//! connect, and the agent only exposes the data below (no response actions).
+//! connect, and the agent only exposes the data below (no response actions,
+//! except turning protection off with the uninstall token and back on).
 
 use crate::{alert::Severity, policy::ItContact, TimestampMs};
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,19 @@ pub enum TrayRequest {
         request_id: Uuid,
         allow: bool,
     },
+    /// Turn protection off (tray switch). Needs the device's uninstall
+    /// token; `mode` and `minutes` must be allowed by the policy
+    /// (`TrayStatus.local_pause`). `minutes: None` = until turned back on.
+    /// Answered with `PauseResult` (older agents answer `Error`).
+    PauseProtection {
+        token: crate::pause::TokenInput,
+        #[serde(default)]
+        mode: crate::pause::PauseMode,
+        #[serde(default)]
+        minutes: Option<u32>,
+    },
+    /// Turn protection back on. Never needs a token. Answered with `PauseResult`.
+    ResumeProtection,
 }
 
 /// `SubscribeWith.features` value enabling `TrayResponse::RemoteSession` pushes.
@@ -55,6 +69,7 @@ fn default_limit() -> u32 {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // wire type, one per request: boxing buys nothing
 pub enum TrayResponse {
     Status(TrayStatus),
     Activity {
@@ -76,6 +91,9 @@ pub enum TrayResponse {
     /// subscribed with [`FEATURE_REMOTE_CONSENT`] from the active console
     /// session. No answer by `expires_at` = deny.
     ConsentRequest(ConsentRequest),
+    /// Answer to `PauseProtection` / `ResumeProtection` (only sent in reply
+    /// to those requests, so older trays never see it).
+    PauseResult(crate::pause::PauseResult),
 }
 
 /// What the admin wants to do (consent prompt / session notice).
@@ -152,6 +170,13 @@ pub struct TrayStatus {
     /// Remote-desktop session in progress, if any.
     #[serde(default)]
     pub remote_session: Option<RemoteSessionNotice>,
+    /// Protection turned off on this PC (tray switch), if it is now.
+    #[serde(default)]
+    pub pause: Option<crate::pause::PauseState>,
+    /// What the "Turn off protection" dialog may offer (`None` from older
+    /// agents: hide the button).
+    #[serde(default)]
+    pub local_pause: Option<crate::pause::PauseOffer>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

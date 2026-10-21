@@ -57,6 +57,10 @@ pub struct Policy {
     /// policies saved before this field existed): no remote access.
     #[serde(default)]
     pub remote_access: crate::remote::RemoteAccessProfile,
+    /// Local "turn protection off" switch in the tray (uninstall token
+    /// required). Policies saved before this field get the defaults.
+    #[serde(default)]
+    pub local_pause: crate::pause::LocalPause,
 }
 
 /// Optional sensor groups. Defaults are on; each can be turned off per policy
@@ -148,6 +152,7 @@ impl Default for Policy {
             ioc_block_host_wide: false,
             sensors: SensorSettings::default(),
             remote_access: crate::remote::RemoteAccessProfile::none(),
+            local_pause: crate::pause::LocalPause::default(),
         }
     }
 }

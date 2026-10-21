@@ -5,7 +5,8 @@ import { Link, useNavigate, useParams } from 'react-router'
 import { toast } from 'sonner'
 import { api, qk } from '@/api/endpoints'
 import type { AlertRow, IncidentDetail, KEvent, TimelineEntry, TreeNode } from '@/api/types'
-import { ActionStatusBadge, ModeBadge, PriorityScore, ProvenanceBadges, SeverityBadge, SeverityIcon } from '@/components/badges'
+import { ProtectionOffNote } from '@/components/protection-off'
+import { ActionStatusBadge, DeviceStatusBadge, ModeBadge, PriorityScore, ProvenanceBadges, SeverityBadge, SeverityIcon } from '@/components/badges'
 import { AttackChips, Avatar, Card, EmptyState, ErrorState, KeyValue, LoadingRows, Mono } from '@/components/common'
 import { AssigneeControl, ClassificationControl, StatusControl } from '@/components/incident-controls'
 import { DataAtRiskPanel, PriorityBreakdown, RemediationChecklist, pickTarget } from '@/components/incident-parts'
@@ -185,7 +186,7 @@ function IncidentView({ inc }: { inc: IncidentDetail }) {
                 ['Rules', <span className="font-mono text-xs">{inc.rule_ids.join(', ')}</span>],
                 ['MITRE ATT&CK', <AttackChips ids={inc.attack} max={8} />],
                 ['Device', <Link to={`/devices/${inc.device_id}`} className="font-mono hover:underline">{inc.hostname}</Link>],
-                ['Device status', dev ? <span className="capitalize">{dev.status}</span> : '—'],
+                ['Device status', dev ? <DeviceStatusBadge status={dev.status} /> : '—'],
                 ['Last updated', `${formatDateTime(inc.updated_at)}`],
                 ['Incident id', <Mono className="text-xs text-fg-muted">{inc.id}</Mono>],
               ]}
@@ -257,6 +258,7 @@ function AlertList({ alerts, onExclude, onSelectProcess }: { alerts: AlertRow[];
               <ModeBadge mode={a.mode} />
             </div>
             <p className="mt-0.5 text-sm text-fg-muted">{a.summary}</p>
+            <ProtectionOffNote mode={a.protection_off} className="mt-1.5" />
             {a.rule_author ? (
               <p className="mt-0.5 text-xs text-fg-subtle">
                 Rule by <span className="text-fg-muted">{a.rule_author}</span> (Detection Rule License 1.1)

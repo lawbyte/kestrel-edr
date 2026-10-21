@@ -128,6 +128,7 @@ pub fn describe_action(a: &ResponseAction) -> String {
             None => "scanned running user-path executables".into(),
         },
         ResponseAction::CollectTriage => "collected a triage package".into(),
+        ResponseAction::ResumeProtection => "turned protection back on".into(),
         ResponseAction::RemoveAutorun {
             location,
             value_name,
@@ -1816,6 +1817,7 @@ pub fn server_tamper_alert(
         data_at_risk: vec![],
         evidence: vec![],
         actions: vec![],
+        protection_off: None,
     }
 }
 
@@ -1876,6 +1878,7 @@ mod tests {
                 },
             }],
             actions: vec![],
+            protection_off: None,
         }
     }
 

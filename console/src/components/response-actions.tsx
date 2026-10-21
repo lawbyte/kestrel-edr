@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Ban, Crosshair, FileArchive, Lock, LockOpen, PackageSearch, ScanSearch, ShieldPlus, Skull, Unlink, type LucideIcon } from 'lucide-react'
+import { Ban, Crosshair, FileArchive, Lock, LockOpen, PackageSearch, ScanSearch, Power, ShieldPlus, Skull, Unlink, type LucideIcon } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { toast } from 'sonner'
 import { api } from '@/api/endpoints'
@@ -31,6 +31,7 @@ const ICONS: Partial<Record<ResponseAction['type'], LucideIcon>> = {
   collect_triage: PackageSearch,
   scan: ScanSearch,
   apply_hardening: ShieldPlus,
+  resume_protection: Power,
   suspend_process: Crosshair,
 }
 
@@ -102,7 +103,7 @@ export function ConfirmActionDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        title={`${ACTION_LABEL[a.type]} on ${safeDisplay(device.hostname)}?`}
+        title={`${ACTION_LABEL[a.type]} ${ACTION_LABEL[a.type].endsWith(' on') ? 'for' : 'on'} ${safeDisplay(device.hostname)}?`}
         description={describeAction(a)}
         footer={
           <>

@@ -265,3 +265,47 @@ Three findings from a fresh install of 1.1.2 in the Windows 11 lab VM. Each fix 
     * the agent with other arguments;
     * a `KestrelTray` value pointing elsewhere, or in HKU.
   * Tests: `kestrel_own_install_raises_nothing` (Audit and Protect, lab evidence) and `kestrel_impostors_still_alert`. `ps07_benign_and_never_kestrel` was updated to the new rule.
+
+### 2026-10-21 - local "turn protection off" switch in the tray (owner request)
+
+* The owner asked for an on/off switch in the employee tray app, unlocked with the device's uninstall token. A policy in Audit already gives detection-only for a whole group from the console; the local switch is for a person at one PC without the console, such as an on-site technician or a PC that cannot reach the server.
+* **Turning off needs the uninstall token; turning back on never does.** Wrong tokens are rate-limited (5 failures, then an increasing lockout).
+* **What "off" means is set by policy** (`local_pause`): `detection_only` (default; the agent keeps sensing and reporting, takes no automatic response and stops enforcing hardening) and optionally `full` (sensors stopped, only heartbeats). `full` is off by default because a stolen token would otherwise make the PC invisible.
+* **Duration is set by policy:** timed (15 min, 1 h, 4 h, 8 h, capped by `max_minutes`) with automatic turn-on; "until turned back on" only when the policy allows it.
+* IT sees the state on the device (status, who, mode, until), can turn protection back on remotely, and every off and on is an alert (`TP-06`) and an audit entry. The state persists across reboots and agent restarts.
+
+**Addendum (same day) - local turn-off switch as built.**
+
+* Contract in `kestrel_common::pause` (`PauseMode`, `PauseState`, `LocalPause`, `PauseOffer`, `PauseResult`, `PauseReport`, `TokenInput` with a redacted `Debug`). All additive with `serde(default)`; documented in `docs/contracts.md` "Local turn-off (tray switch)".
+* **`ProtectionState` was not given a `paused` variant.** An older tray would fail to parse an unknown state. The tray derives "Protection is off" from the new `TrayStatus.pause` field instead, and `TrayStatus.local_pause = null` (older agent) hides the switch.
+* **Device status `paused`** ranks below `isolated` and `offline` and above `degraded`, because a full turn-off stops the sensors on purpose and would otherwise show as degraded. A pause whose `until_ms` has passed is not shown as paused (SQL `device_status`, migration 0008).
+* **Two gates for detection only:** `Engine::set_paused` forces Audit, marks `Alert::protection_off` and lets only `ResumeProcess` out (open suspend windows are resumed at once). The agent also refuses every `ActionOrigin::Engine` action except `ResumeProcess`. PS-15 (persistence rollback) does not fire while paused, because it only follows a Protect kill.
+* **Order of checks** for a turn-off request: identity, already off, lockout, policy, token. A request refused by policy never counts as a wrong token. The policy is public in the tray status anyway.
+* **Wrong tokens are reported to the server** (`AgentPayload::Pause{denied}` plus a TP-06 alert) at most once a minute, plus always when a lockout starts. This keeps a local process that spams wrong tokens from flooding the server.
+* **The 24 h reset:** after 24 h without a wrong token, the lockout escalation starts over.
+* **`ResumeProtection` privilege:** `response.collect`, the lowest response privilege. Turning protection back on only restores the safe state.
+* **TP-06 alerts are built by the agent** (`kestrel_detect::catalog::protection_alert`), not by an event. This keeps them working in full mode with the sensors stopped, and the policy and exclusions cannot silence them. The subject is the agent process, with the tray user as `user`. The usernames in summaries and reports are pseudonymised with the policy's username hashing.
+* **`max_minutes` above 480** only raises the cap the agent accepts. The tray offers 15 min, 1 h, 4 h and 8 h (plus `max_minutes` itself when it is below 8 h). The server accepts values from 1 to 10080.
+* **Hardening after turn-on** is re-applied in the background (housekeeping), so the tray's request does not wait for AppLocker or PowerShell.
+
+**Addendum (same day) - hostile review of the switch, triage.**
+
+* **Fixed:**
+  * **H1, token phishing by a pipe instance from a session-0 service account.** The tray now checks that the pipe server's image is `kestrel-agent.exe` in its own install folder before it sends `PauseProtection`.
+    * The agent's pipe DACL was **not** narrowed (dropping `FILE_CREATE_PIPE_INSTANCE` for Authenticated Users). tokio's client opens with `GENERIC_WRITE`, which includes that right, so every tray would fail to connect. That needs a lab test first.
+  * **M2.** `TP-06` "started with protection still turned off" is raised on every agent start while off.
+  * **M3.** A full pause in the previous heartbeat counts as ETW healthy, so a failed sensor restart still raises `TP-SRV-ETW`.
+  * **M5.** `paused` follows `health.pause` regardless of the agent clock. A pause still reported 10 minutes past `until_ms` raises `TP-SRV-PAUSE-OVERDUE`.
+  * **L4.** A clock set back no longer resets the lockout escalation.
+  * **L5.** The full-pause check now runs under the sensors lock.
+  * **L6.** Fixed the `reconcile` doc.
+  * Turning protection back on re-applies hardening in the background.
+* **Kept as designed (owner decisions), for the owner to reconsider:**
+  * **H2.** `local_pause.enabled` defaults to true, so older policies get the switch after upgrade. Before this, the token was useful only together with admin rights (msiexec uninstall). An admin who wants the old behaviour turns the switch off in the policy.
+  * **M4.** The lockout is per device, as decided. A local process can keep the switch locked by spamming wrong tokens. It shows as High `TP-06` alerts, and IT can still use the console or an Audit policy.
+* **Proposed, not built:**
+  * **M1.** Rotate the uninstall token automatically after a successful turn-off (server queues `SetUninstallToken`), or use a separate single-use "pause code".
+  * Optional `require_admin` for the switch.
+  * Server-side rate limit of `Pause` reports (L7).
+  * Ordering of `Pause` reports against heartbeats (L2).
+* **The switch stays enabled by default** (`local_pause.enabled = true`, detection-only, at most 8 h, no "completely off" and no "until turned back on" unless the policy allows them). Anyone who holds a device's uninstall token can already remove Kestrel from it entirely, which is stronger than a timed detection-only pause, so the default adds no new power to the token. Admins who want stricter control turn it off per policy.

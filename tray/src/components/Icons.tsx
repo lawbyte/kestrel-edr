@@ -3,7 +3,8 @@
 // (scripts/gen-icons.mjs) so the window and the notification area agree.
 import type { ProtectionState } from "../protocol";
 
-export type ShieldKind = ProtectionState | "unavailable" | "loading";
+/** `paused` = protection turned off on this PC (tray switch); derived from `TrayStatus.pause`. */
+export type ShieldKind = ProtectionState | "unavailable" | "loading" | "paused";
 
 const SHIELD = "M16 1.5 L28.5 5.8 V15 C28.5 22.8 23.5 27.8 16 30.5 C8.5 27.8 3.5 22.8 3.5 15 V5.8 Z";
 
@@ -15,7 +16,7 @@ export function StateShield({ kind, size = 72 }: { kind: ShieldKind; size?: numb
           <path d={SHIELD} className="shield__hollow" strokeWidth="1.6" strokeLinejoin="round" />
           <path d="M16 2.6 V29.3 C9.3 26.8 4.6 22 4.6 15 V6.6 Z" className="shield__fill" />
         </>
-      ) : kind === "unavailable" || kind === "loading" ? (
+      ) : kind === "unavailable" || kind === "loading" || kind === "paused" ? (
         <path d={SHIELD} className="shield__hollow" strokeWidth="1.6" strokeLinejoin="round" />
       ) : (
         <path d={SHIELD} className="shield__fill" />
@@ -41,6 +42,7 @@ export function StateShield({ kind, size = 72 }: { kind: ShieldKind; size?: numb
           <path d="M9.2 10 L23.4 24.2" className="shield__glyph-stroke" strokeWidth="1.8" />
         </>
       )}
+      {kind === "paused" && <path d="M12.9 10.6 V20.4 M19.1 10.6 V20.4" className="shield__glyph-stroke shield__glyph-stroke--ink" strokeWidth="3" />}
       {kind === "unavailable" && <path d="M11.8 11.4 L20.2 19.8 M20.2 11.4 L11.8 19.8" className="shield__glyph-stroke shield__glyph-stroke--ink" strokeWidth="2.6" />}
     </svg>
   );
@@ -196,3 +198,8 @@ export function SeverityMark({ severity }: { severity: "info" | "low" | "medium"
     </svg>
   );
 }
+
+/** Power symbol (turn protection off / back on). */
+export const IconPower = ({ size = 16 }: P) => svg(size, <path d="M8 2.5v5M5 4.4a4.75 4.75 0 1 0 6 0" />);
+/** Triangle warning sign (shown with a text label, never alone). */
+export const IconWarning = ({ size = 16 }: P) => svg(size, <path d="M8 2.6 14 13H2Z M8 6.6v3M8 11.2h.01" />);

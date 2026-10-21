@@ -355,6 +355,23 @@ export const BUILTIN_RULES: RuleMeta[] = [
     references: [],
     false_positives: ['Sleep/hibernate on laptops', 'Network outages'],
   },
+  {
+    id: 'TP-06',
+    name: 'Protection turned off on the device',
+    description:
+      'Someone turned Kestrel protection off from the tray with the device’s uninstall token (detection only: medium; completely off: high). The same rule reports when protection comes back on (info) and wrong uninstall tokens (medium). It never acts.',
+    kind: 'builtin',
+    category: 'tamper',
+    severity: 'medium',
+    attack: ['T1562.001'],
+    default_mode: 'audit',
+    protect_day_one: false,
+    protect_action: 'Alert only (never acts)',
+    author: KESTREL,
+    license: LIC,
+    references: [],
+    false_positives: ['A technician turning protection off to install or troubleshoot approved software'],
+  },
 ]
 
 export const SIGMA_SAMPLE = `title: Suspicious ClickFix/FileFix execution pattern

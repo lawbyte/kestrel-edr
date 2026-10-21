@@ -165,4 +165,9 @@ pub struct Alert {
     /// Response actions taken automatically by the agent.
     #[serde(default)]
     pub actions: Vec<ActionOutcome>,
+    /// Set when protection was turned off on the device (tray switch) when
+    /// the alert fired: the alert was forced to Audit and no automatic
+    /// response ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection_off: Option<crate::pause::PauseMode>,
 }

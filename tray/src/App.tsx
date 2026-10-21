@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import type { ActivityItem, TrayStatus } from "./protocol";
+import type { ActivityItem, PauseMode, TrayStatus } from "./protocol";
 import { activeRemoteSession, upsertActivity } from "./protocol";
 import type { KestrelApi, Tab, WindowMode } from "./api/types";
 import { toApiError } from "./api/types";
-import { StatusTab, type CheckState } from "./components/StatusTab";
+import { StatusTab, type CheckState, type ResumeState } from "./components/StatusTab";
+import { PauseDialog } from "./components/PauseDialog";
+import { pauseErrorText, pauseTransportText } from "./pause";
 import { ActivityTab } from "./components/ActivityTab";
 import { HelpTab } from "./components/HelpTab";
 import { ReviewDialog } from "./components/ReviewDialog";
@@ -11,7 +13,7 @@ import { RemoteSessionBanner } from "./components/RemoteSessionBanner";
 import { ConsentPrompt, ConsentResultLine } from "./components/ConsentPrompt";
 import { consentReducer, initialConsentState } from "./consent";
 import { IconClose, IconDock, IconHelp, IconHome, IconList, IconPopOut, type ShieldKind } from "./components/Icons";
-import { stateCopy } from "./copy";
+import { shieldKind, stateCopy } from "./copy";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -33,6 +35,9 @@ export function App({ api, initialTab }: Props) {
   const checkRunning = useRef(false);
   const [consent, dispatchConsent] = useReducer(consentReducer, initialConsentState);
   const [now, setNow] = useState(() => Date.now());
+  const [pausing, setPausing] = useState(false);
+  const [resume, setResume] = useState<ResumeState>({ busy: false, error: null });
+  const [pauseNow, setPauseNow] = useState(() => Date.now());
 
   const loadStatus = useCallback(async () => {
     try {
@@ -137,11 +142,25 @@ export function App({ api, initialTab }: Props) {
   const consentOpen = consent.queue.length > 0;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !reviewing && !consentOpen && mode === "flyout") void api.hideWindow();
+      if (e.key === "Escape" && !reviewing && !pausing && !consentOpen && mode === "flyout") void api.hideWindow();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [api, reviewing, consentOpen, mode]);
+  }, [api, reviewing, pausing, consentOpen, mode]);
+
+  // While protection is off: keep the remaining time current and pick up the
+  // automatic turn-on as soon as it is due.
+  const pauseUntil = status?.pause ? status.pause.until_ms : undefined;
+  useEffect(() => {
+    if (pauseUntil === undefined) return;
+    setPauseNow(Date.now());
+    const t = setInterval(() => {
+      const n = Date.now();
+      setPauseNow(n);
+      if (pauseUntil !== null && n >= pauseUntil) void loadStatus();
+    }, 5_000);
+    return () => clearInterval(t);
+  }, [pauseUntil, loadStatus]);
 
   // Countdown / expiry for pending consent requests (no answer = deny).
   useEffect(() => {
@@ -190,7 +209,7 @@ export function App({ api, initialTab }: Props) {
     return () => clearTimeout(t);
   }, [banner]);
 
-  const kind: ShieldKind = unavailable ? "unavailable" : status ? status.state : "loading";
+  const kind: ShieldKind = shieldKind(unavailable, status);
   const remote = unavailable ? null : activeRemoteSession(status?.remote_session);
   const recentBlocks = useMemo(
     () => (items ?? []).filter((i) => i.severity !== "info" && i.review !== "approved" && Date.now() - i.ts < DAY).length,
@@ -210,6 +229,27 @@ export function App({ api, initialTab }: Props) {
       const err = toApiError(e);
       throw new Error(err.kind === "unavailable" ? "Kestrel service isn't running, so the request couldn't be sent. Contact IT directly." : "The request couldn't be sent. Try again in a moment.");
     }
+  };
+
+  const submitPause = (token: string, pauseMode: PauseMode, minutes: number | null) => api.pauseProtection(token, pauseMode, minutes);
+
+  const closePause = () => {
+    setPausing(false);
+    // Return focus to what opened the dialog (or the resume button that replaced it).
+    setTimeout(() => (document.getElementById("resume-btn") ?? document.getElementById("turn-off-btn"))?.focus(), 0);
+  };
+
+  const resumeProtection = async () => {
+    setResume({ busy: true, error: null });
+    try {
+      const r = await api.resumeProtection();
+      // "Already on" needs no message: the refreshed status shows it.
+      setResume({ busy: false, error: r.ok || r.error === "not_off" ? null : pauseErrorText(r) });
+      if (r.ok || r.error === "not_off") setStatus((prev) => (prev ? { ...prev, pause: null } : prev));
+    } catch (e) {
+      setResume({ busy: false, error: pauseTransportText(toApiError(e), true) });
+    }
+    void loadStatus();
   };
 
   const toggleMode = async () => {
@@ -276,6 +316,10 @@ export function App({ api, initialTab }: Props) {
             onQuickCheck={() => void runQuickCheck()}
             onDismissCheck={() => setCheck({ phase: "idle" })}
             onGo={setTab}
+            onTurnOff={() => setPausing(true)}
+            onResume={() => void resumeProtection()}
+            resume={resume}
+            now={pauseNow}
           />
         )}
         {tab === "activity" && <ActivityTab items={items} error={activityError} unavailable={unavailable} onRequestReview={setReviewing} onRetry={() => void loadActivity()} />}
@@ -286,6 +330,21 @@ export function App({ api, initialTab }: Props) {
 
       {consent.queue[0] && (
         <ConsentPrompt entry={consent.queue[0]} now={now} queued={consent.queue.length - 1} onAnswer={(allow) => void answerConsent(consent.queue[0]!.req.request_id, allow)} />
+      )}
+
+      {pausing && !consentOpen && status?.local_pause && !status.pause && (
+        <PauseDialog
+          offer={status.local_pause}
+          hostname={status.hostname}
+          onSubmit={submitPause}
+          onDone={(r) => {
+            setStatus((prev) => (prev && r.state ? { ...prev, pause: r.state } : prev));
+            setResume({ busy: false, error: null });
+            closePause();
+            void loadStatus();
+          }}
+          onClose={closePause}
+        />
       )}
 
       {reviewing && !consentOpen && <ReviewDialog item={reviewing} hostname={status?.hostname ?? ""} onSubmit={submitReview} onClose={() => setReviewing(null)} />}

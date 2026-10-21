@@ -6,6 +6,7 @@ import { SearchInput } from '@/components/filters'
 import { Mono } from '@/components/common'
 import { Tooltip } from '@/components/ui/misc'
 import { formatDateTime, shortHash } from '@/lib/format'
+import { AUDIT_ACTION_LABEL } from '@/lib/labels'
 import { cn } from '@/lib/utils'
 import { SettingsLoading, SettingsSection } from '../settings'
 
@@ -63,6 +64,7 @@ export default function AuditTab() {
                     <td className="px-3 py-2 text-xs">{e.actor?.email ?? <span className="text-fg-subtle">Kestrel (automatic)</span>}</td>
                     <td className="px-3 py-2">
                       <code className="text-xs">{e.action}</code>
+                      {AUDIT_ACTION_LABEL[e.action] ? <div className="text-xs text-fg-muted">{AUDIT_ACTION_LABEL[e.action]}</div> : null}
                     </td>
                     <td className="max-w-[260px] truncate px-3 py-2 text-xs text-fg-muted">{e.target}</td>
                     <td className="px-3 py-2">

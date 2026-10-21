@@ -10,7 +10,7 @@ Every component builds against these. Change them only together with all callers
 | Tray ↔ agent | `kestrel_common::tray` over `\\.\pipe\kestrel-tray`, JSON lines |
 | Console ↔ server | REST API below |
 
-Product name: **Kestrel EDR**. Rule ids: `ST-01`…`ST-16` (stealer), `TP-01`…`TP-05` (tamper), custom Sigma rules `SIG-<uuid8>`.
+Product name: **Kestrel EDR**. Rule ids: `ST-01`…`ST-16` (stealer), `TP-01`…`TP-06` (tamper; `TP-06` is raised by the agent itself for the local turn-off switch), custom Sigma rules `SIG-<uuid8>`.
 
 ---
 
@@ -60,7 +60,7 @@ Other privileges: `policies.write`, `rules.write`, `devices.write`, `users.write
 `GET /dashboard` →
 ```json
 {
-  "devices": {"total": 120, "online": 112, "offline": 6, "isolated": 1, "degraded": 1},
+  "devices": {"total": 120, "online": 111, "offline": 6, "isolated": 1, "degraded": 1, "paused": 1},
   "incidents": {"open": 4, "critical": 1, "high": 2, "mttr_hours_30d": 3.5},   // mttr: null when nothing was resolved in 30 days
   "alerts_24h": 17,
   "blocked_24h": 6,
@@ -75,11 +75,13 @@ Other privileges: `policies.write`, `rules.write`, `devices.write`, `users.write
 
 ### Devices
 
-`Device = {id, hostname, os_name, os_build, arch, domain, agent_version, status: "online"|"offline"|"degraded"|"isolated", last_seen: ms, first_seen: ms, ip_addresses: [string], logged_on_user, group_id, group_name, policy_id, policy_name, policy_version_applied, tags: [string], health: AgentHealth (see kestrel-common wire.rs), open_incidents: int, cert_expires_at: ms|null, possible_duplicates: [device id], uninstall_token_set: bool, uninstall_token_pending: bool}`
+`Device = {id, hostname, os_name, os_build, arch, domain, agent_version, status: "online"|"offline"|"degraded"|"isolated"|"paused", last_seen: ms, first_seen: ms, ip_addresses: [string], logged_on_user, group_id, group_name, policy_id, policy_name, policy_version_applied, tags: [string], health: AgentHealth (see kestrel-common wire.rs), open_incidents: int, cert_expires_at: ms|null, possible_duplicates: [device id], uninstall_token_set: bool, uninstall_token_pending: bool, pause: PauseState|null}`
+
+`pause` (also `health.pause`): protection turned off locally with the tray switch, `PauseState = {mode: "detection_only"|"full", since_ms, until_ms: ms|null (null = until turned back on), by_user}` (`kestrel_common::pause`; `by_user` pseudonymised like `logged_on_user`). See [Local turn-off](#local-turn-off-tray-switch).
 
 `logged_on_user` (and `health.logged_on_user`) is a pseudonym (`u_` + 16 hex) when the device's policy has `privacy.hash_usernames`. `possible_duplicates` lists devices that enrolled with the same hardware UUID; enrollment never re-binds an existing device id.
 
-Status rule: `isolated` if health.isolated; else `offline` if last_seen older than 3 min; else `degraded` if !health.etw_ok or etw_events_lost increased in last hour; else `online`.
+Status rule (SQL `device_status`, migration 0008): `isolated` if health.isolated; else `offline` if last_seen older than 3 min; else `paused` if `health.pause` is set (the agent clears it when protection comes back on; a pause still reported 10 min after its `until_ms` raises `TP-SRV-PAUSE-OVERDUE`); else `degraded` if !health.etw_ok or etw_events_lost increased in last hour; else `online`. `paused` ranks above `degraded` because a full turn-off stops the sensors on purpose.
 
 | Method | Path | Notes |
 |---|---|---|
@@ -116,7 +118,9 @@ Device event timelines and hunt results render the v1.1 events (`file_activity`,
 
 Alerts are grouped into incidents server-side: same device + same root process tree (topmost non-system ancestor GUID) within 30 min → same incident; an open incident whose root is one of the alert's ancestors (e.g. ClickFix: `explorer.exe` RunMRU alert → `powershell.exe` → payload, all rooted at system-path binaries) also absorbs it (exact root match preferred); otherwise new incident.
 
-`AlertRow = {id, incident_id, device_id, hostname, ts, rule_id, rule_name, rule_author, severity, attack: [string], mode, summary, process_guid, image, data_at_risk: [DataCategory], actions: [ActionOutcome], status: "new"|"acknowledged"|"closed"}`
+`AlertRow = {id, incident_id, device_id, hostname, ts, rule_id, rule_name, rule_author, severity, attack: [string], mode, summary, process_guid, image, data_at_risk: [DataCategory], actions: [ActionOutcome], status: "new"|"acknowledged"|"closed", protection_off: "detection_only"|"full"|null}`
+
+`protection_off` (from `Alert::protection_off`, additive) is set when protection was turned off on the device when the alert fired: the alert was forced to Audit and no automatic action ran.
 
 `Incident = {id, title, severity, priority: 0-100, status: "open"|"in_progress"|"resolved"|"dismissed", classification: null|"true_positive"|"false_positive"|"benign", assignee: User|null, device_id, hostname, user, created_at, updated_at, alert_count, rule_ids: [string], attack: [string], data_at_risk: [DataCategory], contained: bool}`
 
@@ -151,6 +155,20 @@ Title auto-generated, first match wins: all alerts `TP-*` → `"Agent tampering 
   - **Lift network block**: once a block scoped to an executable succeeded (`block_image_network`, or `block_destination` with `image`) — reported in an alert's `actions` or as the result of an analyst command on the incident — an `approve` item *"Lift network block for <image> (only if it was a false positive)"* with `unblock_network {image}` is added (one per image). It closes when an `unblock_network` for that image (or for every block) succeeds.
 - `comments: [{id, author: User, body, ts}]`
 `}`
+
+### Local turn-off (tray switch)
+
+Owner decision 2026-10-21 (`docs/DECISIONS.md`). Types: `kestrel_common::pause`.
+
+* **Policy** `Policy.local_pause: LocalPause = {enabled: bool (default true), allow_full: bool (default false), max_minutes: u32 (default 480), allow_until_resumed: bool (default false)}`, `#[serde(default)]` (older policies get the defaults). `PUT /policies/:id` refuses `max_minutes` outside 1..=10080 (400). Offered durations: 15, 60, 240, 480 minutes capped by `max_minutes` (plus `max_minutes` itself when it is below 480 and not a step), and "until turned back on" only with `allow_until_resumed`. A `max_minutes` above 480 only raises the cap the agent accepts; the tray never offers more than 8 hours.
+* **Tray side:** before sending `PauseProtection` (the only request carrying a secret) the tray checks that the pipe server process is `kestrel-agent.exe` in its own install folder (`GetNamedPipeServerProcessId` + `QueryFullProcessImageNameW`), on top of the session-0 check every connection gets; a service account in session 0 adding a pipe instance cannot collect the token.
+* **Tray protocol** (additive): `TrayRequest::PauseProtection {token: string, mode: "detection_only"|"full" (default detection_only), minutes: u32|null (null = until turned back on)}` and `TrayRequest::ResumeProtection` (never a token). Both are answered with `TrayResponse::PauseResult(PauseResult {ok, error: null|"wrong_token"|"locked_out"|"not_allowed"|"already_off"|"not_off"|"unidentified"|"internal", message, attempts_left, locked_until_ms, denied: null|"disabled"|"mode_not_allowed"|"duration_not_allowed", state: PauseState|null})`; an older agent answers `Error`. `TrayStatus` gains `pause: PauseState|null` and `local_pause: PauseOffer|null` (`{enabled, allow_full, minutes: [u32], allow_until_resumed, locked_until_ms}`; `null` from older agents = hide the switch). `TrayStatus.state` keeps its usual value; the tray derives "Protection is off" from `pause`. Turn-off and turn-on also push a public `Notification`.
+* **Agent enforcement** (`crates/kestrel-agent/src/pause.rs`): order of checks = caller identity (pipe client token user; unidentified = `unidentified`), already off, lockout, policy (`LocalPause::check`, never counted as a wrong token), token (Argon2id `verify_uninstall_token` on a blocking thread; never logged, stored, uploaded; `TokenInput`'s `Debug` is redacted). Wrong tokens: 5 per round, then a lockout of 1 min doubling per round up to 1 h; per device (not per pipe client), persisted in the agent store (`pause_lockout`) so restarts do not reset it; a correct token or 24 h without a wrong one resets the escalation. Every wrong token is reported (`AgentPayload::Pause{event: denied}` + `TP-06` alert) at most once a minute, plus always when a lockout starts.
+* **Effect.** `detection_only`: sensors, detection, alerts and telemetry continue; `Engine::set_paused` forces every alert to Audit with `Alert::protection_off` set and lets no `Output::Action` out except `ResumeProcess` (open suspend windows are resumed at once, held autorun removals and ClickFix kills dropped); the agent additionally refuses every `ActionOrigin::Engine` action except `ResumeProcess`; automatic hardening (policy change, start, 15-min re-check) is neither re-applied nor reverted; analyst commands (`ActionOrigin::ServerCommand`) still run. `full`: the same, and the sensors are stopped and not restarted by housekeeping or policy changes; heartbeat, health, transport and tray continue.
+* **State**: `PauseState` persisted in the agent store (`pause_state`, `%ProgramData%\Kestrel`), so it survives restarts and reboots; the agent turns protection back on at `until_ms` (checked every 5 s) and at start when `until_ms` passed while it was down. Turning back on restarts the sensors (full) and re-applies hardening. A new policy that disables the switch or `full` ends the pause (`reason: policy`); a lower `max_minutes` or a lost `allow_until_resumed` clamps `until_ms` to `now + max_minutes` (`event: clamped`).
+* **Wire** (additive): `Hello.pause`, `AgentHealth.pause` (`PauseState|null`), `AgentPayload::Pause(PauseReport {event: "off"|"on"|"clamped"|"denied", ts, state, reason: null|"manual"|"expired"|"console"|"policy", by_user, failures, locked_until_ms})` (outbox priority High; older servers drop it). `ResponseAction::ResumeProtection` (`{"type":"resume_protection"}`, privilege `response.collect`, issued with `POST /devices/:id/actions`): the agent ends the pause (`reason: console`) or answers ok "nothing to do"; the engine can never issue it.
+* **Server**: `pause_report` writes the audit entry (`device.protection_off`, `device.protection_on`, `device.protection_off_clamped`, `device.protection_off_denied`; actor system; target device id; details `{hostname, ts, mode, since_ms, until_ms, by_user, reason, failures, locked_until_ms}`) and updates `health.pause` at once; `Hello` sets `health.pause` too. While the current heartbeat reports a `full` pause, `TP-SRV-ETW` is not raised (a paused previous heartbeat counts as healthy, so sensors that fail to come back still raise it); `TP-SRV-EVENTS-LOST` is not raised across a full pause. `TP-SRV-PAUSE-OVERDUE` (medium): a heartbeat still carries a pause 10 min after its `until_ms` (agent clock set back, or the automatic turn-on failed). On start with protection still off the agent raises `TP-06` again ("started with protection still turned off").
+* **TP-06** "Protection turned off on the device" (tamper, Audit, never acts, cannot be excluded): medium for detection only, high for completely off; info when protection comes back on or a pause is shortened; medium for a wrong token, high when a lockout starts. Built by `kestrel_detect::catalog::protection_alert`; the subject is the agent process with the tray user as `user`.
 
 ### Response actions
 
@@ -345,7 +363,7 @@ Error details such as `reason` and `remote_code` are fields of the `error` objec
 
 - `kestrel-agent uninstall --token <t>` and `kestrel-agent release-isolation --token <t>` (also `KESTREL_UNINSTALL_TOKEN`) need the device's uninstall token and administrator rights. `release-isolation` is the local break-glass for an isolated host that cannot reach the server: it removes Kestrel's isolation filters and the running service does not re-apply them.
 - The MSI no longer takes an uninstall token at install; the server issues it at enrollment. If the server issues none (old server), `install` writes a random one to `C:\ProgramData\Kestrel\uninstall-token.txt` (administrators only), replaced at the next enrollment. MSI uninstall still needs `UNINSTALL_TOKEN=`.
-- Tray pipe (`kestrel_common::tray`): every request is attributed to the pipe client's identity (its process token). `Activity` returns the caller's own items plus machine-wide ones; notifications go only to their owner's tray; `RequestReview` only for alerts the caller can see, once per alert until IT decides, at most 5 per user per hour; `QuickCheck` at most once per 5 minutes (a recent result is returned otherwise).
+- Tray pipe (`kestrel_common::tray`): every request is attributed to the pipe client's identity (its process token). `Activity` returns the caller's own items plus machine-wide ones; notifications go only to their owner's tray; `RequestReview` only for alerts the caller can see, once per alert until IT decides, at most 5 per user per hour; `QuickCheck` at most once per 5 minutes (a recent result is returned otherwise); `PauseProtection` needs the uninstall token and an identified caller and is rate-limited per device, `ResumeProtection` needs nothing (see [Local turn-off](#local-turn-off-tray-switch)).
 
 ## Event provenance fields (v1.1, additive)
 

@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/lawbyte/kestrel-edr/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/lawbyte/kestrel-edr/ci.yml?branch=main&style=flat&label=CI"></a>
   <a href="https://lawbyte.github.io/kestrel-edr/"><img alt="Docs" src="https://img.shields.io/badge/docs-online-4357c9?style=flat"></a>
-  <a href="https://github.com/lawbyte/kestrel-edr/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.1.3-4357c9?style=flat"></a>
+  <a href="https://github.com/lawbyte/kestrel-edr/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.1.4-4357c9?style=flat"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-555c6b?style=flat"></a>
   <img alt="Windows 10 and 11" src="https://img.shields.io/badge/endpoint-Windows%2010%20%7C%2011-555c6b?style=flat&logo=windows&logoColor=white">
   <img alt="Rust" src="https://img.shields.io/badge/agent-Rust-555c6b?style=flat&logo=rust&logoColor=white">
@@ -29,9 +29,9 @@ It has four parts:
 * **Agent** (`kestrel-agent`): a Windows service written in Rust. It reads ETW sensors, runs the detection engine on the device, and contains threats.
 * **Server** (`kestrel-server`): one Docker Compose stack per organisation, with PostgreSQL and optional ClickHouse. All telemetry stays on your own infrastructure.
 * **Admin console**: a React app served by the server.
-* **Tray app**: a small Tauri app for employees. It shows status, explains blocks in plain language and lets the employee request a review.
+* **Tray app**: a small Tauri app for employees. It shows status, explains blocks in plain language and lets the employee request a review. An IT technician can turn protection off for a limited time from the tray with the device's uninstall token (detection only by default; every turn-off is a `TP-06` alert and an audit entry, and IT can turn it back on from the console).
 
-> **Status: v1.1.3 (release candidate), user-mode only.** Validated on Windows 11 (26100) in a disposable lab VM. Read the limits section before you rely on it.
+> **Status: v1.1.4 (release candidate), user-mode only.** Validated on Windows 11 (26100) in a disposable lab VM. Read the limits section before you rely on it.
 
 ## Screenshots
 
@@ -66,7 +66,7 @@ Console screenshots use the built-in demo data (`npm run dev:mock`). The tray an
 
 ## What it does
 
-* **Detection on the device.** 54 built-in behavioural rules: stealer (`ST-01`…`ST-16`), ransomware (`RW-xx`), credential dumping (`CD-xx`), persistence (`PS-xx`) and tamper (`TP-01`…`TP-05`), plus 70 SigmaHQ rules in Audit. They run in the agent, so detection and containment still work while the device is offline.
+* **Detection on the device.** 55 built-in behavioural rules: stealer (`ST-01`…`ST-16`), ransomware (`RW-xx`), credential dumping (`CD-xx`), persistence (`PS-xx`) and tamper (`TP-01`…`TP-06`), plus 70 SigmaHQ rules in Audit. They run in the agent, so detection and containment still work while the device is offline.
 * **Suspend on suspicion.** When an untrusted process opens a credential store or decrypts browser secrets with DPAPI, the agent freezes it for a short window (3 s by default). It kills the process if a stronger rule confirms the theft, and resumes it otherwise.
 * **Response actions.** These can be automatic (rules in Protect mode) or issued by an analyst from the console:
   * kill or suspend/resume a process or process tree
@@ -175,6 +175,7 @@ Console screenshots use the built-in demo data (`npm run dev:mock`). The tray an
 | TP-03 | AMSI tampering | Audit |
 | TP-04 | Agent service or file tampering | Audit |
 | TP-05 | Telemetry loss | Audit |
+| TP-06 | Protection turned off on the device (tray switch, uninstall token) | Audit (never acts) |
 
 Ransomware, credential dumping and persistence (v1.1):
 

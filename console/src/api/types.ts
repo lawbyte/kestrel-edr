@@ -64,6 +64,8 @@ export interface Alert {
   data_at_risk?: DataCategory[]
   evidence?: KEvent[]
   actions?: ActionOutcome[]
+  /** Protection was turned off on the device when this alert fired (forced to Audit, no automatic action). */
+  protection_off?: PauseMode | null
 }
 
 // ---------------------------------------------------------------- event.rs
@@ -318,6 +320,8 @@ export type ResponseAction =
   | { type: 'isolate_host'; allow_ips?: string[] }
   | { type: 'release_host' }
   | { type: 'apply_hardening' }
+  /** End a local "protection off" pause on the device (no-op when not paused). */
+  | { type: 'resume_protection' }
   | { type: 'scan'; path?: string | null }
   | { type: 'collect_triage' }
   | {
@@ -451,6 +455,47 @@ export interface Policy {
   sensors?: SensorSettings
   /** Remote-access profile of the policy (capped by each device's install ceiling); absent = none. */
   remote_access?: RemoteAccessProfile
+  /** Local "turn protection off" switch in the tray; absent on older servers (treat as defaults). */
+  local_pause?: LocalPause
+}
+
+// ---------------------------------------------------------------- pause.rs
+
+/** `detection_only`: sensing and alerts continue, no automatic response, hardening not enforced. `full`: sensors stopped, only heartbeats. */
+export type PauseMode = 'detection_only' | 'full'
+
+/** An active local pause (`AgentHealth.pause`, `Device.pause`). */
+export interface PauseState {
+  mode: PauseMode
+  since_ms: TimestampMs
+  /** Automatic turn-on time; null = until turned back on. */
+  until_ms: TimestampMs | null
+  /** Windows account that turned protection off (`DOMAIN\user`). */
+  by_user: string
+}
+
+/** Policy: may protection be turned off locally from the tray, and how. Mirrors `kestrel_common::pause::LocalPause`. */
+export interface LocalPause {
+  enabled: boolean
+  allow_full: boolean
+  /** Longest timed pause, minutes (1..10080). */
+  max_minutes: number
+  allow_until_resumed: boolean
+}
+
+export const LOCAL_PAUSE_DEFAULTS: LocalPause = { enabled: true, allow_full: false, max_minutes: 480, allow_until_resumed: false }
+/** Durations (minutes) the tray offers, each capped by `max_minutes` (`PAUSE_DURATIONS_MIN`). */
+export const PAUSE_DURATIONS_MIN = [15, 60, 240, 480] as const
+/** Upper bound for `max_minutes` (7 days, `PAUSE_MAX_MINUTES_CAP`). */
+export const PAUSE_MAX_MINUTES_CAP = 7 * 24 * 60
+
+/** Mirrors `LocalPause::offered_minutes()`. */
+export function offeredPauseMinutes(p: LocalPause): number[] {
+  if (!p.enabled) return []
+  const max = Math.min(Math.max(Math.round(p.max_minutes) || 1, 1), PAUSE_MAX_MINUTES_CAP)
+  const v: number[] = PAUSE_DURATIONS_MIN.filter((m) => m <= max)
+  if (!v.includes(max) && max < PAUSE_DURATIONS_MIN[PAUSE_DURATIONS_MIN.length - 1]) v.push(max)
+  return v
 }
 
 export interface PolicySummary {
@@ -485,6 +530,8 @@ export interface AgentHealth {
   remote_ceiling?: RemoteAccessProfile | null
   /** ceiling ∩ policy as enforced by the agent. */
   remote_effective?: RemoteAccessProfile | null
+  /** Protection turned off locally (null/absent = on). */
+  pause?: PauseState | null
 }
 
 export interface Software {
@@ -551,7 +598,8 @@ export interface Page<T> {
 
 // ---------------------------------------------------------------- REST: devices
 
-export type DeviceStatus = 'online' | 'offline' | 'degraded' | 'isolated'
+/** Priority: isolated > offline > paused > degraded > online. */
+export type DeviceStatus = 'online' | 'offline' | 'degraded' | 'isolated' | 'paused'
 export interface Device {
   id: Uuid
   hostname: string
@@ -581,6 +629,8 @@ export interface Device {
   uninstall_token_set?: boolean
   /** A rotated uninstall token is waiting for the agent to confirm it. */
   uninstall_token_pending?: boolean
+  /** Protection turned off locally on the device (null/absent = on). */
+  pause?: PauseState | null
 }
 
 export interface DuplicateDevice {
@@ -676,6 +726,8 @@ export interface AlertRow {
   data_at_risk: DataCategory[]
   actions: ActionOutcome[]
   status: AlertStatus
+  /** Protection was turned off on the device when this alert fired. */
+  protection_off?: PauseMode | null
 }
 
 export type AlertDetail = Alert & { incident_id: Uuid; device_id: Uuid; hostname: string; status: AlertStatus }
@@ -788,7 +840,7 @@ export interface ResponseActionRow {
 // ---------------------------------------------------------------- REST: dashboard
 
 export interface Dashboard {
-  devices: { total: number; online: number; offline: number; isolated: number; degraded: number }
+  devices: { total: number; online: number; offline: number; isolated: number; degraded: number; /** Absent on older servers. */ paused?: number }
   incidents: { open: number; critical: number; high: number; mttr_hours_30d: number | null }
   alerts_24h: number
   blocked_24h: number

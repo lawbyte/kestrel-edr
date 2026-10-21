@@ -1,4 +1,4 @@
-// Mirror of `kestrel_common::tray` (crates/kestrel-common/src/tray.rs) and
+// Mirror of `kestrel_common::tray` (crates/kestrel-common/src/tray.rs), `pause` and
 // `kestrel_common::policy::ItContact`. That Rust module is the contract: keep
 // these types in lock-step with it. JSON shapes follow its serde attributes
 // (internally tagged enums, snake_case variants).
@@ -49,6 +49,48 @@ export interface ConsentRequest {
   expires_at: TimestampMs;
 }
 
+// ---- Local "turn protection off" switch (mirror of kestrel_common::pause) ----
+
+export type PauseMode = "detection_only" | "full";
+export const PAUSE_MODES: readonly PauseMode[] = ["detection_only", "full"];
+export type PauseError = "wrong_token" | "locked_out" | "not_allowed" | "already_off" | "not_off" | "unidentified" | "internal";
+export const PAUSE_ERRORS: readonly PauseError[] = ["wrong_token", "locked_out", "not_allowed", "already_off", "not_off", "unidentified", "internal"];
+export type PauseDenied = "disabled" | "mode_not_allowed" | "duration_not_allowed";
+export const PAUSE_DENIED: readonly PauseDenied[] = ["disabled", "mode_not_allowed", "duration_not_allowed"];
+
+/** An active pause: protection is off on this PC. */
+export interface PauseState {
+  mode: PauseMode;
+  since_ms: TimestampMs;
+  /** Automatic turn-on time; null = until turned back on. */
+  until_ms: TimestampMs | null;
+  /** Windows account that turned protection off (`DOMAIN\user`). */
+  by_user: string;
+}
+
+/** What the "Turn off protection" dialog may offer. */
+export interface PauseOffer {
+  enabled: boolean;
+  allow_full: boolean;
+  /** Timed durations in minutes (ascending). */
+  minutes: number[];
+  allow_until_resumed: boolean;
+  /** Wrong-token lockout in force until this time. */
+  locked_until_ms: TimestampMs | null;
+}
+
+/** Answer to pause_protection / resume_protection. */
+export interface PauseResult {
+  ok: boolean;
+  error: PauseError | null;
+  message: string;
+  attempts_left: number | null;
+  locked_until_ms: TimestampMs | null;
+  denied: PauseDenied | null;
+  /** Pause in force after the request (null = protection on). */
+  state: PauseState | null;
+}
+
 export interface TrayStatus {
   state: ProtectionState;
   agent_version: string;
@@ -62,6 +104,10 @@ export interface TrayStatus {
   last_check: TimestampMs | null;
   /** Remote-desktop session in progress (missing from older agents → null). */
   remote_session: RemoteSessionNotice | null;
+  /** Protection turned off on this PC, if it is now (`state` keeps its normal value). */
+  pause: PauseState | null;
+  /** What the turn-off dialog may offer (missing from older agents → null: no button). */
+  local_pause: PauseOffer | null;
 }
 
 export interface ActivityItem {
@@ -83,7 +129,10 @@ export type TrayRequest =
   | { op: "request_review"; alert_id: Uuid; justification: string }
   | { op: "subscribe" }
   | { op: "subscribe_with"; features: string[] }
-  | { op: "consent_response"; request_id: Uuid; allow: boolean };
+  | { op: "consent_response"; request_id: Uuid; allow: boolean }
+  /** `token` serialises as a plain string; `minutes: null` = until turned back on. */
+  | { op: "pause_protection"; token: string; mode: PauseMode; minutes: number | null }
+  | { op: "resume_protection" };
 
 export type TrayResponse =
   | ({ type: "status" } & TrayStatus)
@@ -92,7 +141,8 @@ export type TrayResponse =
   | ({ type: "notification" } & ActivityItem)
   | { type: "error"; message: string }
   | ({ type: "remote_session" } & RemoteSessionNotice)
-  | ({ type: "consent_request" } & ConsentRequest);
+  | ({ type: "consent_request" } & ConsentRequest)
+  | ({ type: "pause_result" } & PauseResult);
 
 export const PROTECTION_STATES: readonly ProtectionState[] = ["protected", "attention", "isolated", "degraded", "offline"];
 export const SEVERITIES: readonly Severity[] = ["info", "low", "medium", "high", "critical"];
@@ -168,6 +218,48 @@ export function parseConsentRequest(o: unknown): ConsentRequest {
   };
 }
 
+function optNum(o: Obj, k: string): number | null {
+  return opt(o, k, num);
+}
+
+export function parsePauseState(o: unknown): PauseState {
+  if (!isObj(o)) throw new ProtocolError("pause state must be an object");
+  return {
+    mode: oneOf(o, "mode", PAUSE_MODES),
+    since_ms: num(o, "since_ms"),
+    until_ms: optNum(o, "until_ms"),
+    by_user: str(o, "by_user", ""),
+  };
+}
+
+export function parsePauseOffer(o: unknown): PauseOffer {
+  if (!isObj(o)) throw new ProtocolError("pause offer must be an object");
+  const minutes = o["minutes"] === undefined ? [] : o["minutes"];
+  if (!Array.isArray(minutes) || !minutes.every((m) => typeof m === "number" && Number.isInteger(m) && m > 0)) {
+    throw new ProtocolError(`field "minutes" must be an array of positive integers`);
+  }
+  return {
+    enabled: bool(o, "enabled"),
+    allow_full: o["allow_full"] === undefined ? false : bool(o, "allow_full"),
+    minutes: [...(minutes as number[])].sort((a, b) => a - b),
+    allow_until_resumed: o["allow_until_resumed"] === undefined ? false : bool(o, "allow_until_resumed"),
+    locked_until_ms: optNum(o, "locked_until_ms"),
+  };
+}
+
+export function parsePauseResult(o: unknown): PauseResult {
+  if (!isObj(o)) throw new ProtocolError("pause result must be an object");
+  return {
+    ok: bool(o, "ok"),
+    error: opt(o, "error", (oo, k) => oneOf(oo, k, PAUSE_ERRORS)),
+    message: str(o, "message", ""),
+    attempts_left: optNum(o, "attempts_left"),
+    locked_until_ms: optNum(o, "locked_until_ms"),
+    denied: opt(o, "denied", (oo, k) => oneOf(oo, k, PAUSE_DENIED)),
+    state: opt(o, "state", (oo, k) => parsePauseState(oo[k])),
+  };
+}
+
 export function parseStatus(o: unknown): TrayStatus {
   if (!isObj(o)) throw new ProtocolError("status must be an object");
   return {
@@ -182,6 +274,8 @@ export function parseStatus(o: unknown): TrayStatus {
     hostname: str(o, "hostname"),
     last_check: opt(o, "last_check", num),
     remote_session: opt(o, "remote_session", (oo, k) => parseRemoteSession(oo[k])),
+    pause: opt(o, "pause", (oo, k) => parsePauseState(oo[k])),
+    local_pause: opt(o, "local_pause", (oo, k) => parsePauseOffer(oo[k])),
   };
 }
 
@@ -221,6 +315,8 @@ export function parseResponse(v: unknown): TrayResponse {
       return { type: "remote_session", ...parseRemoteSession(v) };
     case "consent_request":
       return { type: "consent_request", ...parseConsentRequest(v) };
+    case "pause_result":
+      return { type: "pause_result", ...parsePauseResult(v) };
     default:
       throw new ProtocolError(`unknown response type ${JSON.stringify(v["type"])}`);
   }

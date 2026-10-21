@@ -9,6 +9,7 @@
 
 pub mod alert;
 pub mod event;
+pub mod pause;
 pub mod policy;
 pub mod remote;
 pub mod response;
@@ -19,6 +20,7 @@ pub mod wire;
 
 pub use alert::*;
 pub use event::*;
+pub use pause::{LocalPause, PauseMode, PauseState};
 pub use policy::*;
 pub use response::*;
 pub use rules::*;

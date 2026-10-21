@@ -95,6 +95,14 @@ pub struct Core {
     salt: String,
     /// Live remote-access sessions (remote desktop, file manager).
     pub live: crate::live::LiveManager,
+    /// Local "turn protection off" switch (`crate::pause`): the pause in
+    /// force (persisted in the store), the wrong-token lockout, and a lock
+    /// serialising turn-off / turn-on / policy reconciliation.
+    pub(crate) pause: RwLock<Option<kestrel_common::PauseState>>,
+    pub(crate) pause_lockout: Mutex<crate::pause::Lockout>,
+    pub(crate) pause_op: tokio::sync::Mutex<()>,
+    /// Re-apply hardening now (housekeeping), e.g. after a pause ended.
+    pub(crate) hardening_kick: Notify,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -249,7 +257,50 @@ impl Core {
         origin: ActionOrigin,
     ) -> ActionOutcome {
         let now = kestrel_common::now_ms();
+        // Protection turned off locally: no automatic response of any kind
+        // (the engine already holds them back; this is the second gate).
+        // Resuming a suspended process is never containment.
+        if origin == ActionOrigin::Engine
+            && self.pause_state().is_some()
+            && !matches!(action, ResponseAction::ResumeProcess { .. })
+        {
+            return ActionOutcome {
+                action: action.clone(),
+                ok: false,
+                detail: "refused: protection is turned off on this PC".into(),
+                ts: now,
+                artifact: None,
+            };
+        }
         let action = match action {
+            // Turning protection back on is handled here, not by the platform.
+            ResponseAction::ResumeProtection => {
+                if origin == ActionOrigin::Engine {
+                    return ActionOutcome {
+                        action: action.clone(),
+                        ok: false,
+                        detail: "refused: resume_protection is an analyst action".into(),
+                        ts: now,
+                        artifact: None,
+                    };
+                }
+                let reason = if origin == ActionOrigin::ServerCommand {
+                    kestrel_common::pause::PauseEndReason::Console
+                } else {
+                    kestrel_common::pause::PauseEndReason::Manual
+                };
+                let prev = self.resume_protection(reason, String::new()).await;
+                return ActionOutcome {
+                    action: action.clone(),
+                    ok: true,
+                    detail: match prev {
+                        Some(p) => format!("protection turned back on (was {})", p.mode.label()),
+                        None => "protection was not turned off; nothing to do".into(),
+                    },
+                    ts: kestrel_common::now_ms(),
+                    artifact: None,
+                };
+            }
             // Never cut ourselves off from the server.
             ResponseAction::IsolateHost { allow_ips } => {
                 let mut ips = allow_ips.clone();
@@ -379,6 +430,17 @@ impl Core {
         });
     }
 
+    /// Automatic hardening (policy change, start, periodic re-check): not
+    /// (re)enforced while protection is turned off locally, and not
+    /// reverted either; the last known state is kept.
+    pub async fn apply_hardening_auto(&self) -> BTreeMap<String, bool> {
+        if self.pause_state().is_some() {
+            tracing::debug!("protection turned off: hardening not re-enforced");
+            return self.hardening_state();
+        }
+        self.apply_hardening().await
+    }
+
     pub async fn apply_hardening(&self) -> BTreeMap<String, bool> {
         let h = self.policy().hardening;
         let map = self.platform.apply_hardening(&h).await;
@@ -428,7 +490,7 @@ impl Core {
         // Hardening (async: may touch registry / AppLocker).
         let me = self.clone();
         tokio::spawn(async move {
-            let map = me.apply_hardening().await;
+            let map = me.apply_hardening_auto().await;
             tracing::info!(
                 controls = map.len(),
                 in_effect = map.values().filter(|v| **v).count(),
@@ -445,6 +507,9 @@ impl Core {
             self.restart_sensors();
         }
         self.enforce_cap();
+        // Local pause: a policy that disables the switch / the chosen mode or
+        // lowers the cap ends or shortens it.
+        crate::pause::spawn_reconcile(self);
     }
 
     pub async fn apply_rules(&self, bundle: RuleBundle) -> bool {
@@ -515,6 +580,12 @@ impl Core {
         if let Some(old) = guard.take() {
             old.stop();
         }
+        if self.sensors_paused() {
+            // Protection completely off (tray switch): sensors stay stopped.
+            // (Checked under the sensors lock: a concurrent full pause
+            // stops them through the same lock.)
+            return;
+        }
         match self
             .platform
             .start_sensors(cfg.clone(), self.event_tx.clone())
@@ -532,6 +603,17 @@ impl Core {
         if let Some(h) = lock(&self.sensors).take() {
             h.stop();
         }
+    }
+
+    /// Stop the sensors (protection completely off).
+    pub(crate) fn stop_sensors_now(&self) {
+        self.stop_sensors();
+        tracing::warn!("sensors stopped: protection is completely off on this PC");
+    }
+
+    /// Are sensors running?
+    pub fn sensors_running(&self) -> bool {
+        lock(&self.sensors).is_some()
     }
 
     // -------------------------------------------------------------- health
@@ -565,6 +647,7 @@ impl Core {
             av_product: self.platform.av_product(),
             remote_ceiling: Some(self.remote_ceiling()),
             remote_effective: Some(self.remote_effective()),
+            pause: self.pause_for_upload(),
         }
     }
 
@@ -797,7 +880,12 @@ pub async fn start(
         inflight_cmds: Mutex::new(HashSet::new()),
         salt,
         live: crate::live::LiveManager::default(),
+        pause: RwLock::new(None),
+        pause_lockout: Mutex::new(crate::pause::Lockout::default()),
+        pause_op: tokio::sync::Mutex::new(()),
+        hardening_kick: Notify::new(),
     });
+    core.load_pause();
     {
         let host: std::sync::Weak<dyn crate::live::LiveHost> = Arc::downgrade(&core) as _;
         core.live.bind(host);
@@ -840,8 +928,14 @@ pub async fn start(
         tokio::runtime::Handle::current(),
     )?;
 
-    // Sensors after the engine is ready to drain them.
-    core.restart_sensors();
+    // Local pause (tray switch) before any event flows: tell the engine,
+    // or turn protection back on if the pause ran out while we were down.
+    core.apply_pause_at_start().await;
+    // Sensors after the engine is ready to drain them (not while protection
+    // is completely off).
+    if !core.sensors_running() {
+        core.restart_sensors();
+    }
     // H10: a host that stayed isolated without reaching the server (e.g. it
     // roamed to a network whose DNS is not permitted) is released at boot.
     {
@@ -854,7 +948,7 @@ pub async fn start(
     {
         let c = core.clone();
         tokio::spawn(async move {
-            c.apply_hardening().await;
+            c.apply_hardening_auto().await;
         });
     }
 
@@ -892,9 +986,19 @@ async fn housekeeping(core: Arc<Core>) {
     );
     let mut last_seen = 0u64;
     let mut last_minute = Instant::now();
+    // Automatic turn-on of a timed pause (tray switch).
+    let mut pause_check = tokio::time::interval(Duration::from_secs(5).min(core.tuning.tick * 20));
+    pause_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             _ = core.shutdown.cancelled() => break,
+            _ = pause_check.tick() => {
+                core.check_pause_expiry().await;
+            }
+            _ = core.hardening_kick.notified() => {
+                let map = core.apply_hardening_auto().await;
+                tracing::info!(controls = map.len(), "hardening re-applied after protection was turned back on");
+            }
             _ = hb.tick() => core.send_heartbeat(),
             _ = minute.tick() => {
                 let seen = core.stats.events_seen.load(Ordering::Relaxed);
@@ -909,13 +1013,13 @@ async fn housekeeping(core: Arc<Core>) {
                 } else {
                     core.check_isolation_auto_release().await;
                 }
-                if lock(&core.sensors).is_none() {
+                if lock(&core.sensors).is_none() && !core.sensors_paused() {
                     core.restart_sensors();
                 }
             }
             _ = harden.tick() => {
                 let before = core.hardening_state();
-                let after = core.apply_hardening().await;
+                let after = core.apply_hardening_auto().await;
                 if before != after {
                     tracing::warn!(?after, "hardening state changed");
                 }

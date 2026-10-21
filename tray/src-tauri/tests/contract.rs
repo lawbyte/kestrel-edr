@@ -55,7 +55,63 @@ fn responses_match_agent() {
             timeout_secs: 60,
             expires_at: 1_760_000_060_000,
         }),
+        tray::TrayResponse::Status(tray::TrayStatus {
+            pause: Some(mock::sample_pause(tray::PauseMode::Full, true)),
+            local_pause: Some(tray::PauseOffer {
+                locked_until_ms: Some(1_760_000_060_000),
+                ..mock::sample_pause_offer(true)
+            }),
+            ..status.clone()
+        }),
+        tray::TrayResponse::Status(tray::TrayStatus {
+            pause: Some(mock::sample_pause(tray::PauseMode::DetectionOnly, false)),
+            local_pause: Some(tray::PauseOffer::default()),
+            ..status.clone()
+        }),
+        tray::TrayResponse::PauseResult(tray::PauseResult {
+            ok: true,
+            error: None,
+            message: "Protection is off.".into(),
+            attempts_left: None,
+            locked_until_ms: None,
+            denied: None,
+            state: Some(mock::sample_pause(tray::PauseMode::DetectionOnly, false)),
+        }),
     ];
+    let errors = [
+        (tray::PauseError::WrongToken, None),
+        (tray::PauseError::LockedOut, None),
+        (
+            tray::PauseError::NotAllowed,
+            Some(tray::PauseDenied::Disabled),
+        ),
+        (
+            tray::PauseError::NotAllowed,
+            Some(tray::PauseDenied::ModeNotAllowed),
+        ),
+        (
+            tray::PauseError::NotAllowed,
+            Some(tray::PauseDenied::DurationNotAllowed),
+        ),
+        (tray::PauseError::AlreadyOff, None),
+        (tray::PauseError::NotOff, None),
+        (tray::PauseError::Unidentified, None),
+        (tray::PauseError::Internal, None),
+    ];
+    let tray_msgs: Vec<tray::TrayResponse> = tray_msgs
+        .into_iter()
+        .chain(errors.into_iter().map(|(error, denied)| {
+            tray::TrayResponse::PauseResult(tray::PauseResult {
+                ok: false,
+                error: Some(error),
+                message: "m".into(),
+                attempts_left: Some(3),
+                locked_until_ms: Some(1_760_000_060_000),
+                denied,
+                state: None,
+            })
+        }))
+        .collect();
     for m in &tray_msgs {
         same::<tray::TrayResponse, agent::TrayResponse>(m);
     }
@@ -87,6 +143,17 @@ fn requests_match_agent() {
             request_id: uuid::Uuid::new_v4(),
             allow: false,
         },
+        tray::TrayRequest::PauseProtection {
+            token: tray::TokenInput("kun_abc".into()),
+            mode: tray::PauseMode::Full,
+            minutes: None,
+        },
+        tray::TrayRequest::PauseProtection {
+            token: tray::TokenInput("kun_abc".into()),
+            mode: tray::PauseMode::DetectionOnly,
+            minutes: Some(60),
+        },
+        tray::TrayRequest::ResumeProtection,
     ];
     for r in &reqs {
         same::<tray::TrayRequest, agent::TrayRequest>(r);
@@ -146,4 +213,52 @@ fn remote_session_contract() {
     v.as_object_mut().unwrap().remove("remote_session");
     let t: tray::TrayResponse = serde_json::from_value(v).unwrap();
     assert!(matches!(t, tray::TrayResponse::Status(ref s) if s.remote_session.is_none()));
+}
+
+#[test]
+fn pause_contract() {
+    // Minimal shapes (serde defaults) parse the same on both sides.
+    for line in [
+        "{\"op\":\"pause_protection\",\"token\":\"kun_x\"}",
+        "{\"op\":\"pause_protection\",\"token\":\"kun_x\",\"mode\":\"full\",\"minutes\":15}",
+        "{\"op\":\"resume_protection\"}",
+    ] {
+        let a: agent::TrayRequest = serde_json::from_str(line).unwrap();
+        let t: tray::TrayRequest = serde_json::from_str(line).unwrap();
+        assert_eq!(
+            serde_json::to_value(a).unwrap(),
+            serde_json::to_value(t).unwrap()
+        );
+    }
+    let minimal = "{\"type\":\"pause_result\",\"ok\":false}";
+    let a: agent::TrayResponse = serde_json::from_str(minimal).unwrap();
+    let t: tray::TrayResponse = serde_json::from_str(minimal).unwrap();
+    assert_eq!(
+        serde_json::to_value(&a).unwrap(),
+        serde_json::to_value(&t).unwrap()
+    );
+    // Status from an older agent (no pause fields) still parses.
+    let mut v = serde_json::to_value(tray::TrayResponse::Status(mock::sample_status(
+        tray::ProtectionState::Protected,
+    )))
+    .unwrap();
+    let o = v.as_object_mut().unwrap();
+    o.remove("pause");
+    o.remove("local_pause");
+    let t: tray::TrayResponse = serde_json::from_value(v).unwrap();
+    assert!(
+        matches!(t, tray::TrayResponse::Status(ref s) if s.pause.is_none() && s.local_pause.is_none())
+    );
+    // Neither side prints the token.
+    let a = agent::TrayRequest::PauseProtection {
+        token: kestrel_common::pause::TokenInput("kun_secret".into()),
+        mode: Default::default(),
+        minutes: None,
+    };
+    let t = tray::TrayRequest::PauseProtection {
+        token: tray::TokenInput("kun_secret".into()),
+        mode: Default::default(),
+        minutes: None,
+    };
+    assert!(!format!("{a:?}{t:?}").contains("kun_secret"));
 }

@@ -103,6 +103,7 @@ function basePolicy(id: string, name: string, version: number): Policy {
     ioc_block_ttl_secs: 24 * 3600,
     ioc_block_host_wide: false,
     remote_access: profileGuarded(),
+    local_pause: { enabled: true, allow_full: false, max_minutes: 480, allow_until_resumed: false },
   }
 }
 
@@ -126,6 +127,8 @@ const pSrv = basePolicy('pol-servers', 'Servers', 3)
 pSrv.rules = { 'ST-10': 'off', 'ST-11': 'protect', 'ST-12': 'protect' }
 pSrv.hardening = { ...pSrv.hardening, mode: 'enforce', disable_run_dialog: true, block_user_path_exec: true }
 pSrv.canaries = false
+// Servers: nobody turns protection off at the console of a server.
+pSrv.local_pause = { enabled: false, allow_full: false, max_minutes: 480, allow_until_resumed: false }
 pSrv.hardening = { ...pSrv.hardening, lsa_protection: true }
 pSrv.sensors = { file_activity: true, ransomware_canaries: false, persistence: true, credential_access: true }
 // Servers: no remote desktop and a read-only file manager (shows the "disabled by policy" state).
@@ -284,10 +287,11 @@ export function buildDevices(): Device[] {
   })
 }
 
-/** Contract status rule: isolated > offline (3 min) > degraded > online. */
+/** Contract status rule: isolated > offline (3 min) > paused > degraded > online. */
 export function computeStatus(d: Device): Device['status'] {
   if (d.health.isolated) return 'isolated'
   if (d.last_seen < Date.now() - 3 * MIN) return 'offline'
+  if (d.pause) return 'paused'
   if (!d.health.etw_ok || (d.health.etw_events_lost ?? 0) > 500) return 'degraded'
   return 'online'
 }

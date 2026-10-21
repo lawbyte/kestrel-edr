@@ -49,6 +49,8 @@ pub async fn user_hasher(
         .then_some(&state.mk))
 }
 
+/// A reported pause this long past its `until_ms` raises `TP-SRV-PAUSE-OVERDUE`.
+pub const PAUSE_OVERDUE_GRACE_MS: i64 = 10 * 60_000;
 /// ETW events lost between two heartbeats that raise a server-side tamper alert.
 pub const EVENTS_LOST_ALERT_THRESHOLD: u64 = 500;
 /// Minimum spacing between two server-side tamper alerts of the same kind.
@@ -126,6 +128,20 @@ pub async fn hello(
     .bind(now)
     .bind(rebooted)
     .bind(peer_ip)
+    .execute(&state.db)
+    .await?;
+    // Local pause state (tray switch) as of this connect; heartbeats keep it current.
+    let mut pause = h.pause.clone();
+    if let (Some(p), Some(mk)) = (pause.as_mut(), user_hasher(state, device_id).await?) {
+        if !p.by_user.is_empty() {
+            p.by_user = mk.hash_username(&p.by_user);
+        }
+    }
+    sqlx::query(
+        "UPDATE devices SET health = jsonb_set(CASE WHEN jsonb_typeof(health) = 'object' THEN health ELSE '{}'::jsonb END, '{pause}', $2) WHERE id = $1",
+    )
+    .bind(device_id)
+    .bind(serde_json::to_value(&pause)?)
     .execute(&state.db)
     .await?;
     if prev_status == "offline" {
@@ -566,6 +582,9 @@ pub async fn heartbeat(state: &AppState, s: &Session, hb: &Heartbeat) -> anyhow:
         if let Some(u) = health_in.logged_on_user.as_mut() {
             *u = mk.hash_username(u);
         }
+        if let Some(p) = health_in.pause.as_mut().filter(|p| !p.by_user.is_empty()) {
+            p.by_user = mk.hash_username(&p.by_user);
+        }
     }
     let prev_health: Option<AgentHealth> = if prev_health_v
         .as_object()
@@ -619,6 +638,15 @@ pub async fn heartbeat(state: &AppState, s: &Session, hb: &Heartbeat) -> anyhow:
             .await;
         }
     }
+    // Protection completely off (tray switch, `PauseMode::Full`): the agent
+    // stopped its sensors on purpose and TP-06 already reported it. The
+    // sensor-health heuristics below would only repeat that as tampering.
+    let full_pause = |h: Option<&AgentHealth>| {
+        h.and_then(|h| h.pause.as_ref())
+            .is_some_and(|p| p.mode == kestrel_common::PauseMode::Full)
+    };
+    let sensors_off_on_purpose = full_pause(Some(&hb.health));
+    let was_off_on_purpose = full_pause(prev_health.as_ref());
     let interval = state.cfg.heartbeat_interval_ms;
     if prev_hb > 0 && now - prev_hb > 3 * interval {
         raise_tamper(
@@ -636,7 +664,10 @@ pub async fn heartbeat(state: &AppState, s: &Session, hb: &Heartbeat) -> anyhow:
         )
         .await;
     }
-    if let Some(p) = &prev_health {
+    if let Some(p) = prev_health
+        .as_ref()
+        .filter(|_| !sensors_off_on_purpose && !was_off_on_purpose)
+    {
         let delta = hb.health.etw_events_lost.saturating_sub(p.etw_events_lost);
         if delta >= EVENTS_LOST_ALERT_THRESHOLD {
             raise_tamper(
@@ -650,8 +681,32 @@ pub async fn heartbeat(state: &AppState, s: &Session, hb: &Heartbeat) -> anyhow:
             .await;
         }
     }
-    let etw_was_ok = prev_health.as_ref().map(|p| p.etw_ok).unwrap_or(true);
-    if !hb.health.etw_ok && etw_was_ok {
+    // After a full pause the sensors must come back: treat the paused
+    // heartbeat as healthy so a failed restart still raises TP-SRV-ETW.
+    // A pause the agent still reports long after its end: the agent clock
+    // was set back, or the automatic turn-on failed.
+    if let Some(until) = hb.health.pause.as_ref().and_then(|p| p.until_ms) {
+        if until < now - PAUSE_OVERDUE_GRACE_MS {
+            raise_tamper(
+                state,
+                s.device_id,
+                "TP-SRV-PAUSE-OVERDUE",
+                "Protection still turned off after its end time",
+                Severity::Medium,
+                format!(
+                    "The Kestrel agent on {} still reports protection turned off {} minutes after the chosen end time (server clock). Check the device clock and turn protection back on from the device page.",
+                    s.hostname,
+                    (now - until) / 60_000
+                ),
+            )
+            .await;
+        }
+    }
+    let etw_was_ok = prev_health
+        .as_ref()
+        .map(|p| p.etw_ok || full_pause(Some(p)))
+        .unwrap_or(true);
+    if !hb.health.etw_ok && etw_was_ok && !sensors_off_on_purpose {
         raise_tamper(
             state,
             s.device_id,
@@ -948,5 +1003,86 @@ pub async fn inventory(state: &AppState, s: &Session, inv: &Inventory) -> anyhow
         .bind(now_ms())
         .execute(&state.db)
         .await?;
+    Ok(())
+}
+
+/// Audit action for an agent pause report.
+pub fn pause_audit_action(e: kestrel_common::pause::PauseEvent) -> &'static str {
+    use kestrel_common::pause::PauseEvent;
+    match e {
+        PauseEvent::Off => "device.protection_off",
+        PauseEvent::On => "device.protection_on",
+        PauseEvent::Clamped => "device.protection_off_clamped",
+        PauseEvent::Denied => "device.protection_off_denied",
+    }
+}
+
+/// Local "turn protection off" switch: the agent reports turn-off / turn-on
+/// / a pause shortened by policy / a wrong uninstall token (never the token).
+/// Writes the audit entry and updates `health.pause` at once, so the device
+/// status does not wait for the next heartbeat. The TP-06 alert arrives as a
+/// normal alert.
+pub async fn pause_report(
+    state: &AppState,
+    s: &Session,
+    mut r: kestrel_common::pause::PauseReport,
+) -> anyhow::Result<()> {
+    use kestrel_common::pause::PauseEvent;
+    let clip = |u: &mut String| {
+        if u.len() > 256 {
+            let mut cut = 256;
+            while !u.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            u.truncate(cut);
+        }
+    };
+    let mk = user_hasher(state, s.device_id).await?;
+    clip(&mut r.by_user);
+    if let Some(st) = r.state.as_mut() {
+        clip(&mut st.by_user);
+    }
+    if let Some(mk) = mk {
+        if !r.by_user.is_empty() {
+            r.by_user = mk.hash_username(&r.by_user);
+        }
+        if let Some(st) = r.state.as_mut().filter(|st| !st.by_user.is_empty()) {
+            st.by_user = mk.hash_username(&st.by_user);
+        }
+    }
+    let new_pause = match r.event {
+        PauseEvent::Off | PauseEvent::Clamped => Some(r.state.clone()),
+        PauseEvent::On => Some(None),
+        PauseEvent::Denied => None,
+    };
+    if let Some(p) = new_pause {
+        sqlx::query(
+            "UPDATE devices SET health = jsonb_set(CASE WHEN jsonb_typeof(health) = 'object' THEN health ELSE '{}'::jsonb END, '{pause}', $2) WHERE id = $1",
+        )
+        .bind(s.device_id)
+        .bind(serde_json::to_value(&p)?)
+        .execute(&state.db)
+        .await?;
+        state.publish("device", s.device_id, "updated");
+    }
+    let st = r.state.as_ref();
+    audit::log(
+        &state.db,
+        &audit::Actor::system(),
+        pause_audit_action(r.event),
+        s.device_id.to_string(),
+        json!({
+            "hostname": s.hostname,
+            "ts": r.ts.min(now_ms()),
+            "mode": st.map(|x| x.mode),
+            "since_ms": st.map(|x| x.since_ms),
+            "until_ms": st.and_then(|x| x.until_ms),
+            "by_user": if r.by_user.is_empty() { st.map(|x| x.by_user.clone()).unwrap_or_default() } else { r.by_user.clone() },
+            "reason": r.reason,
+            "failures": r.failures,
+            "locked_until_ms": r.locked_until_ms,
+        }),
+    )
+    .await;
     Ok(())
 }

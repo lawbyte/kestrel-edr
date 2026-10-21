@@ -51,16 +51,21 @@ const DEV_STYLE: Record<DeviceStatus, { dot: string; icon: typeof Wifi }> = {
   offline: { dot: 'bg-fg-subtle', icon: WifiOff },
   degraded: { dot: 'bg-warn', icon: Activity },
   isolated: { dot: 'bg-isolated', icon: Lock },
+  paused: { dot: 'bg-warn', icon: ShieldOff },
 }
 export function DeviceStatusBadge({ status, className }: { status: DeviceStatus; className?: string }) {
   const s = DEV_STYLE[status]
   return (
     <span className={cn('inline-flex items-center gap-1.5 whitespace-nowrap text-sm', className)}>
+      {status === 'paused' ? (
+        <ShieldOff className="size-3.5 text-warn" strokeWidth={2.25} aria-hidden />
+      ) : (
       <span className="relative flex size-2">
         {status === 'online' && <span className="absolute inset-0 animate-ping rounded-full bg-ok opacity-30 [animation-duration:2.5s]" />}
         <span className={cn('relative size-2 rounded-full', s.dot, status === 'offline' && 'bg-transparent ring-[1.5px] ring-fg-subtle ring-inset')} />
       </span>
-      <span className={cn(status === 'isolated' && 'text-isolated font-medium', status === 'degraded' && 'text-warn font-medium', status === 'offline' && 'text-fg-muted')}>{DEVICE_STATUS_LABEL[status]}</span>
+      )}
+      <span className={cn(status === 'isolated' && 'text-isolated font-medium', (status === 'degraded' || status === 'paused') && 'text-warn font-medium', status === 'offline' && 'text-fg-muted')}>{DEVICE_STATUS_LABEL[status]}</span>
     </span>
   )
 }

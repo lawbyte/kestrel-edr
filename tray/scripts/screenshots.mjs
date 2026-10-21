@@ -69,6 +69,58 @@ const shots = [
     await p.locator(".consent-result").waitFor({ timeout: 5000 });
     if (await p.locator(".consent").count()) throw new Error("expired prompt must close");
   }],
+  // Local "turn protection off" switch (mock token: kun_mock_token).
+  ["turn-off-bar", "tab=status&state=protected", async (p) => { await p.locator(".pausebar").scrollIntoViewIfNeeded(); await p.waitForTimeout(100); }],
+  ["turn-off-dialog", "tab=status&state=protected", async (p) => {
+    await p.getByRole("button", { name: "Turn off…" }).click();
+    await p.locator(".pause-dialog").waitFor();
+    await p.locator(".pause-dialog input[type=password]").fill("kun_mock_token");
+    await p.waitForTimeout(150);
+  }],
+  ["turn-off-dialog-full", "tab=status&state=protected", async (p) => {
+    await p.getByRole("button", { name: "Turn off…" }).click();
+    await p.locator(".pause-dialog input[type=password]").fill("kun_mock_token");
+    await p.getByLabel("Completely off").check();
+    await p.locator(".pause-dialog select").selectOption("until");
+    await p.locator(".pause-warning").scrollIntoViewIfNeeded();
+    await p.waitForTimeout(150);
+  }],
+  ["turn-off-wrong-token", "tab=status&state=protected", async (p) => {
+    await p.getByRole("button", { name: "Turn off…" }).click();
+    const token = p.locator(".pause-dialog input[type=password]");
+    await token.fill("kun_not_the_token");
+    await p.keyboard.press("Enter");
+    await p.locator(".pause-dialog [role=alert]").waitFor();
+    if ((await token.inputValue()) !== "") throw new Error("token field must be cleared after an attempt");
+    await p.locator(".pause-dialog [role=alert]").scrollIntoViewIfNeeded();
+    await p.waitForTimeout(150);
+  }],
+  ["turn-off-locked", "tab=status&state=protected&pause=locked", async (p) => {
+    await p.getByRole("button", { name: "Turn off…" }).click();
+    await p.locator(".pause-dialog [role=alert]").scrollIntoViewIfNeeded();
+    await p.waitForTimeout(150);
+  }],
+  ["turn-off-escape", "tab=status&state=protected", async (p) => {
+    await p.getByRole("button", { name: "Turn off…" }).click();
+    await p.locator(".pause-dialog").waitFor();
+    await p.keyboard.press("Escape");
+    await p.waitForTimeout(150);
+    if (await p.locator(".pause-dialog").count()) throw new Error("Escape must close the dialog");
+  }],
+  ["turn-off-success", "tab=status&state=protected", async (p) => {
+    await p.getByRole("button", { name: "Turn off…" }).click();
+    await p.locator(".pause-dialog input[type=password]").fill("kun_mock_token");
+    await p.keyboard.press("Enter");
+    await p.locator(".hero--paused").waitFor();
+    await p.waitForTimeout(200);
+  }],
+  ["protection-off", "tab=status&state=protected&pause=active"],
+  ["protection-off-full", "tab=status&state=protected&pause=active_full"],
+  ["protection-resumed", "tab=status&state=protected&pause=active", async (p) => {
+    await p.getByRole("button", { name: "Turn protection back on" }).click();
+    await p.locator(".hero--protected").waitFor();
+    await p.waitForTimeout(200);
+  }],
   ["help", "tab=help"],
   ["help-notice", "tab=help", async (p) => { await p.locator("#h-notice").scrollIntoViewIfNeeded(); await p.waitForTimeout(100); }],
 ];

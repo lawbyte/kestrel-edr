@@ -10,7 +10,7 @@ The **Rules** page lists every rule, grouped by family:
 | Ransomware | `RW-01` to `RW-08`, `RW-12` | 9 |
 | Credential dumping | `CD-01` to `CD-13` | 13 |
 | Persistence | `PS-01` to `PS-05`, `PS-07` to `PS-11`, `PS-15` | 11 |
-| Tamper | `TP-01` to `TP-05` | 5 |
+| Tamper | `TP-01` to `TP-06` | 6 |
 | SigmaHQ pack | `SIG-<uuid8>` | 70 |
 | Custom Sigma | `SIG-<uuid8>` | yours |
 

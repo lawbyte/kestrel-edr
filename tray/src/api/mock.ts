@@ -1,5 +1,9 @@
 // Browser mock of the Tauri backend for `npm run dev:mock`.
 //
+// MOCK UNINSTALL TOKEN: kun_mock_token  (turns protection off in the mock).
+// Five wrong tokens lock the switch for 1 minute, doubling up to 1 hour, like
+// the agent.
+//
 // URL parameters (all optional):
 //   ?state=protected|attention|isolated|degraded|offline|unavailable
 //   ?tab=status|activity|help      initial tab
@@ -13,7 +17,16 @@
 //   ?consent=desktop|view|files|queue  IT asks for consent after ?consent_in=<s>
 //                                  (default 1); queue = two requests at once;
 //                                  ?consent_timeout=<s> (default 60)
-import type { ActivityItem, ConsentRequest, ProtectionState, RemoteKind, RemoteSessionNotice, TrayStatus } from "../protocol";
+//   ?pause=open|basic|disabled|legacy|active|active_full|locked
+//                                  turn-off switch: open (default) = every mode
+//                                  and "until I turn it back on" allowed; basic =
+//                                  agent defaults (detection only, timed only);
+//                                  disabled = not allowed by policy; legacy = an
+//                                  older agent without the switch; active = off
+//                                  (detection only, ~80 min left); active_full =
+//                                  completely off until turned back on; locked =
+//                                  lockout in force for 4 minutes
+import type { ActivityItem, ConsentRequest, PauseMode, PauseOffer, PauseResult, PauseState, ProtectionState, RemoteKind, RemoteSessionNotice, TrayStatus } from "../protocol";
 import type { Ack, KestrelApi, Tab, Unlisten, WindowMode } from "./types";
 
 const MIN = 60_000;
@@ -64,6 +77,29 @@ function sampleStatus(): TrayStatus {
         : remoteParam === "files"
           ? { ...sampleRemoteSession(false), kind: "files" }
           : null,
+    pause:
+      pauseParam === "active"
+        ? { mode: "detection_only", since_ms: now - 40 * MIN, until_ms: now + 80 * MIN, by_user: MOCK_USER }
+        : pauseParam === "active_full"
+          ? { mode: "full", since_ms: now - 40 * MIN, until_ms: null, by_user: MOCK_USER }
+          : null,
+    local_pause: pauseParam === "legacy" ? null : sampleOffer(),
+  };
+}
+
+export const MOCK_TOKEN = "kun_mock_token";
+const MOCK_USER = String.raw`NUSANTARA\dewi.lestari`;
+const pauseParam = params.get("pause") ?? "open";
+
+function sampleOffer(): PauseOffer {
+  if (pauseParam === "disabled") return { enabled: false, allow_full: false, minutes: [], allow_until_resumed: false, locked_until_ms: null };
+  const open = pauseParam !== "basic";
+  return {
+    enabled: true,
+    allow_full: open,
+    minutes: [15, 60, 240, 480],
+    allow_until_resumed: open,
+    locked_until_ms: pauseParam === "locked" ? Date.now() + 4 * MIN : null,
   };
 }
 
@@ -195,6 +231,74 @@ if (consentParam) {
     Number(params.get("consent_in") ?? "1") * 1000,
   );
 }
+// Turn-off switch state (like the agent: failures, then a doubling lockout).
+let pauseFailures = 0;
+let pauseLockouts = 0;
+const fail = (error: PauseResult["error"], extra: Partial<PauseResult> = {}): PauseResult => ({
+  ok: false,
+  error,
+  message: "",
+  attempts_left: null,
+  locked_until_ms: null,
+  denied: null,
+  state: null,
+  ...extra,
+});
+const legacyPause = () => Promise.reject({ kind: "agent", message: "bad request: unknown variant `pause_protection`" });
+
+function pauseNotice(on: boolean, p: PauseState, body?: string) {
+  const item: ActivityItem = {
+    id: `9a05e000-0000-4000-8000-${String(Date.now() % 1e12).padStart(12, "0")}`,
+    ts: Date.now(),
+    title: on ? "Protection is back on" : p.mode === "full" ? "Protection was turned off completely on this PC" : "Protection was turned off on this PC (detection only)",
+    body: body ?? (on ? `${MOCK_USER} turned protection back on from the tray.` : `${MOCK_USER} turned Kestrel's protection off with the uninstall token. IT has been told.`),
+    severity: on ? "low" : "high",
+    alert_id: null,
+    file: null,
+    action_taken: on ? "Protection turned back on" : "Protection turned off",
+    review: null,
+  };
+  items = [item, ...items];
+  notifications.emit(item);
+}
+
+/** End a timed pause that has run out (the agent does this on a timer). */
+function expirePause() {
+  const p = status.pause;
+  if (p?.until_ms != null && Date.now() >= p.until_ms) {
+    status.pause = null;
+    pauseNotice(true, p, "The chosen time ran out, so Kestrel turned protection back on.");
+  }
+}
+
+function mockPause(token: string, mode: PauseMode, minutes: number | null): PauseResult {
+  const now = Date.now();
+  expirePause();
+  const offer = status.local_pause!;
+  if (offer.locked_until_ms !== null && offer.locked_until_ms > now) return fail("locked_out", { locked_until_ms: offer.locked_until_ms });
+  if (!offer.enabled) return fail("not_allowed", { denied: "disabled" });
+  if (status.pause) return fail("already_off", { state: status.pause });
+  if (mode === "full" && !offer.allow_full) return fail("not_allowed", { denied: "mode_not_allowed" });
+  if (minutes === null ? !offer.allow_until_resumed : !offer.minutes.includes(minutes)) return fail("not_allowed", { denied: "duration_not_allowed" });
+  if (token.trim() !== MOCK_TOKEN) {
+    pauseFailures++;
+    if (pauseFailures >= 5) {
+      pauseFailures = 0;
+      const until = now + Math.min(60_000 * 2 ** Math.min(pauseLockouts, 6), 3_600_000);
+      pauseLockouts++;
+      status.local_pause = { ...offer, locked_until_ms: until };
+      return fail("locked_out", { locked_until_ms: until });
+    }
+    return fail("wrong_token", { attempts_left: 5 - pauseFailures });
+  }
+  pauseFailures = 0;
+  status.local_pause = { ...offer, locked_until_ms: null };
+  const state: PauseState = { mode, since_ms: now, until_ms: minutes === null ? null : now + minutes * MIN, by_user: MOCK_USER };
+  status.pause = state;
+  pauseNotice(false, state);
+  return { ok: true, error: null, message: "Protection is off.", attempts_left: null, locked_until_ms: null, denied: null, state };
+}
+
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const down = () => Promise.reject({ kind: "unavailable", message: "Kestrel service is not running" });
 
@@ -261,7 +365,9 @@ export const mockApi: KestrelApi = {
   host: "mock",
   async getStatus() {
     await delay(120);
-    return unavailable ? down() : { ...status };
+    if (unavailable) return down();
+    expirePause();
+    return { ...status };
   },
   async getActivity(limit = 50) {
     await delay(160);
@@ -309,6 +415,25 @@ export const mockApi: KestrelApi = {
     remoteNotice({ active: true, kind: req.kind, admin_name: req.admin_name, view_only: req.view_only, reason: req.reason, started_at: Date.now(), ended_at: null });
     statuses.emit({ ...status });
     return { ok: true, message: "IT can now connect. You'll see a banner while they're connected." };
+  },
+  async pauseProtection(token, mode, minutes) {
+    if (unavailable) return down();
+    await delay(300);
+    if (pauseParam === "legacy") return legacyPause();
+    const r = mockPause(token, mode, minutes);
+    statuses.emit({ ...status });
+    return r;
+  },
+  async resumeProtection() {
+    if (unavailable) return down();
+    await delay(300);
+    if (pauseParam === "legacy") return legacyPause();
+    const p = status.pause;
+    if (!p) return fail("not_off");
+    status.pause = null;
+    pauseNotice(true, p);
+    statuses.emit({ ...status });
+    return { ok: true, error: null, message: "Protection is back on.", attempts_left: null, locked_until_ms: null, denied: null, state: null };
   },
   onConnection: () => Promise.resolve(() => {}),
   onNavigate: () => Promise.resolve(() => {}),

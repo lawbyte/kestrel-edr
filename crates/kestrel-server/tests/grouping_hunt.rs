@@ -69,6 +69,7 @@ fn alert(ts: i64, proc_guid: &str, root_guid: &str, rule: &str) -> Alert {
         data_at_risk: vec![],
         evidence: vec![],
         actions: vec![],
+        protection_off: None,
     }
 }
 
@@ -205,6 +206,7 @@ async fn clickfix_chain_groups_under_ancestor_root() {
         data_at_risk: vec![],
         evidence: vec![],
         actions: vec![],
+        protection_off: None,
     };
     let a = ingest_alert(&ts.state, d, mk(t0, "ST-10", explorer.clone(), vec![]))
         .await

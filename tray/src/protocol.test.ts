@@ -158,3 +158,57 @@ describe("remote session", () => {
     expect(encodeRequest({ op: "subscribe_with", features: [FEATURE_REMOTE_SESSION, FEATURE_REMOTE_CONSENT] })).toBe('{"op":"subscribe_with","features":["remote_session","remote_consent"]}\n');
   });
 });
+
+describe("pause switch", () => {
+  const offer = { enabled: true, allow_full: true, minutes: [60, 15], allow_until_resumed: true, locked_until_ms: null };
+  const pause = { mode: "detection_only", since_ms: 1, until_ms: 2, by_user: "W\e" };
+
+  it("status carries pause and local_pause; missing means none (older agents)", () => {
+    const r = parseResponseLine(JSON.stringify({ type: "status", ...status, pause, local_pause: offer }));
+    if (r.type !== "status") throw new Error("type");
+    expect(r.pause).toEqual(pause);
+    expect(r.local_pause?.minutes).toEqual([15, 60]);
+    const old = parseResponseLine(JSON.stringify({ type: "status", ...status }));
+    if (old.type !== "status") throw new Error("type");
+    expect(old.pause).toBeNull();
+    expect(old.local_pause).toBeNull();
+  });
+
+  it("applies serde defaults", () => {
+    const r = parseResponseLine(JSON.stringify({ type: "status", ...status, pause: { mode: "full", since_ms: 5 }, local_pause: { enabled: false } }));
+    if (r.type !== "status") throw new Error("type");
+    expect(r.pause).toEqual({ mode: "full", since_ms: 5, until_ms: null, by_user: "" });
+    expect(r.local_pause).toEqual({ enabled: false, allow_full: false, minutes: [], allow_until_resumed: false, locked_until_ms: null });
+    expect(parseResponseLine('{"type":"pause_result","ok":false}')).toEqual({
+      type: "pause_result",
+      ok: false,
+      error: null,
+      message: "",
+      attempts_left: null,
+      locked_until_ms: null,
+      denied: null,
+      state: null,
+    });
+  });
+
+  it("parses every pause_result shape", () => {
+    const r = parseResponseLine(JSON.stringify({ type: "pause_result", ok: false, error: "not_allowed", denied: "duration_not_allowed", message: "m", attempts_left: 2, locked_until_ms: 9 }));
+    expect(r).toMatchObject({ type: "pause_result", error: "not_allowed", denied: "duration_not_allowed", attempts_left: 2, locked_until_ms: 9 });
+    for (const e of ["wrong_token", "locked_out", "already_off", "not_off", "unidentified", "internal"]) {
+      expect(parseResponseLine(JSON.stringify({ type: "pause_result", ok: false, error: e })).type).toBe("pause_result");
+    }
+    const ok = parseResponseLine(JSON.stringify({ type: "pause_result", ok: true, state: pause }));
+    expect(ok.type === "pause_result" && ok.state).toEqual(pause);
+  });
+
+  it("rejects malformed values", () => {
+    expect(() => parseResponseLine(JSON.stringify({ type: "pause_result", ok: false, error: "nope" }))).toThrow(ProtocolError);
+    expect(() => parseResponseLine(JSON.stringify({ type: "status", ...status, pause: { mode: "off", since_ms: 1 } }))).toThrow(ProtocolError);
+    expect(() => parseResponseLine(JSON.stringify({ type: "status", ...status, local_pause: { enabled: true, minutes: ["60"] } }))).toThrow(ProtocolError);
+  });
+
+  it("encodes the requests like the Rust contract (token as a plain string)", () => {
+    expect(JSON.parse(encodeRequest({ op: "pause_protection", token: "kun_x", mode: "full", minutes: null }))).toEqual({ op: "pause_protection", token: "kun_x", mode: "full", minutes: null });
+    expect(encodeRequest({ op: "resume_protection" })).toBe('{"op":"resume_protection"}\n');
+  });
+});

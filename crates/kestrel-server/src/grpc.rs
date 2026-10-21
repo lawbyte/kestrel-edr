@@ -85,6 +85,7 @@ fn payload_type(p: &AgentPayload) -> &'static str {
         AgentPayload::RenewCertificate { .. } => "renew_certificate",
         AgentPayload::UpdateResult { .. } => "update_result",
         AgentPayload::Live { .. } => "live",
+        AgentPayload::Pause(_) => "pause",
     }
 }
 
@@ -625,6 +626,9 @@ impl AgentService for AgentSvc {
                         }
                         Some(AgentPayload::Inventory(inv)) => {
                             ingest::inventory(&state, &sess, &inv).await
+                        }
+                        Some(AgentPayload::Pause(r)) => {
+                            ingest::pause_report(&state, &sess, r).await
                         }
                         Some(AgentPayload::UpdateResult { version, ok, error }) => {
                             crate::updates::on_result(&state, device_id, &version, ok, &error).await

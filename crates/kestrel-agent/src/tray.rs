@@ -9,7 +9,10 @@
 //!   caller can see, once per alert until IT decides, and at most
 //!   [`REVIEWS_PER_HOUR`] per user;
 //! * `QuickCheck` runs at most once per [`CHECK_INTERVAL_MS`] and never
-//!   concurrently (a recent result is returned instead).
+//!   concurrently (a recent result is returned instead);
+//! * `PauseProtection` needs the uninstall token and an identified caller,
+//!   is enforced against the policy and rate-limited per device
+//!   (`crate::pause`); `ResumeProtection` never needs a token.
 
 use anyhow::{anyhow, Result};
 use kestrel_common::{
@@ -110,7 +113,9 @@ impl TrayService {
         });
         let state = if c.platform.is_isolated() {
             ProtectionState::Isolated
-        } else if !health_ok {
+        } else if !health_ok && !c.sensors_paused() {
+            // (Sensors stopped on purpose while protection is completely
+            // off: the tray shows that from `pause`, not as degraded.)
             ProtectionState::Degraded
         } else if recent_attention {
             ProtectionState::Attention
@@ -136,6 +141,8 @@ impl TrayService {
             hostname: c.hostname.clone(),
             last_check: c.store.kv_get_i64(store::KV_LAST_CHECK),
             remote_session: c.live.remote_session_notice(),
+            pause: c.pause_state(),
+            local_pause: Some(c.pause_offer()),
         }
     }
 }
@@ -278,6 +285,21 @@ impl TrayHandler for TrayService {
             },
             TrayRequest::ConsentResponse { request_id, allow } => {
                 self.core.live.consent_response(request_id, allow, client)
+            }
+            // Turning protection off needs the uninstall token (verified,
+            // rate-limited and counted per device by the core); the token is
+            // never logged. Turning it back on never needs one.
+            TrayRequest::PauseProtection {
+                token,
+                mode,
+                minutes,
+            } => TrayResponse::PauseResult(
+                self.core
+                    .pause_protection(&token.0, mode, minutes, client)
+                    .await,
+            ),
+            TrayRequest::ResumeProtection => {
+                TrayResponse::PauseResult(self.core.resume_from_tray(client).await)
             }
         }
     }

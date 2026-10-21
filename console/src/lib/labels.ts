@@ -7,6 +7,7 @@ import type {
   HardeningControl,
   IncidentStatus,
   PathClass,
+  PauseMode,
   ResponseAction,
   RuleCategory,
   Severity,
@@ -122,6 +123,36 @@ export const DEVICE_STATUS_LABEL: Record<DeviceStatus, string> = {
   offline: 'Offline',
   degraded: 'Degraded',
   isolated: 'Isolated',
+  paused: 'Protection off',
+}
+
+/** Plain-language pause mode (mirrors `PauseMode::label()`). */
+export const PAUSE_MODE_LABEL: Record<PauseMode, string> = {
+  detection_only: 'detection only',
+  full: 'completely off',
+}
+
+/** What each pause mode means, for banners and the policy editor. */
+export const PAUSE_MODE_HINT: Record<PauseMode, string> = {
+  detection_only: 'Sensors and alerts keep running, but Kestrel takes no automatic action and does not enforce hardening.',
+  full: 'Sensors are stopped. The device only sends heartbeats, so nothing on it is detected.',
+}
+
+/** Labels for audit log actions (unlisted actions are shown as their raw id). */
+export const AUDIT_ACTION_LABEL: Record<string, string> = {
+  'device.protection_off': 'Protection turned off on the device',
+  'device.protection_on': 'Protection turned back on',
+  'device.protection_off_denied': 'Wrong uninstall token for turning protection off',
+  'device.protection_off_clamped': 'Protection turn-off shortened by policy',
+}
+
+/** Short duration label: 15 min, 1 h, 1 h 30 min, 2 d. */
+export function formatMinutes(m: number): string {
+  if (m < 60) return `${m} min`
+  if (m % 1440 === 0) return `${m / 1440} d`
+  const h = Math.floor(m / 60)
+  const r = m % 60
+  return r ? `${h} h ${r} min` : `${h} h`
 }
 
 export const ACTION_STATUS_LABEL: Record<ActionStatus, string> = {
@@ -270,6 +301,7 @@ export const ACTION_LABEL: Record<ResponseAction['type'], string> = {
   scan: 'Scan',
   collect_triage: 'Collect triage package',
   remove_autorun: 'Remove persistence entry',
+  resume_protection: 'Turn protection back on',
 }
 
 export const AUTORUN_KIND_LABEL: Record<import('@/api/types').AutorunKind, string> = {
@@ -362,6 +394,8 @@ export function describeAction(a: ResponseAction): string {
       return 'Release host from isolation'
     case 'apply_hardening':
       return 'Re-apply hardening pack'
+    case 'resume_protection':
+      return 'Turn protection back on (end the local turn-off)'
     case 'scan':
       return a.path ? `Scan ${safeDisplay(a.path)}` : 'Scan running user-path programs'
     case 'collect_triage':

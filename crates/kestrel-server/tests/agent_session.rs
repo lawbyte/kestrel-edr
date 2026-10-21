@@ -85,6 +85,7 @@ pub fn stealer_alert(rule: &str, sev: Severity) -> Alert {
             ts: now,
             artifact: None,
         }],
+        protection_off: None,
     }
 }
 

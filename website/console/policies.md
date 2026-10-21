@@ -31,6 +31,29 @@ Optional sensor groups. All are on by default. Turn one off only if it costs too
 * Persistence (tasks, services, WMI, autorun registry keys)
 * LSASS access (credential dumping)
 
+## Local turn-off
+
+Whether an employee or on-site technician may turn protection off for a while from the Kestrel tray app, and how. Turning off always needs the device's uninstall token (shown on the [device page](./devices#device-card)); turning back on never does.
+
+<Shot name="console/policy-local-turnoff" alt="Local turn-off settings in the policy editor" />
+
+| Setting | Default | Meaning |
+|---|---|---|
+| Allow turning protection off on the device | On | The tray shows **Turn off protection**. Off: only the console can change protection, and an active turn-off ends when the device receives the policy. |
+| Allow "completely off" | Off | Off: the only mode is **detection only**, where sensors and alerts keep running but Kestrel takes no automatic action and does not enforce hardening. On: the person can also stop the sensors, so the device only sends heartbeats. |
+| Longest turn-off | 8 hours | Protection comes back on by itself after the chosen time. The tray offers 15 min, 1 h, 4 h and 8 h, up to this limit (a limit below 8 hours is offered too, for example 15 and 30 minutes for a 30 minute limit). |
+| Allow "until turned back on" | Off | On: the person can leave protection off with no end time, until someone turns it back on in the tray or the console. |
+
+Lowering the limit shortens a turn-off that is already running, and switching a mode off ends it. The device reports both to the audit log.
+
+Every turn-off raises a `TP-06` alert and an audit entry, and so does every wrong token (see [Protection turned off on the device](./devices#protection-turned-off-on-the-device)).
+
+Security advice:
+
+* Keep **completely off** and **until turned back on** off unless a technician needs them. With completely off allowed, anyone who learns a device's uninstall token can make that PC invisible to you until protection comes back on.
+* Treat the uninstall token as a secret. Reveal it only for the person who needs it and **Rotate** it afterwards.
+* For servers, or for groups where nobody should change protection locally, turn the switch off.
+
 ## Windows hardening
 
 Built-in Windows controls that Kestrel applies and keeps applied. Windows itself does the blocking, so these work even before a detection rule fires. One **hardening mode** applies to the policy:

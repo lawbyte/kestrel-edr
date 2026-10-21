@@ -2,7 +2,7 @@
 
 The small Windows app that employees see. It shows whether Kestrel is protecting the PC, explains what was blocked in plain language, lets the employee ask IT to review a block, and shows the company's IT contact and monitoring notice (the visible notice required under PDPA and UU PDP).
 
-It runs **per user, unprivileged** and only talks to the agent service over the tray protocol. It cannot change protection, allow or restore anything. Those actions stay with IT in the console.
+It runs **per user, unprivileged** and only talks to the agent service over the tray protocol. It cannot allow or restore anything; those actions stay with IT in the console. The one thing it can change is the local **Turn off protection** switch, and only with the device's uninstall token, checked by the agent (policy `local_pause`; turning back on never needs a token). The token is never logged: Rust requests are only named by `TrayRequest::op()` and `TokenInput` has a redacted `Debug`.
 
 - **Tauri 2** (Rust) shell in `src-tauri/`. This is its **own Cargo workspace** (`[workspace]` in its `Cargo.toml`) and is not part of the root workspace.
 - **Vite + React + TypeScript** UI in `src/`. There is no UI library: plain CSS tuned to Windows 11 (Segoe UI Variable, 4/8 px radii, Mica backdrop, light and dark follow the system).
@@ -69,7 +69,7 @@ When the admin's guardrails require consent, the agent pushes a `consent_request
 |---|---|
 | Windows | named pipe (above) |
 | Linux/macOS dev | Unix socket at `$KESTREL_TRAY_SOCK` (the agent simulator serves the same protocol) |
-| Anywhere | `KESTREL_TRAY_MOCK=1` uses the built-in mock agent (`KESTREL_TRAY_MOCK_STATE=protected\|attention\|isolated\|degraded\|offline`). After subscribing, it pushes one demo critical notification about 15 s later. `KESTREL_TRAY_MOCK_CONSENT=desktop\|view\|files` sends an IT consent request about 5 s after subscribing (allowing it starts a matching session). `KESTREL_TRAY_MOCK_REMOTE=view\|control\|files` starts with an active IT remote session. `cycle` starts one about 5 s after subscribing, ends it after 40 s, and repeats. |
+| Anywhere | `KESTREL_TRAY_MOCK=1` uses the built-in mock agent (`KESTREL_TRAY_MOCK_STATE=protected\|attention\|isolated\|degraded\|offline`). After subscribing, it pushes one demo critical notification about 15 s later. `KESTREL_TRAY_MOCK_CONSENT=desktop\|view\|files` sends an IT consent request about 5 s after subscribing (allowing it starts a matching session). `KESTREL_TRAY_MOCK_REMOTE=view\|control\|files` starts with an active IT remote session. `cycle` starts one about 5 s after subscribing, ends it after 40 s, and repeats. `KESTREL_TRAY_MOCK_PAUSE=open\|basic\|disabled\|active\|active_full\|locked` sets the turn-off switch (default `open`); the mock uninstall token is `kun_mock_token`. |
 
 If nothing answers, the UI shows **"Kestrel isn't running"** with steps and the IT contact, and the tray shows the red hollow shield.
 
@@ -115,6 +115,8 @@ npm run dev:mock          # browser-only UI with sample data at http://localhost
                           #   &tab=status|activity|help &theme=light|dark &empty=1 &push=3 &notice=0
                           #   &remote=view|control|files|cycle   (IT remote session banner)
                           #   &consent=desktop|view|files|queue &consent_in=1 &consent_timeout=60
+                          #   &pause=open|basic|disabled|legacy|active|active_full|locked  (turn-off switch;
+                          #    mock uninstall token: kun_mock_token)
 npm test                  # Vitest: protocol parsing, markdown sanitising, remote-session banner, consent queue + prompt
 npm run build             # tsc (strict) + vite build → dist/
 npm run icons             # regenerate src-tauri/icons/** from scripts/gen-icons.mjs

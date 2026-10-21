@@ -1,6 +1,7 @@
 import type { ItContact, ProtectionState, RemoteSessionNotice, ReviewState, TrayStatus } from "./protocol";
 import type { ShieldKind } from "./components/Icons";
 import { clockTime } from "./format";
+import { MODE_COPY } from "./pause";
 
 // All user-facing state wording lives here so it stays consistent between the
 // window, the tray tooltip (mirrored in src-tauri/src/lib.rs) and tests.
@@ -47,11 +48,22 @@ export function stateCopy(kind: ShieldKind, s?: TrayStatus | null, recentBlocks 
       return { label: "Not running", headline: "Kestrel isn't running", detail: "Kestrel service isn't running, so this PC may not be protected. Contact IT so they can fix it." };
     case "loading":
       return { label: "Checking", headline: "Checking protection", detail: "Connecting to Kestrel on this PC." };
+    case "paused": {
+      const mode = MODE_COPY[s?.pause?.mode ?? "detection_only"];
+      return { label: "Protection off", headline: "Protection is off", detail: `${mode.label}: ${mode.detail}` };
+    }
   }
 }
 
+/** Status-tab / tray kind: a pause (protection turned off locally) wins over the agent state. */
+export function shieldKind(unavailable: boolean, s: TrayStatus | null): ShieldKind {
+  if (unavailable) return "unavailable";
+  if (!s) return "loading";
+  return s.pause ? "paused" : s.state;
+}
+
 export function isProtectionState(k: ShieldKind): k is ProtectionState {
-  return k !== "unavailable" && k !== "loading";
+  return k !== "unavailable" && k !== "loading" && k !== "paused";
 }
 
 export interface RemoteSessionCopy {

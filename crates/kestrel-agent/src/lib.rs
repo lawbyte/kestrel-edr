@@ -17,6 +17,7 @@ pub mod config;
 pub mod detection;
 pub mod live;
 pub mod logging;
+pub mod pause;
 pub mod pki;
 pub mod platform_win;
 pub mod privacy;

@@ -420,6 +420,7 @@ pub fn hello(agent: &TestAgent, hostname: &str) -> Hello {
         outbox_epoch: None,
         capabilities: vec![],
         remote_ceiling: None,
+        pause: None,
     }
 }
 

@@ -177,6 +177,12 @@ impl DeviceRow {
             "possible_duplicates": self.possible_duplicate_ids,
             "uninstall_token_set": self.uninstall_token_set,
             "uninstall_token_pending": self.uninstall_token_pending,
+            // Protection turned off locally (tray switch), if it is now.
+            // Read raw: right after a Hello `health` may hold only `pause`.
+            "pause": self
+                .health
+                .get("pause")
+                .and_then(|p| serde_json::from_value::<kestrel_common::PauseState>(p.clone()).ok()),
         })
     }
 }
@@ -184,7 +190,8 @@ impl DeviceRow {
 // ---------------------------------------------------------------- alerts
 
 pub const ALERT_SELECT: &str = "SELECT a.id, a.incident_id, a.device_id, d.hostname, a.ts, a.rule_id, a.rule_name, a.rule_author, \
-    a.severity, a.attack, a.mode, a.summary, a.process_guid, a.image, a.data_at_risk, a.actions, a.status \
+    a.severity, a.attack, a.mode, a.summary, a.process_guid, a.image, a.data_at_risk, a.actions, a.status, \
+    a.body->>'protection_off' AS protection_off \
     FROM alerts a JOIN devices d ON d.id = a.device_id";
 
 #[derive(sqlx::FromRow, Clone, Debug)]
@@ -206,6 +213,8 @@ pub struct AlertRow {
     pub data_at_risk: Vec<String>,
     pub actions: Value,
     pub status: String,
+    /// `Alert::protection_off` ("detection_only" / "full") from the stored body.
+    pub protection_off: Option<String>,
 }
 
 impl AlertRow {
@@ -228,6 +237,7 @@ impl AlertRow {
             "data_at_risk": self.data_at_risk,
             "actions": self.actions,
             "status": self.status,
+            "protection_off": self.protection_off,
         })
     }
 }

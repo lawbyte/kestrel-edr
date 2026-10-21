@@ -24,9 +24,9 @@ fn unsigned_temp(e: &mut Engine, guid: &str, pid: u32) {
 #[test]
 fn catalog_through_engine() {
     let c = Engine::catalog();
-    // 16 stealer + 5 tamper rules; the RW/CD/PS families add their own.
+    // 16 stealer + 6 tamper rules; the RW/CD/PS families add their own.
     let core = |p: &str| c.iter().filter(|m| m.id.starts_with(p)).count();
-    assert_eq!((core("ST-"), core("TP-")), (16, 5));
+    assert_eq!((core("ST-"), core("TP-")), (16, 6));
     let mut ids: Vec<&str> = c.iter().map(|m| m.id.as_str()).collect();
     ids.sort_unstable();
     ids.dedup();

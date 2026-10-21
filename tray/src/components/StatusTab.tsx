@@ -3,7 +3,8 @@ import type { RemoteSessionNotice, TrayStatus } from "../protocol";
 import type { Ack } from "../api/types";
 import { remoteSessionCopy, stateCopy } from "../copy";
 import { ago, fullDate } from "../format";
-import { IconCheck, IconChevron, IconClock, IconCross, IconPc, IconPolicy, IconScan, RemoteIcon, IconSync, StateShield, type ShieldKind } from "./Icons";
+import { byText, canOffer, untilText } from "../pause";
+import { IconCheck, IconChevron, IconClock, IconCross, IconPc, IconPolicy, IconPower, IconScan, RemoteIcon, IconSync, StateShield, type ShieldKind } from "./Icons";
 
 export type CheckState = { phase: "idle" } | { phase: "running"; started: number } | { phase: "done"; ack: Ack } | { phase: "failed"; message: string };
 
@@ -17,9 +18,18 @@ interface Props {
   onQuickCheck: () => void;
   onDismissCheck: () => void;
   onGo: (tab: "activity" | "help") => void;
+  /** Open the "Turn off protection" dialog (button shown only when the policy allows it). */
+  onTurnOff?: () => void;
+  /** Turn protection back on (no token). */
+  onResume?: () => void;
+  resume?: ResumeState;
+  /** Clock for the remaining-time text (re-rendered by the caller). */
+  now?: number;
 }
 
-export function StatusTab({ kind, status, remote, recentBlocks, check, onQuickCheck, onDismissCheck, onGo }: Props) {
+export type ResumeState = { busy: boolean; error: string | null };
+
+export function StatusTab({ kind, status, remote, recentBlocks, check, onQuickCheck, onDismissCheck, onGo, onTurnOff, onResume, resume, now = Date.now() }: Props) {
   const copy = stateCopy(kind, status, recentBlocks);
   const remoteCopy = remote ? remoteSessionCopy(remote, status?.it_contact) : null;
   const unavailable = kind === "unavailable";
@@ -29,7 +39,25 @@ export function StatusTab({ kind, status, remote, recentBlocks, check, onQuickCh
         <StateShield kind={kind} size={76} />
         <h1 className="hero__headline">{copy.headline}</h1>
         <p className="hero__detail">{copy.detail}</p>
-        {unavailable ? (
+        {kind === "paused" && status?.pause && (
+          <ul className="hero__facts">
+            <li>{untilText(status.pause, now)}.</li>
+            <li>{byText(status.pause, now)}. IT has been told.</li>
+          </ul>
+        )}
+        {kind === "paused" ? (
+          <>
+            <button className="btn btn--accent" id="resume-btn" onClick={onResume} disabled={!onResume || resume?.busy}>
+              <IconPower />
+              {resume?.busy ? "Turning on…" : "Turn protection back on"}
+            </button>
+            {resume?.error && (
+              <p className="hero__error" role="alert">
+                {resume.error}
+              </p>
+            )}
+          </>
+        ) : unavailable ? (
           <button className="btn btn--accent" onClick={() => onGo("help")}>
             Contact IT
           </button>
@@ -77,6 +105,21 @@ export function StatusTab({ kind, status, remote, recentBlocks, check, onQuickCh
             />
             <Row icon={<IconClock />} label="Kestrel version" value={status.agent_version} />
           </dl>
+        </section>
+      )}
+
+      {status && kind !== "paused" && onTurnOff && canOffer(status.local_pause) && (
+        <section className="pausebar" aria-label="Turn off protection">
+          <span className="pausebar__icon">
+            <IconPower size={18} />
+          </span>
+          <div className="pausebar__text">
+            <span className="pausebar__title">Turn off protection</span>
+            <span className="pausebar__sub">For IT staff and technicians. Needs this PC's uninstall token.</span>
+          </div>
+          <button className="btn" id="turn-off-btn" onClick={onTurnOff}>
+            Turn off…
+          </button>
         </section>
       )}
 
