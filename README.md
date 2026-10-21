@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/lawbyte/kestrel-edr/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/lawbyte/kestrel-edr/ci.yml?branch=main&style=flat&label=CI"></a>
   <a href="https://lawbyte.github.io/kestrel-edr/"><img alt="Docs" src="https://img.shields.io/badge/docs-online-4357c9?style=flat"></a>
-  <a href="https://github.com/lawbyte/kestrel-edr/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.1.4-4357c9?style=flat"></a>
+  <a href="https://github.com/lawbyte/kestrel-edr/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.1.5-4357c9?style=flat"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-555c6b?style=flat"></a>
   <img alt="Windows 10 and 11" src="https://img.shields.io/badge/endpoint-Windows%2010%20%7C%2011-555c6b?style=flat&logo=windows&logoColor=white">
   <img alt="Rust" src="https://img.shields.io/badge/agent-Rust-555c6b?style=flat&logo=rust&logoColor=white">
@@ -31,7 +31,7 @@ It has four parts:
 * **Admin console**: a React app served by the server.
 * **Tray app**: a small Tauri app for employees. It shows status, explains blocks in plain language and lets the employee request a review. An IT technician can turn protection off for a limited time from the tray with the device's uninstall token (detection only by default; every turn-off is a `TP-06` alert and an audit entry, and IT can turn it back on from the console).
 
-> **Status: v1.1.4 (release candidate), user-mode only.** Validated on Windows 11 (26100) in a disposable lab VM. Read the limits section before you rely on it.
+> **Status: v1.1.5 (release candidate), user-mode only.** Validated on Windows 11 (26100) in a disposable lab VM. Read the limits section before you rely on it.
 
 ## Screenshots
 
@@ -262,7 +262,7 @@ Open `https://<your server>/`, accept the self-signed certificate warning, and e
 3. Double-click the `.cmd` and approve the administrator prompt, or deploy it with Group Policy, Intune or an RMM as `Install-Kestrel-<profile>.cmd /quiet`.
 4. The PC appears under **Devices** within seconds. The employee sees the Kestrel tray icon at the next sign-in.
 
-Uninstalling needs the device's uninstall token (device page, **Uninstall token**, **Reveal**; the reveal is audit-logged): `msiexec /x <product code> /qn UNINSTALL_TOKEN=<token>`. See [Enroll devices](https://lawbyte.github.io/kestrel-edr/deploy/enroll) for mass deployment, upgrades and uninstall, and [Deploy the server](https://lawbyte.github.io/kestrel-edr/deploy/server) for TLS, backups, upgrades and sizing.
+Uninstalling needs the device's uninstall token (device page, **Uninstall token**, **Reveal**; the reveal is audit-logged). On the PC, open **Start menu > Kestrel EDR > Uninstall Kestrel EDR**, paste the token and click **Uninstall**; for scripts, `msiexec /x <product code> /qn UNINSTALL_TOKEN=<token>`. See [Enroll devices](https://lawbyte.github.io/kestrel-edr/deploy/enroll) for mass deployment, upgrades and uninstall, and [Deploy the server](https://lawbyte.github.io/kestrel-edr/deploy/server) for TLS, backups, upgrades and sizing.
 
 ## Development workflow
 
@@ -307,6 +307,7 @@ crates/
                      simulator (SimPlatform) + replays/, signed updates
   kestrel-scan       on-demand YARA-X scanner (separate process, kept out of the always-running agent)
   kestrel-msica      MSI custom actions (tokens go to the agent on stdin, never on a command line)
+  kestrel-uninstall  "Uninstall Kestrel EDR" window (Win32): asks for the uninstall token, removes the product
   kestrel-server     axum REST + tonic gRPC, internal CA, Postgres/ClickHouse, incidents, RBAC, audit, notifications, agent updates
 console/             React admin console (Vite); `npm run build` → console/dist (served by the server)
 tray/                Tauri 2 employee tray app (own Cargo workspace in tray/src-tauri)

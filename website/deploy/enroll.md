@@ -106,6 +106,20 @@ Add-MpPreference -ExclusionPath 'C:\Program Files\Kestrel'
 
 Every device gets its own **uninstall token**, issued by the server at enrollment. The agent stores only an Argon2id hash of it. Find it on the device page under **Uninstall token > Reveal** (each reveal is written to the audit log). **Rotate** sends a new token to the agent; the old token keeps working until the agent confirms.
 
+On the PC:
+
+1. Open the Start menu and choose **Kestrel EDR > Uninstall Kestrel EDR**. Accept the Windows administrator prompt. IT staff can also open it from the tray app: **Help & privacy > Uninstall Kestrel...**.
+2. Paste the token and click **Uninstall**.
+3. In the console, use **Decommission device** on the device page to remove it from the device list.
+
+<Shot src="img/guide/uninstall-tool.png" alt="Uninstall Kestrel EDR window with the uninstall token field, a Show box, the option to also delete quarantined files and logs, and the Uninstall and Cancel buttons" />
+
+**Also delete quarantined files and logs** removes `C:\ProgramData\Kestrel` after a successful uninstall (off by default, so quarantine and logs are kept). The folder is only deleted if it is a real folder owned by SYSTEM or Administrators, and links inside it are removed without touching their targets. A wrong token is reported in the window and you can paste it again. The tool writes a verbose installer log to `%TEMP%\kestrel-uninstall-<date>-<time>\kestrel-uninstall-<date>-<time>.log` (a folder only administrators can open) and shows it in the window (**Show log**) when the removal fails. Its exit code is 0 when Kestrel was removed, 1 for a wrong token and 2 otherwise.
+
+Removing Kestrel from **Settings > Apps** (or Programs and Features) stops with a message that points to the Start menu tool, because Windows has no way to ask for the token there.
+
+For scripts and deployment tools, use the command line:
+
 ```powershell
 msiexec /x KestrelAgent.msi /qn UNINSTALL_TOKEN=<token>
 ```

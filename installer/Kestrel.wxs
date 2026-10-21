@@ -9,7 +9,13 @@
   administrators on the device page in the console); the agent stores only its
   Argon2id hash. It is never printed or passed on the install command line.
   Uninstall (the token is required; a wrong token aborts the uninstall):
-    msiexec /x KestrelAgent.msi /qn UNINSTALL_TOKEN=<token>
+    * Interactive: Start menu > Kestrel EDR > Uninstall Kestrel EDR (kestrel-uninstall.exe,
+      elevates itself), paste the token, Uninstall. It asks Windows Installer for the
+      removal in-process (MsiConfigureProductEx), so the token is on no command line.
+    * Scripts: msiexec /x KestrelAgent.msi /qn UNINSTALL_TOKEN=<token>
+  Settings > Apps / Programs and Features (UILevel 3, basic UI) and a double-clicked
+  `msiexec /x` (UILevel 5) without UNINSTALL_TOKEN stop at a launch condition that points
+  to the Start menu tool (UX only; CA_Uninstall still enforces the token, V-M2).
 
   Secrets (TOKEN, UNINSTALL_TOKEN, CA_B64) and the deferred custom-action data that
   embeds them (CA_Install, CA_Uninstall) are listed in MsiHiddenProperties and the
@@ -21,6 +27,7 @@
       -d AgentExe=target\release\kestrel-agent.exe -d ScanExe=target\release\kestrel-scan.exe ^
       -d CaDll=target\release\kestrel_msica.dll ^
       -d TrayExe=tray\src-tauri\target\release\kestrel-tray.exe ^
+      -d UninstallExe=target\release\kestrel-uninstall.exe ^
       -ext WixToolset.Util.wixext -o KestrelAgent.msi
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
@@ -61,6 +68,22 @@
          installed Kestrel keeps the existing enrollment and needs no token (V-M3). -->
     <Launch Condition="Installed OR WIX_UPGRADE_DETECTED OR (SERVER AND TOKEN AND CA_B64)"
             Message="SERVER, TOKEN and CA_B64 are required. Copy the install command from the Kestrel console (Devices > Install agent, or Settings > Enrollment)." />
+    <!--
+      Interactive removal without the token (UX only; the KestrelUninstall custom
+      action still refuses a missing or wrong token, V-M2):
+      * Settings > Apps and Programs and Features remove an MSI product with
+        UILevel 3 (basic UI, execute sequence only); a double-clicked / typed
+        `msiexec /x {PC}` runs with UILevel 5. Both are "UILevel > 2"; LaunchConditions
+        is in the execute sequence too, so basic UI hits it.
+      * Silent removals (`/qn`, the uninstall tool's MsiConfigureProductEx with
+        INSTALLUILEVEL_NONE) are UILevel 2 and pass, and the token is set there anyway.
+      * Major upgrades: the old product is removed with UPGRADINGPRODUCTCODE set (and
+        no token), so it passes. Someone setting UPGRADINGPRODUCTCODE by hand only skips
+        this message; the custom action verifies the claim.
+      * A fresh install or an upgrade of this package is not REMOVE="ALL".
+    -->
+    <Launch Condition="NOT (REMOVE=&quot;ALL&quot; AND UILevel &gt; 2 AND NOT UNINSTALL_TOKEN AND NOT UPGRADINGPRODUCTCODE)"
+            Message="Kestrel needs this PC's uninstall token to be removed. Use 'Uninstall Kestrel EDR' from the Start menu." />
     <Launch Condition="VersionNT64 &gt;= 603"
             Message="Kestrel requires 64-bit Windows 10, Windows 11 or Windows Server 2019 or later." />
 
@@ -99,7 +122,21 @@
           <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
                          Name="KestrelTray" Type="string" Value="&quot;[INSTALLFOLDER]kestrel-tray.exe&quot; --background" />
         </Component>
+        <!-- GUI uninstaller (asks for the uninstall token; requireAdministrator manifest). -->
+        <Component Id="UninstallExe" Guid="*">
+          <File Id="KestrelUninstallExe" Source="$(var.UninstallExe)" Name="kestrel-uninstall.exe" KeyPath="yes">
+            <Shortcut Id="UninstallShortcut" Directory="KestrelMenuFolder" Name="Uninstall Kestrel EDR"
+                      Description="Remove Kestrel EDR from this PC (needs this PC's uninstall token)"
+                      WorkingDirectory="INSTALLFOLDER" />
+          </File>
+          <RemoveFolder Id="RemoveKestrelMenuFolder" Directory="KestrelMenuFolder" On="uninstall" />
+        </Component>
       </Directory>
+    </StandardDirectory>
+
+    <!-- Per-machine Start menu folder (ALLUSERS=1: ProgramData\...\Start Menu\Programs). -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="KestrelMenuFolder" Name="Kestrel EDR" />
     </StandardDirectory>
 
     <StandardDirectory Id="CommonAppDataFolder">
@@ -120,6 +157,7 @@
       <ComponentRef Id="UpgradeServiceControl" />
       <ComponentRef Id="TrayExe" />
       <ComponentRef Id="ScanExe" />
+      <ComponentRef Id="UninstallExe" />
       <ComponentRef Id="StateDir" />
     </Feature>
 

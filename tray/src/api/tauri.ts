@@ -17,6 +17,7 @@ export const tauriApi: KestrelApi = {
   quickCheck: () => invoke<Ack>("quick_check"),
   requestReview: (alertId, justification) => invoke<Ack>("request_review", { alertId, justification }),
   openLink: (url) => invoke("open_link", { url }),
+  launchUninstaller: () => invoke("launch_uninstaller"),
   getWindowMode: () => invoke<WindowMode>("get_window_mode"),
   setWindowMode: (mode) => invoke("set_window_mode", { mode }),
   hideWindow: () => invoke("hide_window"),

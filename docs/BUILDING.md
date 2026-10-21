@@ -6,6 +6,7 @@
 | `kestrel-agent` | Windows (native, MSVC) for real use; Linux/macOS for the simulator; Linux → Windows cross-check | `kestrel-agent(.exe)` |
 | console | Node 22 | `console/dist` (served by the server via `CONSOLE_DIR`) |
 | tray | Windows (Tauri 2); its UI builds anywhere | `kestrel-tray.exe` |
+| `kestrel-uninstall` | Windows (native, MSVC); a stub elsewhere | `kestrel-uninstall.exe` (GUI uninstaller) |
 | MSI | Windows, WiX v6 | `KestrelAgent.msi` |
 
 The toolchain is **stable** Rust ≥ 1.96 (`rust-version` in `Cargo.toml`), plus Node 22 for the console and tray.
@@ -110,7 +111,7 @@ You need:
 ```powershell
 cargo test -p kestrel-common -p kestrel-detect -p kestrel-win -p kestrel-agent
 $env:KESTREL_UPDATE_PUBKEY = '<base64 Ed25519 public key>'   # optional: enables signed auto-update (see "Signed agent updates")
-cargo build -p kestrel-agent -p kestrel-scan -p kestrel-msica --release   # kestrel-agent.exe, kestrel-scan.exe, kestrel_msica.dll in target\release
+cargo build -p kestrel-agent -p kestrel-scan -p kestrel-msica -p kestrel-uninstall --release   # kestrel-agent.exe, kestrel-scan.exe, kestrel_msica.dll, kestrel-uninstall.exe in target\release
 
 # ETW smoke test (elevated shell): sensors only, no server
 .\scripts\windows-smoke.ps1
@@ -174,17 +175,21 @@ wix build installer/Kestrel.wxs -arch x64 -d Version=$v `
   -d AgentExe=target/release/kestrel-agent.exe -d ScanExe=target/release/kestrel-scan.exe `
   -d CaDll=target/release/kestrel_msica.dll `
   -d TrayExe=tray/src-tauri/target/release/kestrel-tray.exe `
+  -d UninstallExe=target/release/kestrel-uninstall.exe `
   -ext WixToolset.Util.wixext -o KestrelAgent.msi
 ```
 
 The MSI is per-machine and does the following:
 
-* installs both executables to `C:\Program Files\Kestrel`
+* installs the agent, scanner, tray and uninstall tool to `C:\Program Files\Kestrel`
+* adds a Start menu shortcut **Kestrel EDR > Uninstall Kestrel EDR** (`kestrel-uninstall.exe`)
 * creates `C:\ProgramData\Kestrel` with a SYSTEM + Administrators ACL
 * adds the tray to `HKLM\…\Run`
 * runs `kestrel-agent install --server [SERVER] --ca [CA_B64] --token [TOKEN]` as a deferred, elevated custom action. This command verifies the state directory, enrolls the device (the server issues the per-device uninstall token; only its hash is stored) and registers the service.
 
 On uninstall, it runs `kestrel-agent uninstall --token [UNINSTALL_TOKEN]`, which fails without the right token (reveal it on the console's device page). `TOKEN`, `CA_B64`, `UNINSTALL_TOKEN` and the deferred custom-action data are hidden properties, so they never appear in the MSI log.
+
+`kestrel-uninstall.exe` is the interactive front end: it asks for the token, finds the installed product and asks Windows Installer for the removal in-process (`MsiConfigureProductExW`, no UI, verbose log in `%TEMP%\kestrel-uninstall-<date>-<time>\`, a new folder only SYSTEM and Administrators can open, pinned against renames while the tool runs), so the token is never on a process command line. It can also delete `C:\ProgramData\Kestrel` afterwards without following links. An interactive removal from Settings > Apps (basic UI, `UILevel` 3) or a full-UI `msiexec /x` without `UNINSTALL_TOKEN` stops at a launch condition that points to the Start menu tool; silent removals, the tool itself and major upgrades (`UPGRADINGPRODUCTCODE`) are not affected, and the custom action still enforces the token. `kestrel-uninstall.exe --preview` shows the window without changing anything (for screenshots; start it with `__COMPAT_LAYER=RunAsInvoker` to skip the elevation prompt).
 
 To publish the MSI, put `KestrelAgent.msi` (and optionally a `VERSION` file) in `deploy/installers/`. The server serves it at `/downloads/KestrelAgent.msi` and reports its SHA-256 in `GET /api/agent/installer`.
 
@@ -192,7 +197,7 @@ To publish the MSI, put `KestrelAgent.msi` (and optionally a `VERSION` file) in 
 
 Kestrel is signed with **Azure Artifact Signing**, formerly Trusted Signing. You need an Artifact Signing account, a certificate profile (Public Trust) and an app registration with the *Artifact Signing Certificate Profile Signer* role.
 
-**Order matters.** Sign `kestrel-agent.exe` and `kestrel-tray.exe` **before** building the MSI, because the MSI embeds the files as they are at build time. Then sign the MSI itself.
+**Order matters.** Sign `kestrel-agent.exe`, `kestrel-scan.exe`, `kestrel_msica.dll`, `kestrel-uninstall.exe` and `kestrel-tray.exe` **before** building the MSI, because the MSI embeds the files as they are at build time. Then sign the MSI itself.
 
 Locally, with SignTool and the Artifact Signing dlib (from the `Microsoft.ArtifactSigning.Client` / Trusted Signing client tools):
 
@@ -201,7 +206,8 @@ Locally, with SignTool and the Artifact Signing dlib (from the `Microsoft.Artifa
 # { "Endpoint": "https://<region>.codesigning.azure.net", "CodeSigningAccountName": "<account>", "CertificateProfileName": "<profile>" }
 signtool sign /v /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 `
   /dlib "<path>\Azure.CodeSigning.Dlib.dll" /dmdf metadata.json `
-  target\release\kestrel-agent.exe tray\src-tauri\target\release\kestrel-tray.exe
+  target\release\kestrel-agent.exe target\release\kestrel-scan.exe target\release\kestrel_msica.dll `
+  target\release\kestrel-uninstall.exe tray\src-tauri\target\release\kestrel-tray.exe
 # ...build the MSI, then:
 signtool sign /v /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 `
   /dlib "<path>\Azure.CodeSigning.Dlib.dll" /dmdf metadata.json KestrelAgent.msi

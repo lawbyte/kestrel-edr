@@ -393,6 +393,8 @@ export const mockApi: KestrelApi = {
   async openLink(url) {
     window.open(url, "_blank", "noopener,noreferrer");
   },
+  // Mock: nothing to start; the UI shows a note instead.
+  launchUninstaller: async () => {},
   getWindowMode: async () => mode,
   setWindowMode: async (m) => {
     mode = m;

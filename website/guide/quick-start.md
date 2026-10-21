@@ -249,11 +249,19 @@ Get-Service KestrelAgent                                  # Status: Running
 Kestrel protects itself against removal. To uninstall it from a PC you need that PC's uninstall token:
 
 1. In the console, open the device and click **Reveal** under **Uninstall token**. Revealing it is recorded in the audit log.
-2. On the PC, in an administrator PowerShell:
+2. On the PC, open the Start menu and choose **Kestrel EDR > Uninstall Kestrel EDR**. Accept the Windows administrator prompt, paste the token and click **Uninstall**.
 
-   ```powershell
-   $pc = (Get-ChildItem HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall | Get-ItemProperty | Where-Object DisplayName -eq 'Kestrel EDR Agent').PSChildName
-   msiexec /x $pc /qn UNINSTALL_TOKEN=<token>
-   ```
+   <Shot src="img/guide/uninstall-tool.png" alt="Uninstall Kestrel EDR window with the uninstall token field, a Show box, the option to also delete quarantined files and logs, and the Uninstall and Cancel buttons" />
+
+   Leave **Also delete quarantined files and logs** unchecked to keep `C:\ProgramData\Kestrel`. If the token is wrong, the window says so and you can paste it again.
 
 3. In the console, open the device and use **Decommission device** to remove it from the list.
+
+For scripts, the same removal from an administrator PowerShell:
+
+```powershell
+$pc = (Get-ChildItem HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall | Get-ItemProperty | Where-Object DisplayName -eq 'Kestrel EDR Agent').PSChildName
+msiexec /x $pc /qn UNINSTALL_TOKEN=<token>
+```
+
+Removing Kestrel from **Settings > Apps** stops with a message that points to the Start menu tool.

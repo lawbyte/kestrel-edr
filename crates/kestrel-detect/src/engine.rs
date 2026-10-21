@@ -654,6 +654,17 @@ impl Iocs {
 // Per-process and global state
 // ---------------------------------------------------------------------------
 
+/// Why a credential-store read is alert-only (Low Audit ST-01, recorded so
+/// ST-04 can stay Audit when nothing else was read).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BenignRead {
+    No,
+    /// `legit_apps::wam_client_reader`
+    Wam,
+    /// `legit_apps::dev_tool_reader`
+    DevTool,
+}
+
 #[derive(Default)]
 struct ProcState {
     cat_ts: [Option<TimestampMs>; NUM_CATEGORIES],
@@ -670,6 +681,16 @@ struct ProcState {
     /// Lab 2026-10-21: DPAPI "Chromium" unprotect by a signed Program Files
     /// Electron app (its own safeStorage key).
     own_app_dpapi: bool,
+    /// Owner's PC 2026-10-22: developer-tool credential stores (kubeconfig,
+    /// Docker, cloud CLIs) read by a signed, non-interpreter Program Files
+    /// developer tool (`legit_apps::dev_tool_reader`; ST-04 then Audit-only).
+    dev_tool_cred: bool,
+    /// 2026-10-22: the one cloud provider (`legit_apps::cloud_provider`)
+    /// whose developer-tool stores were read, while `non_provider_cred` is
+    /// false (every credential read so far was that provider's store).
+    cloud_provider: Option<&'static str>,
+    /// Any credential read or DPAPI unprotect that is not one provider's store.
+    non_provider_cred: bool,
     non_wam_cred: bool,
     dns: HashMap<String, String>,
     st13: Option<&'static str>,
@@ -771,7 +792,8 @@ struct Hit {
     kill_at_expiry: bool,
     /// Strong rule: escalates suspend windows of this process / parent / children.
     strong: bool,
-    escalation_ip: Option<(String, u16)>,
+    /// (ip, port, image scope of the block: `None` = host-wide).
+    escalation_ip: Option<(String, u16, Option<String>)>,
     /// Extra evidence (events of other processes).
     extra_evidence: Vec<Event>,
     /// Tamper reports: skip agent self-suppression.
@@ -2120,11 +2142,11 @@ impl EngineState {
                         sha256: w.sha256.clone(),
                     });
                 }
-                if let Some((ip, port)) = &hit.escalation_ip {
+                if let Some((ip, port, scope)) = &hit.escalation_ip {
                     actions.push(ResponseAction::BlockDestination {
                         ip: ip.clone(),
                         port: Some(*port),
-                        image: None,
+                        image: scope.clone(),
                         ttl_secs: Some(BLOCK_TTL_SECS),
                         ioc_id: None,
                     });
@@ -2898,6 +2920,7 @@ impl EngineState {
                 tampered,
             )
             .is_some()
+            || crate::legit_apps::bundled_cli_python(&proc_, store.app, self.system_drive, tampered)
             || benign_reader_for(&proc_, &store, &norm).is_some()
             || Self::system_trusted(&proc_)
         {
@@ -2906,8 +2929,15 @@ impl EngineState {
         if self.excluded(&proc_, ST01, e.ts) || self.iocs.allowed_process(&proc_) {
             return;
         }
-        let wam_client = crate::legit_apps::wam_client_reader(&proc_, store.app, self.system_drive);
-        self.on_sensitive_read(e, &proc_, &store, op, wam_client);
+        let benign = if crate::legit_apps::wam_client_reader(&proc_, store.app, self.system_drive) {
+            BenignRead::Wam
+        } else if crate::legit_apps::dev_tool_reader(&proc_, store.app, self.system_drive, tampered)
+        {
+            BenignRead::DevTool
+        } else {
+            BenignRead::No
+        };
+        self.on_sensitive_read(e, &proc_, &store, op, benign);
     }
 
     fn on_sensitive_read(
@@ -2916,13 +2946,21 @@ impl EngineState {
         proc_: &ProcessInfo,
         store: &SensitiveStore,
         op: FileOp,
-        wam_client: bool,
+        benign: BenignRead,
     ) {
         let st = self.state(&proc_.guid, e.ts);
-        if wam_client {
-            st.wam_cred = true;
-        } else {
-            st.non_wam_cred = true;
+        match benign {
+            BenignRead::Wam => st.wam_cred = true,
+            BenignRead::DevTool => st.dev_tool_cred = true,
+            BenignRead::No => st.non_wam_cred = true,
+        }
+        match (
+            crate::legit_apps::cloud_provider(store.app),
+            st.cloud_provider,
+        ) {
+            (Some(p), None) => st.cloud_provider = Some(p),
+            (Some(p), Some(q)) if p == q => {}
+            _ => st.non_provider_cred = true,
         }
         st.add_category(store.category, e.ts);
         st.touch(store.app, store.noun);
@@ -2958,16 +2996,30 @@ impl EngineState {
                 store.app
             ),
         );
-        if wam_client {
-            // A Microsoft-signed WAM client reading the token broker cache:
-            // recorded (ST-02 / ST-04 correlation) and alerted Low / Audit,
-            // never suspended.
-            hit.severity = Severity::Low;
-            hit.mode_override = Some(RuleMode::Audit);
-            hit.summary.push_str(" (Microsoft-signed app reading the Windows sign-in (WAM) token cache, which WAM clients do; alert only)");
-        } else {
-            hit.suspend = true;
-            hit.kill_at_expiry = kill_at_expiry;
+        match benign {
+            BenignRead::Wam => {
+                // A Microsoft-signed WAM client reading the token broker cache:
+                // recorded (ST-02 / ST-04 correlation) and alerted Low / Audit,
+                // never suspended.
+                hit.severity = Severity::Low;
+                hit.mode_override = Some(RuleMode::Audit);
+                hit.summary.push_str(" (Microsoft-signed app reading the Windows sign-in (WAM) token cache, which WAM clients do; alert only)");
+            }
+            BenignRead::DevTool => {
+                // Owner's PC 2026-10-22 (Docker Desktop): a signed developer
+                // tool installed under Program Files reading a developer-tool
+                // credential store: recorded and alerted Low / Audit.
+                hit.severity = Severity::Low;
+                hit.mode_override = Some(RuleMode::Audit);
+                hit.summary.push_str(&format!(
+                    " (validly signed {} application installed under Program Files reading a developer-tool credential store, which developer tools such as Docker Desktop, kubectl, Lens or cloud CLIs do; alert only)",
+                    proc_.signer.as_deref().unwrap_or("").trim()
+                ));
+            }
+            BenignRead::No => {
+                hit.suspend = true;
+                hit.kill_at_expiry = kill_at_expiry;
+            }
         }
         self.emit(e, hit);
 
@@ -3181,6 +3233,7 @@ impl EngineState {
         st.touch(browser, "DPAPI-protected secrets");
         st.add_evidence(e);
         st.last_dpapi_ts = Some(e.ts);
+        st.non_provider_cred = true;
         if own_app {
             st.own_app_dpapi = true;
         } else {
@@ -3439,32 +3492,92 @@ impl EngineState {
                 describe(&rp)
             ),
         );
+        // Owner's PC 2026-10-22: the send came from the reader's *parent*
+        // and that parent is the same vendor's signed Program Files backend
+        // (Docker Desktop's com.docker.backend.exe contacting
+        // desktop.docker.com): the parent and its tree are not killed and
+        // the vendor's endpoint is not blocked; only the reader is stopped.
+        let sender_is_parent = rg != proc_.guid
+            && (rp.parent_guid.as_ref() == Some(&proc_.guid)
+                || self
+                    .table
+                    .parent_of(&rp)
+                    .is_some_and(|p| p.guid == proc_.guid));
+        let vendor_backend = sender_is_parent
+            && crate::legit_apps::vendor_backend(
+                &proc_,
+                &rp,
+                self.system_drive,
+                self.tampered.contains(&proc_.guid),
+            );
         hit.actions.push(kill(&rp, true));
-        if rg != proc_.guid {
+        if rg != proc_.guid && !vendor_backend {
             hit.actions.push(kill(&proc_, true));
             if proc_.path_class.is_user_writable() {
                 hit.actions.push(quarantine(&proc_));
             }
         }
-        hit.actions.push(ResponseAction::BlockDestination {
-            ip: ip_norm.clone(),
-            port: None,
-            image: None,
-            ttl_secs: Some(BLOCK_TTL_SECS),
-            ioc_id: None,
-        });
+        if !vendor_backend {
+            // Block scope: a validly signed sender installed under Program
+            // Files gets a per-image block (it is killed anyway); a CDN
+            // address it shares with other software (3.165.102.21 is
+            // CloudFront) is not cut for the whole host for 24 h. Anything
+            // else (unsigned, user-writable, System32 LOLBins) keeps the
+            // host-wide block.
+            let scope = (proc_.signed == SignatureState::Valid
+                && crate::legit_apps::in_program_files(&proc_.image, self.system_drive))
+            .then(|| proc_.image.clone());
+            hit.actions.push(ResponseAction::BlockDestination {
+                ip: ip_norm.clone(),
+                port: None,
+                image: scope.clone(),
+                ttl_secs: Some(BLOCK_TTL_SECS),
+                ioc_id: None,
+            });
+            hit.escalation_ip = Some((ip_norm, dst_port, scope));
+        } else {
+            hit.summary.push_str(&format!(
+                " (the connection came from {}, the reader's parent, signed by the same vendor and installed under Program Files: only the reader is stopped, the parent and the destination are left alone)",
+                short_name(&proc_)
+            ));
+        }
         hit.actions.push(quarantine(&rp));
-        hit.escalation_ip = Some((ip_norm, dst_port));
         // Re-review N2: only WAM token-cache reads by a Microsoft-signed WAM
         // client (e.g. VS Code sign-in, then telemetry): Audit, not a kill.
-        if self
+        // Owner's PC 2026-10-22: likewise developer-tool credential stores
+        // read only by signed Program Files developer tools.
+        if let Some(s) = self
             .states
             .get(&rg)
-            .is_some_and(|s| (s.wam_cred || s.own_app_dpapi) && !s.non_wam_cred)
+            .filter(|s| (s.wam_cred || s.own_app_dpapi || s.dev_tool_cred) && !s.non_wam_cred)
         {
             hit.mode_override = Some(RuleMode::Audit);
             hit.strong = false;
-            hit.summary.push_str(" (only the Windows sign-in (WAM) token cache and/or the app's own Electron safeStorage key were read, by a signed Program Files app; alert only)");
+            if s.dev_tool_cred {
+                hit.summary.push_str(" (only developer-tool credential stores such as kubeconfig, Docker or cloud CLI credentials were read, by a signed developer tool installed under Program Files; alert only)");
+            } else {
+                hit.summary.push_str(" (only the Windows sign-in (WAM) token cache and/or the app's own Electron safeStorage key were read, by a signed Program Files app; alert only)");
+            }
+        } else if let Some((provider, h)) =
+            self.provider_destination(&rg, &rp, &proc_, host.as_deref())
+        {
+            // 2026-10-22: only one cloud provider's developer-tool stores were
+            // read and the send went to that provider's own service endpoint
+            // (by DNS name, never by IP) from signed, non-Temp, untampered
+            // processes: SDK / CLI use (boto3 calling S3) looks exactly like
+            // this. High Audit, no kill or block; recorded, and any later read
+            // of another store or send elsewhere gets the full ST-04 (own
+            // dedup key so that alert is not swallowed).
+            hit.actions.clear();
+            hit.escalation_ip = None;
+            hit.mode_override = Some(RuleMode::Audit);
+            hit.strong = false;
+            hit.severity = Severity::High;
+            hit.dedup_key = Some(format!("{ST04}#provider"));
+            hit.summary = format!(
+                "{} read {phrase}, {who} {provider} ({h}) {delay} later; this is normal for SDK / CLI use but would also fit an attacker using the credentials; review",
+                describe(&rp)
+            );
         }
         hit.process = Some(rp);
         if rg != proc_.guid {
@@ -3473,6 +3586,42 @@ impl EngineState {
             self.state(&rg, e.ts).add_evidence(e);
         }
         self.emit(e, hit);
+    }
+
+    /// ST-04 provider-destination allowance (2026-10-22): every credential
+    /// read of `rg` was a developer-tool store of one cloud provider, `host`
+    /// (the correlated DNS name of the connection; `None` = no allowance) is
+    /// one of that provider's service endpoints, and both the reader and the
+    /// sender are validly signed, outside Temp / Downloads / external media
+    /// and not tampered. Returns (provider, host).
+    fn provider_destination(
+        &self,
+        rg: &ProcessGuid,
+        reader: &ProcessInfo,
+        sender: &ProcessInfo,
+        host: Option<&str>,
+    ) -> Option<(&'static str, String)> {
+        let h = host?;
+        let s = self.states.get(rg)?;
+        if s.non_provider_cred {
+            return None;
+        }
+        let provider = s.cloud_provider?;
+        (crate::legit_apps::provider_endpoint(provider, h)
+            && crate::legit_apps::provider_allowance_ok(
+                reader,
+                self.tampered.contains(&reader.guid),
+            )
+            && crate::legit_apps::provider_allowance_ok(
+                sender,
+                self.tampered.contains(&sender.guid),
+            ))
+        .then(|| {
+            (
+                provider,
+                h.trim().trim_end_matches('.').to_ascii_lowercase(),
+            )
+        })
     }
 
     fn on_dns(&mut self, e: &Event, qname: &str, answers: &[String]) {
@@ -3537,8 +3686,12 @@ impl EngineState {
         let browser_target = is_browser_image(&t.target_image);
         // Re-review N6: password managers in the importer table are tracked
         // for tampering too (ST-16), though ST-07 itself is browser-only.
+        // Owner's PC 2026-10-22: any Program Files image is tracked too, so
+        // an injected developer tool / vendor backend never counts as
+        // `legit_apps::dev_tool_reader` / `vendor_backend`.
         let known_target = browser_target
-            || crate::legit_apps::app_at_location(&t.target_image, self.system_drive).is_some();
+            || crate::legit_apps::app_at_location(&t.target_image, self.system_drive).is_some()
+            || crate::legit_apps::in_program_files(&t.target_image, self.system_drive);
         if !known_target || self.is_agent_owned(&e.guid) || e.pid == 0 || e.pid == 4 {
             return;
         }

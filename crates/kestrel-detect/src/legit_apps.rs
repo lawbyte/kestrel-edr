@@ -13,6 +13,12 @@
 //!   browser's stores (updater / elevation / WebView helpers);
 //! * ST-01 ([`wam_client_reader`], soak 2026-10-21): Microsoft-signed
 //!   Program Files apps read the Windows token broker (WAM) cache.
+//! * ST-01 / ST-04 ([`dev_tool_reader`], owner's PC 2026-10-22): validly
+//!   signed, non-interpreter Program Files images read developer-tool
+//!   credential stores (kubeconfig, Docker, cloud CLIs): Low Audit, recorded;
+//! * ST-04 ([`vendor_backend`], same finding): when the send came from the
+//!   reader's parent and that parent is the same vendor's signed Program
+//!   Files backend, only the reader is stopped and nothing is blocked.
 //!
 //! It is **not** a general "never kill" list: every rule still responds to
 //! these processes (a global exemption keyed on signature + path was tried
@@ -377,8 +383,326 @@ pub const WAM_CLIENT_SIGNERS: &[&str] = &["microsoft corporation", "microsoft wi
 /// never silent, and ST-04 escalates as soon as anything else is read.)
 pub(crate) const MACRO_HOSTS: &[&str] = &["dotnet.exe", "csi.exe", "fsi.exe", "dotnet-script.exe"];
 
-/// Microsoft-signed Electron apps (can run as Node on any file).
-const ELECTRON_HOSTS: &[&str] = &["code.exe", "code - insiders.exe", "azuredatastudio.exe"];
+/// Electron apps (can run as Node on any file with `ELECTRON_RUN_AS_NODE`,
+/// which the sensor cannot see): only a plain launch without a positional
+/// argument counts as the app itself. Microsoft-signed ones (WAM clients)
+/// and the developer tools that read kubeconfig / Docker credentials.
+const ELECTRON_HOSTS: &[&str] = &[
+    "code.exe",
+    "code - insiders.exe",
+    "azuredatastudio.exe",
+    "docker desktop.exe",
+    "lens.exe",
+    "openlens.exe",
+    "rancher desktop.exe",
+    "cursor.exe",
+    "windsurf.exe",
+    "postman.exe",
+    "githubdesktop.exe",
+];
+
+/// Owner's PC 2026-10-22 (Docker Desktop killed by ST-04): store labels
+/// ([`crate::paths`] `SensitiveStore::app`) of **developer-tool credential
+/// stores**. Many signed developer tools read them as part of normal work
+/// (Docker Desktop, kubectl, Helm, Lens, VS Code, Rancher Desktop, cloud
+/// CLIs, Terraform). Exactly these labels: AWS (`.aws\credentials`, SSO /
+/// CLI cache), Azure CLI token cache, Google Cloud SDK credentials,
+/// kubeconfig, Docker `config.json`. Not the WAM cache (own rule), not the
+/// MSAL `.IdentityService` cache, Git / GitHub CLI / ngrok / Terraform
+/// tokens, and never a browser, wallet, messenger or Windows credential
+/// store.
+pub const DEV_TOOL_STORES: &[&str] = &[
+    "AWS",
+    "Azure CLI",
+    "Google Cloud SDK",
+    "Kubernetes",
+    "Docker",
+];
+
+/// Interpreters and script hosts beyond [`SCRIPT_HOSTS`] / [`MACRO_HOSTS`]
+/// and the engine's LOLBin list: they run whatever code they are given, so
+/// their signature says nothing about what read the store.
+const MORE_INTERPRETERS: &[&str] = &[
+    "ruby.exe",
+    "rubyw.exe",
+    "irb.exe",
+    "perl.exe",
+    "wperl.exe",
+    "php.exe",
+    "php-cgi.exe",
+    "lua.exe",
+    "luajit.exe",
+    "rscript.exe",
+    "r.exe",
+    "julia.exe",
+    "tclsh.exe",
+    "wish.exe",
+    "jshell.exe",
+    "jrunscript.exe",
+    "groovy.exe",
+    "uv.exe",
+    "uvx.exe",
+    "ipython.exe",
+    "jupyter.exe",
+    "conda.exe",
+    "mshta.exe",
+    "cmd.exe",
+    "wscript.exe",
+    "cscript.exe",
+    "rundll32.exe",
+    "regsvr32.exe",
+];
+
+/// Interpreter / script host / .NET or script REPL / LOLBin by image file
+/// name (lower-case). Versioned Python names (`python3.exe`,
+/// `python3.12.exe`, `pythonw3.exe`) count too.
+pub fn is_interpreter(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    SCRIPT_HOSTS.contains(&n.as_str())
+        || MACRO_HOSTS.contains(&n.as_str())
+        || MORE_INTERPRETERS.contains(&n.as_str())
+        || crate::engine::is_lolbin(&n)
+        || (n.starts_with("python") && n.ends_with(".exe"))
+}
+
+/// The image file name of a validly signed image under Program Files /
+/// Program Files (x86) / WindowsApps on the system volume that is not an
+/// interpreter, script host or LOLBin, does not run a script, eval or
+/// inspector argument, is not under remote control, was never tampered
+/// with and (Electron hosts) is a plain launch. `None` otherwise.
+fn signed_program_files_app(p: &ProcessInfo, system_drive: char, tampered: bool) -> Option<String> {
+    if tampered
+        || p.signed != SignatureState::Valid
+        || !p.signer.as_deref().is_some_and(|s| !s.trim().is_empty())
+    {
+        return None;
+    }
+    let sub = program_files_rest(&p.image, system_drive)?;
+    let name = sub.rsplit('\\').next().unwrap_or("").to_string();
+    if name.is_empty() || is_interpreter(&name) {
+        return None;
+    }
+    if runs_script(&p.cmdline) || is_remote_controlled(&p.cmdline) || has_eval_switch(&p.cmdline) {
+        return None;
+    }
+    if ELECTRON_HOSTS.contains(&name.as_str()) && !positional_args(&p.cmdline).is_empty() {
+        return None;
+    }
+    Some(name)
+}
+
+/// Owner's PC 2026-10-22: `C:\Program Files\Docker\Docker\resources\
+/// com.docker.build.exe --log-no-timestamp` (signed "Docker Inc") read
+/// `.kube\config`; ST-04 then killed Docker Desktop. A read of a
+/// [`DEV_TOOL_STORES`] store by a validly signed (any named signer), non-
+/// interpreter image under Program Files / WindowsApps on the system volume,
+/// with no script / eval / inspector / remote-control argument, not
+/// tampered, is a developer tool doing its job: ST-01 Low Audit, recorded
+/// for correlation, and ST-04 after only such reads is Audit. Per-user
+/// installs (`%LOCALAPPDATA%`), unsigned images, interpreters and anything
+/// reading a browser / wallet / Windows credential store are unaffected.
+pub fn dev_tool_reader(
+    p: &ProcessInfo,
+    store_app: &str,
+    system_drive: char,
+    tampered: bool,
+) -> bool {
+    DEV_TOOL_STORES.contains(&store_app)
+        && signed_program_files_app(p, system_drive, tampered).is_some()
+}
+
+/// Owner's PC 2026-10-22: ST-04 killed Docker Desktop's backend (the
+/// reader's parent, which made the connection) and its whole tree. Is
+/// `sender` the reader's own vendor backend: a validly signed, non-
+/// interpreter Program Files image (same constraints as
+/// [`dev_tool_reader`]) whose signer is exactly the reader's (valid)
+/// signer? The caller checks that `sender` is the reader's parent.
+pub fn vendor_backend(
+    sender: &ProcessInfo,
+    reader: &ProcessInfo,
+    system_drive: char,
+    sender_tampered: bool,
+) -> bool {
+    if reader.signed != SignatureState::Valid
+        || signed_program_files_app(sender, system_drive, sender_tampered).is_none()
+    {
+        return false;
+    }
+    match (sender.signer.as_deref(), reader.signer.as_deref()) {
+        (Some(a), Some(b)) => {
+            let (a, b) = (a.trim(), b.trim());
+            !a.is_empty() && a.eq_ignore_ascii_case(b)
+        }
+        _ => false,
+    }
+}
+
+/// 2026-10-22 (coordinator review of the AWS trade-off): the cloud provider
+/// of a developer-tool store, by store label. Kubeconfig has none: its API
+/// server is whatever the kubeconfig names, which the engine does not know.
+pub fn cloud_provider(store_app: &str) -> Option<&'static str> {
+    match store_app {
+        "AWS" => Some("AWS"),
+        "Azure CLI" => Some("Azure"),
+        "Google Cloud SDK" => Some("Google Cloud"),
+        "Docker" => Some("Docker"),
+        _ => None,
+    }
+}
+
+/// Service endpoint DNS suffixes per [`cloud_provider`] (label-boundary
+/// suffix match on the correlated host name; never on an IP). Kept to the
+/// providers' API / sign-in / registry domains: not `microsoft.com` or
+/// `google.com` as a whole.
+pub const PROVIDER_ENDPOINTS: &[(&str, &[&str])] = &[
+    (
+        "AWS",
+        &["amazonaws.com", "aws.amazon.com", "amazonaws.com.cn"],
+    ),
+    (
+        "Azure",
+        &[
+            "azure.com",
+            "azure.net",
+            "core.windows.net",
+            "login.windows.net",
+            "login.microsoftonline.com",
+            "graph.microsoft.com",
+            "azurecr.io",
+        ],
+    ),
+    (
+        "Google Cloud",
+        &["googleapis.com", "accounts.google.com", "gcr.io", "pkg.dev"],
+    ),
+    ("Docker", &["docker.io", "docker.com"]),
+];
+
+/// Is `host` one of `provider`'s service endpoints?
+pub fn provider_endpoint(provider: &str, host: &str) -> bool {
+    let h = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if h.is_empty() || h.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    PROVIDER_ENDPOINTS
+        .iter()
+        .filter(|(p, _)| *p == provider)
+        .flat_map(|(_, s)| s.iter())
+        .any(|s| crate::util::host_matches(&h, s))
+}
+
+/// Who may get ST-04's provider-destination allowance (reader and sender):
+/// a validly signed image (interpreters included: boto3 runs under a
+/// signed python.exe) that is not in Temp / Downloads / external media and
+/// was never injected into. Unsigned readers never get it.
+pub fn provider_allowance_ok(p: &ProcessInfo, tampered: bool) -> bool {
+    !tampered
+        && !p.image.is_empty()
+        && p.signed == SignatureState::Valid
+        && !matches!(
+            p.path_class,
+            PathClass::Temp | PathClass::Downloads | PathClass::External
+        )
+}
+
+/// Tokens after the image on a Windows command line (quote-aware).
+fn args_after_image(cmdline: &str) -> Vec<String> {
+    let t = cmdline.trim();
+    let rest = if let Some(r) = t.strip_prefix('"') {
+        r.split_once('"').map(|x| x.1).unwrap_or("")
+    } else {
+        t.split_once(char::is_whitespace).map(|x| x.1).unwrap_or("")
+    };
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    for ch in rest.chars().chain(std::iter::once(' ')) {
+        match ch {
+            '"' => quoted = !quoted,
+            c if c.is_whitespace() && !quoted => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    out
+}
+
+/// Python flags allowed before the CLI entry point: single-dash letter
+/// groups without `c` (command), `m` (module) or `X` / `W` values.
+fn harmless_python_flags(t: &str) -> bool {
+    t.strip_prefix('-').is_some_and(|f| {
+        !f.is_empty()
+            && f.chars().all(|c| {
+                matches!(
+                    c.to_ascii_lowercase(),
+                    'b' | 'e' | 'i' | 's' | 'u' | 'o' | 'q' | 'd'
+                )
+            })
+    })
+}
+
+/// 2026-10-22: the official Azure CLI and Google Cloud CLI are Python
+/// programs. Their **bundled** interpreter, in the CLI's own Program Files
+/// install on the system volume, validly signed, not tampered, started the
+/// way the CLI's launcher starts it, owns that CLI's store:
+/// * Azure CLI: `<Program Files[ (x86)]>\Microsoft SDKs\Azure\CLI2\python.exe`
+///   with `-IBm azure.cli` (`az.cmd`; any harmless flag group ending in `m`
+///   followed by exactly `azure.cli`);
+/// * Google Cloud CLI: `<Program Files[ (x86)]>\Google\Cloud SDK\
+///   google-cloud-sdk\platform\bundledpython\python.exe` whose first
+///   non-flag argument is that SDK's `lib\gcloud.py`.
+///
+/// The command lines follow the launchers' published scripts and were not
+/// checked on a live install; a mismatch only means the provider-destination
+/// path (High Audit) applies instead of silence.
+pub fn bundled_cli_python(
+    p: &ProcessInfo,
+    store_app: &str,
+    system_drive: char,
+    tampered: bool,
+) -> bool {
+    if tampered || p.signed != SignatureState::Valid {
+        return false;
+    }
+    let Some(sub) = program_files_rest(&p.image, system_drive) else {
+        return false;
+    };
+    let args: Vec<String> = args_after_image(&p.cmdline)
+        .into_iter()
+        .map(|a| a.to_ascii_lowercase())
+        .collect();
+    match store_app {
+        "Azure CLI" if sub == r"\microsoft sdks\azure\cli2\python.exe" => {
+            args.len() >= 2
+                && args[0].ends_with('m')
+                && harmless_python_flags(&args[0][..args[0].len() - 1])
+                && args[1] == "azure.cli"
+                || args.len() >= 2 && args[0] == "-m" && args[1] == "azure.cli"
+        }
+        "Google Cloud SDK"
+            if sub == r"\google\cloud sdk\google-cloud-sdk\platform\bundledpython\python.exe" =>
+        {
+            let Some(script) = args.iter().find(|a| !harmless_python_flags(a)) else {
+                return false;
+            };
+            let s = crate::paths::normalize_path(script);
+            if !s.starts_with(&format!("{}:\\", system_drive.to_ascii_lowercase())) {
+                return false;
+            }
+            let s = crate::util::strip_drive(&s);
+            let s = s.replace(r"\bin\..\", r"\").replace(r"\bin\\..\", r"\");
+            matches!(
+                s.as_str(),
+                r"\program files\google\cloud sdk\google-cloud-sdk\lib\gcloud.py"
+                    | r"\program files (x86)\google\cloud sdk\google-cloud-sdk\lib\gcloud.py"
+            )
+        }
+        _ => false,
+    }
+}
 
 /// `-e` / `--eval` / `-p` / `--print` / a bare `-` (script on stdin), any prefix.
 pub fn has_eval_switch(cmdline: &str) -> bool {
@@ -861,6 +1185,64 @@ mod tests {
             Some("Google LLC"),
         );
         assert!(importer(&pu, 'c', false).is_none());
+    }
+
+    #[test]
+    fn dev_tool_reader_and_vendor_backend() {
+        const BUILD: &str = r"C:\Program Files\Docker\Docker\resources\com.docker.build.exe";
+        const BACKEND: &str = r"C:\Program Files\Docker\Docker\resources\com.docker.backend.exe";
+        let docker = Some("Docker Inc");
+        let build = proc_(BUILD, "com.docker.build.exe --log-no-timestamp", docker);
+        for store in DEV_TOOL_STORES {
+            assert!(dev_tool_reader(&build, store, 'c', false), "{store}");
+        }
+        assert!(
+            !dev_tool_reader(&build, "Kubernetes", 'c', true),
+            "tampered"
+        );
+        for store in [
+            "Chrome",
+            "Windows token broker",
+            "Git",
+            "Exodus",
+            "Microsoft identity (MSAL)",
+        ] {
+            assert!(!dev_tool_reader(&build, store, 'c', false), "{store}");
+        }
+        for name in [
+            "python.exe",
+            "python3.12.exe",
+            "pythonw.exe",
+            "node.exe",
+            "javaw.exe",
+            "pwsh.exe",
+            "cmd.exe",
+            "rundll32.exe",
+            "dotnet.exe",
+            "ruby.exe",
+            "perl.exe",
+            "php.exe",
+            "mshta.exe",
+        ] {
+            assert!(is_interpreter(name), "{name}");
+            let p = proc_(&format!(r"C:\Program Files\X\{name}"), name, docker);
+            assert!(!dev_tool_reader(&p, "Kubernetes", 'c', false), "{name}");
+        }
+        assert!(!is_interpreter("com.docker.build.exe"));
+        let backend = proc_(BACKEND, "com.docker.backend.exe run", docker);
+        assert!(vendor_backend(&backend, &build, 'c', false));
+        assert!(!vendor_backend(&backend, &build, 'c', true), "tampered");
+        let other = proc_(BACKEND, "x", Some("Other Ltd"));
+        assert!(!vendor_backend(&other, &build, 'c', false));
+        let mut unsigned_reader = build.clone();
+        unsigned_reader.signed = Unsigned;
+        assert!(!vendor_backend(&backend, &unsigned_reader, 'c', false));
+        let user = proc_(
+            r"C:\Users\a\AppData\Local\Docker\com.docker.backend.exe",
+            "x",
+            docker,
+        );
+        assert!(!vendor_backend(&user, &build, 'c', false));
     }
 
     #[test]

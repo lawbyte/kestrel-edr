@@ -66,23 +66,44 @@ pub struct UninstallData<'a> {
     pub product_code: &'a str,
 }
 
+/// Kestrel's UpgradeCode (`Package/@UpgradeCode` in `installer/Kestrel.wxs`).
+/// A verified upgrade must name a product registered under this code, not
+/// under whatever code the custom-action data carries.
+pub const KESTREL_UPGRADE_CODE: &str = "{6E3A0F43-8A1B-4C55-9B5D-2F4C7E1A9D10}";
+
 /// `<installdir>|<token>[|<upgrading>|<upgrade code>|<version>|<product code>]`.
-/// The token is the second field; the four trailing fields are product
-/// codes / a version and never contain `|`.
+///
+/// The four trailing fields come from Windows Installer properties that
+/// never contain `|` (product codes, a version) and the directory cannot
+/// contain `|` (not allowed in Windows paths), but the token is
+/// `UNINSTALL_TOKEN` as typed by whoever runs `msiexec`. The trailing
+/// fields are therefore split off **from the right** and the token is
+/// everything between the directory and them: a `|` inside the token can
+/// never move attacker text into the upgrade fields (V-M2). With fewer than
+/// six fields (the old two-field form) there is no upgrade claim at all.
 pub fn parse_uninstall(data: &str) -> Option<UninstallData<'_>> {
-    let mut it = data.splitn(6, '|');
-    let dir = it.next()?.trim();
+    let (head, upgrading, upgrade_code, version, product_code) = if data.matches('|').count() >= 5 {
+        let mut r = data.rsplitn(5, '|');
+        let product_code = r.next()?;
+        let version = r.next()?;
+        let upgrade_code = r.next()?;
+        let upgrading = r.next()?;
+        (r.next()?, upgrading, upgrade_code, version, product_code)
+    } else {
+        (data, "", "", "", "")
+    };
+    let (dir, token) = head.split_once('|')?;
+    let dir = dir.trim();
     if dir.is_empty() {
         return None;
     }
-    let token = it.next()?.trim();
     Some(UninstallData {
         dir,
-        token,
-        upgrading: it.next().unwrap_or("").trim(),
-        upgrade_code: it.next().unwrap_or("").trim(),
-        version: it.next().unwrap_or("").trim(),
-        product_code: it.next().unwrap_or("").trim(),
+        token: token.trim(),
+        upgrading: upgrading.trim(),
+        upgrade_code: upgrade_code.trim(),
+        version: version.trim(),
+        product_code: product_code.trim(),
     })
 }
 
@@ -139,6 +160,9 @@ pub fn upgrade_verified(d: &UninstallData<'_>, facts: &UpgradeFacts) -> Result<(
             "UPGRADINGPRODUCTCODE {:?} is not a product code",
             d.upgrading
         ));
+    }
+    if !d.upgrade_code.eq_ignore_ascii_case(KESTREL_UPGRADE_CODE) {
+        return Err(format!("UpgradeCode {:?} is not Kestrel's", d.upgrade_code));
     }
     if d.upgrading.eq_ignore_ascii_case(d.product_code) {
         return Err("UPGRADINGPRODUCTCODE names this product".into());
@@ -341,7 +365,8 @@ mod ca {
             return ERROR_INSTALL_FAILURE;
         };
         if !d.upgrading.is_empty() {
-            let facts = upgrade_facts(d.upgrade_code, d.upgrading);
+            // Kestrel's own UpgradeCode, never the one in the data.
+            let facts = upgrade_facts(KESTREL_UPGRADE_CODE, d.upgrading);
             match upgrade_verified(&d, &facts) {
                 Ok(()) => {
                     log(
@@ -475,5 +500,54 @@ mod tests {
         // No upgrade claimed at all.
         let s = data("");
         assert!(upgrade_verified(&parse_uninstall(&s).unwrap(), &genuine).is_err());
+    }
+
+    /// Security review 2026-10-22 (H1): a `|` in UNINSTALL_TOKEN used to
+    /// shift text into the upgrade fields, so `UNINSTALL_TOKEN="x|{PC_A}|
+    /// {UC_A}|0|{B}"` made another product's UpgradeCode "verify" an upgrade
+    /// and skipped the token check.
+    #[test]
+    fn pipes_in_the_token_cannot_forge_an_upgrade() {
+        let evil_uc = "{99999999-8888-7777-6666-555555555555}";
+        let token = format!("x|{NEW}|{evil_uc}|0|{OLD}");
+        // What Windows Installer builds: [INSTALLFOLDER]|[UNINSTALL_TOKEN]|
+        // [UPGRADINGPRODUCTCODE] (empty)|[UpgradeCode]|[ProductVersion]|[ProductCode].
+        let data = format!(r"C:\K\|{token}||{UC}|1.1.4|{OLD}");
+        let d = parse_uninstall(&data).unwrap();
+        assert_eq!(d.token, token, "the whole string is the (wrong) token");
+        assert_eq!(d.upgrading, "");
+        assert_eq!(d.upgrade_code, UC);
+        assert_eq!(d.version, "1.1.4");
+        assert_eq!(d.product_code, OLD);
+        let facts = UpgradeFacts {
+            related: vec![NEW.into()],
+            upgrading_installed: true,
+            upgrading_version: Some("9.0".into()),
+        };
+        assert!(upgrade_verified(&d, &facts).is_err());
+        // A token that injects a whole tail and an UPGRADINGPRODUCTCODE
+        // that is set: the trailing fields still come from the right.
+        let data = format!(r"C:\K\|a|b|c|d|e|{NEW}|{UC}|1.1.4|{OLD}");
+        let d = parse_uninstall(&data).unwrap();
+        assert_eq!((d.token, d.upgrading), ("a|b|c|d|e", NEW));
+        // Legacy two-field data never carries an upgrade claim.
+        let legacy = format!(r"C:\K\|t|{NEW}|{UC}");
+        let d = parse_uninstall(&legacy).unwrap();
+        assert_eq!((d.token, d.upgrading), (&*format!("t|{NEW}|{UC}"), ""));
+    }
+
+    /// Only Kestrel's own UpgradeCode can verify an upgrade.
+    #[test]
+    fn foreign_upgrade_code_is_refused() {
+        let other = "{99999999-8888-7777-6666-555555555555}";
+        let s = format!(r"C:\K\||{NEW}|{other}|0.1.0|{OLD}");
+        let d = parse_uninstall(&s).unwrap();
+        let facts = UpgradeFacts {
+            related: vec![OLD.into(), NEW.into()],
+            upgrading_installed: true,
+            upgrading_version: Some("0.1.1".into()),
+        };
+        assert!(upgrade_verified(&d, &facts).is_err());
+        assert_eq!(UC, KESTREL_UPGRADE_CODE);
     }
 }

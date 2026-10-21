@@ -366,24 +366,25 @@ const O_MONERO: &[&str] = &[
 const O_GETH: &[&str] = &["geth.exe", "mist.exe"];
 const O_DAEDALUS: &[&str] = &["daedalus.exe", "cardano-wallet.exe", "cardano-node.exe"];
 const O_BINANCE: &[&str] = &["binance.exe"];
+// Owner's PC 2026-10-22: generic interpreters (python, pythonw, node, java,
+// javaw) are no longer owners of the AWS stores by file name: they run any
+// script, so a stealer script under a signed python.exe was silent. Their
+// reads now raise ST-01; a following send to AWS itself is a High Audit ST-04
+// (`legit_apps::provider_endpoint`), anywhere else the full ST-04. The AWS CLI v2 (`aws.exe`) is
+// a frozen executable and stays an owner.
 const O_AWS: &[&str] = &[
     "aws.exe",
     "aws_completer.exe",
     "terraform.exe",
     "pulumi.exe",
-    "python.exe",
-    "pythonw.exe",
-    "node.exe",
-    "java.exe",
-    "javaw.exe",
     "code.exe",
     "session-manager-plugin.exe",
     "sam.exe",
     "cdk.exe",
 ];
+// python / pythonw removed 2026-10-22: only the Azure CLI's bundled
+// interpreter owns the store (`legit_apps::bundled_cli_python`).
 const O_AZURE: &[&str] = &[
-    "python.exe",
-    "pythonw.exe",
     "az.exe",
     "azcopy.exe",
     "terraform.exe",
@@ -423,16 +424,14 @@ const O_TOKENBROKER: &[&str] = &[
     // token-cache reads go through `legit_apps::wam_client_reader` instead:
     // a Low Audit ST-01 that is recorded for ST-02 / ST-04 correlation.
 ];
+// python, pythonw, java, node removed 2026-10-22: only the Google Cloud
+// CLI's bundled interpreter owns the store (`legit_apps::bundled_cli_python`).
 const O_GCLOUD: &[&str] = &[
-    "python.exe",
-    "pythonw.exe",
     "gcloud.exe",
     "gsutil.exe",
     "bq.exe",
     "terraform.exe",
     "pulumi.exe",
-    "java.exe",
-    "node.exe",
     "code.exe",
 ];
 const O_KUBE: &[&str] = &[

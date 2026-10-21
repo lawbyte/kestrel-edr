@@ -259,6 +259,14 @@ export function App({ api, initialTab }: Props) {
   };
 
   const openLink = (href: string) => void api.openLink(href).catch(() => {});
+  const launchUninstaller = async (): Promise<string | null> => {
+    try {
+      await api.launchUninstaller();
+      return api.host === "mock" ? "Mock mode: the installed app opens Uninstall Kestrel EDR here (Windows asks for administrator approval)." : null;
+    } catch (e) {
+      return typeof e === "string" && e ? e : "The uninstall tool couldn't start. Use Uninstall Kestrel EDR in the Start menu.";
+    }
+  };
   const label = stateCopy(kind, status).label;
 
   return (
@@ -323,7 +331,7 @@ export function App({ api, initialTab }: Props) {
           />
         )}
         {tab === "activity" && <ActivityTab items={items} error={activityError} unavailable={unavailable} onRequestReview={setReviewing} onRetry={() => void loadActivity()} />}
-        {tab === "help" && <HelpTab status={status} onLink={openLink} />}
+        {tab === "help" && <HelpTab status={status} onLink={openLink} onUninstall={launchUninstaller} />}
       </main>
 
       {consent.result && <ConsentResultLine message={consent.result.message} kind={consent.result.kind} onDismiss={() => dispatchConsent({ type: "dismiss_result" })} />}

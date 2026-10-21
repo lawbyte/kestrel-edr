@@ -1065,6 +1065,9 @@ code {
   color: var(--text-2);
   font-size: 13px;
 }
+.remove-note {
+  margin-top: 8px;
+}
 .foot {
   margin: 16px 2px 0;
   font-size: 12px;

@@ -30,7 +30,7 @@ export default defineConfig({
       { text: 'Console', link: '/console/', activeMatch: '^/console/' },
       { text: 'Reference', link: '/reference/rules', activeMatch: '^/reference/' },
       {
-        text: 'v1.1.4',
+        text: 'v1.1.5',
         items: [
           { text: 'Releases', link: `${repo}/releases` },
           { text: 'Security policy', link: `${repo}/blob/main/SECURITY.md` },

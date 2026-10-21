@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { ItContact, TrayStatus } from "../protocol";
 import { COLLECTS, DOES_NOT_COLLECT } from "../copy";
 import { Markdown } from "./Markdown";
@@ -6,9 +7,19 @@ import { IconCheck, IconCross, IconGlobe, IconMail, IconOpen, IconPhone } from "
 interface Props {
   status: TrayStatus | null;
   onLink: (href: string) => void;
+  /** Start the uninstall tool; resolves with a message to show (or null). */
+  onUninstall?: () => Promise<string | null>;
 }
 
-export function HelpTab({ status, onLink }: Props) {
+export function HelpTab({ status, onLink, onUninstall }: Props) {
+  const [removeNote, setRemoveNote] = useState<string | null>(null);
+  const [launching, setLaunching] = useState(false);
+  const startUninstall = async () => {
+    if (!onUninstall || launching) return;
+    setLaunching(true);
+    setRemoveNote(await onUninstall());
+    setLaunching(false);
+  };
   const contact = status?.it_contact;
   const org = status?.org_name || "your company";
   return (
@@ -67,6 +78,23 @@ export function HelpTab({ status, onLink }: Props) {
           <p className="muted">{status ? `${org} hasn't published a notice in Kestrel. Ask IT or HR for the monitoring policy.` : "The notice appears here when Kestrel is running."}</p>
         )}
       </section>
+
+      {onUninstall && (
+        <section className="group" aria-labelledby="h-remove">
+          <h2 id="h-remove" className="group__title">
+            Remove Kestrel
+          </h2>
+          <p className="group__intro">For IT staff. Removing Kestrel needs this PC's uninstall token and administrator approval.</p>
+          <button className="btn btn--sm" onClick={() => void startUninstall()} disabled={launching}>
+            Uninstall Kestrel...
+          </button>
+          {removeNote && (
+            <p className="muted remove-note" role="status">
+              {removeNote}
+            </p>
+          )}
+        </section>
+      )}
 
       {status && (
         <p className="foot">

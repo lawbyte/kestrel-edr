@@ -8,6 +8,7 @@ This page builds every Kestrel component on a Windows host, from a clean machine
 | Scanner `kestrel-scan` | Windows (MSVC) | `target\release\kestrel-scan.exe` |
 | MSI custom actions `kestrel-msica` | Windows (MSVC) | `target\release\kestrel_msica.dll` |
 | Tray app | Windows (Tauri 2) | `tray\src-tauri\target\release\kestrel-tray.exe` |
+| Uninstall tool `kestrel-uninstall` | Windows (MSVC) | `target\release\kestrel-uninstall.exe` |
 | MSI | Windows, WiX v6 | `KestrelAgent.msi` |
 | Console | Node 22, any OS | `console\dist` (served by the server) |
 | Server | Linux or Docker (any OS) | `kestrel-server` binary or Docker image |
@@ -101,10 +102,10 @@ cargo test -p kestrel-server
 
 Set `KESTREL_TEST_CLICKHOUSE_URL=http://127.0.0.1:8123` as well to test the ClickHouse path.
 
-## 4. Release build of the agent, scanner and custom-action DLL
+## 4. Release build of the agent, scanner, custom-action DLL and uninstall tool
 
 ```powershell
-cargo build -p kestrel-agent -p kestrel-scan -p kestrel-msica --release
+cargo build -p kestrel-agent -p kestrel-scan -p kestrel-msica -p kestrel-uninstall --release
 ```
 
 This produces:
@@ -112,6 +113,7 @@ This produces:
 * `target\release\kestrel-agent.exe`
 * `target\release\kestrel-scan.exe` (YARA-X, kept out of the always-running agent)
 * `target\release\kestrel_msica.dll` (MSI custom actions; passes enrollment and uninstall tokens to the agent on stdin, never on a command line)
+* `target\release\kestrel-uninstall.exe` (the **Uninstall Kestrel EDR** window: asks for the uninstall token and removes the product through Windows Installer; it carries an administrator manifest and a version resource)
 
 Optional build-time settings (read when the agent is compiled, not at run time):
 
@@ -122,7 +124,7 @@ Optional build-time settings (read when the agent is compiled, not at run time):
 
 ```powershell
 $env:KESTREL_UPDATE_PUBKEY = Get-Content D:\kestrel-signing\kestrel-update-signing.pub
-cargo build -p kestrel-agent -p kestrel-scan -p kestrel-msica --release
+cargo build -p kestrel-agent -p kestrel-scan -p kestrel-msica -p kestrel-uninstall --release
 ```
 
 **Static CRT.** `.cargo/config.toml` links the C runtime statically for the `x86_64-pc-windows-msvc` target (`-C target-feature=+crt-static`). A clean Windows has no `VCRUNTIME140.dll`, and the agent must start without extra installs. Do not remove this setting.
@@ -191,10 +193,11 @@ wix build installer/Kestrel.wxs -arch x64 -d Version=$v `
   -d ScanExe=target/release/kestrel-scan.exe `
   -d CaDll=target/release/kestrel_msica.dll `
   -d TrayExe=tray/src-tauri/target/release/kestrel-tray.exe `
+  -d UninstallExe=target/release/kestrel-uninstall.exe `
   -ext WixToolset.Util.wixext -o KestrelAgent.msi
 ```
 
-All five `-d` variables are required by `installer/Kestrel.wxs`:
+All six `-d` variables are required by `installer/Kestrel.wxs`:
 
 | Variable | Value |
 |---|---|
@@ -203,8 +206,9 @@ All five `-d` variables are required by `installer/Kestrel.wxs`:
 | `ScanExe` | Path to `kestrel-scan.exe` |
 | `CaDll` | Path to `kestrel_msica.dll` |
 | `TrayExe` | Path to `kestrel-tray.exe` |
+| `UninstallExe` | Path to `kestrel-uninstall.exe` |
 
-The MSI is per-machine (about 14 MB). It installs the three files into `C:\Program Files\Kestrel`, creates `C:\ProgramData\Kestrel` with a SYSTEM and Administrators only ACL, adds the tray to `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run`, and on a fresh install enrolls the device and registers the `KestrelAgent` service through a deferred custom action. How to install it is described in [Enroll devices](../deploy/enroll).
+The MSI is per-machine (about 14 MB). It installs the agent, scanner, tray app and uninstall tool into `C:\Program Files\Kestrel`, adds the Start menu shortcut **Kestrel EDR > Uninstall Kestrel EDR**, creates `C:\ProgramData\Kestrel` with a SYSTEM and Administrators only ACL, adds the tray to `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run`, and on a fresh install enrolls the device and registers the `KestrelAgent` service through a deferred custom action. How to install it is described in [Enroll devices](../deploy/enroll).
 
 To publish it, copy it to `deploy\installers\` on the server (optionally with a `VERSION` file):
 
@@ -276,7 +280,7 @@ Sign before you deploy. Defender SmartScreen, AppLocker publisher rules and Kest
 
 Order matters:
 
-1. Sign `kestrel-agent.exe`, `kestrel-scan.exe`, `kestrel_msica.dll` and `kestrel-tray.exe`.
+1. Sign `kestrel-agent.exe`, `kestrel-scan.exe`, `kestrel_msica.dll`, `kestrel-uninstall.exe` and `kestrel-tray.exe`.
 2. Build the MSI from the signed files.
 3. Sign the MSI.
 
@@ -288,7 +292,7 @@ Locally, with SignTool and the Artifact Signing dlib:
 signtool sign /v /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 `
   /dlib "<path>\Azure.CodeSigning.Dlib.dll" /dmdf metadata.json `
   target\release\kestrel-agent.exe target\release\kestrel-scan.exe target\release\kestrel_msica.dll `
-  tray\src-tauri\target\release\kestrel-tray.exe
+  target\release\kestrel-uninstall.exe tray\src-tauri\target\release\kestrel-tray.exe
 # build the MSI, then:
 signtool sign /v /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 `
   /dlib "<path>\Azure.CodeSigning.Dlib.dll" /dmdf metadata.json KestrelAgent.msi
@@ -308,7 +312,7 @@ Agent **update** signing (Ed25519) is separate from Authenticode; see [Agent upd
 | Lints | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0 |
 | Unit tests | `cargo test -p kestrel-common -p kestrel-detect -p kestrel-platform -p kestrel-win -p kestrel-agent -p kestrel-scan` | 0 failed |
 | Server tests | `cargo test -p kestrel-server` with `DATABASE_URL` set | 0 failed |
-| Release binaries | `cargo build -p kestrel-agent -p kestrel-scan -p kestrel-msica --release` | three files in `target\release` |
+| Release binaries | `cargo build -p kestrel-agent -p kestrel-scan -p kestrel-msica -p kestrel-uninstall --release` | four files in `target\release` |
 | Agent version | `target\release\kestrel-agent.exe --version` | prints the workspace version |
 | ETW smoke test | `.\scripts\windows-smoke.ps1` (elevated) | PASS lines, exit 0 |
 | Console | `npm ci; npm run build; npm test; npm run lint` in `console` | all pass |

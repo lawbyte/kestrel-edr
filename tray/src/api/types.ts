@@ -23,6 +23,8 @@ export interface KestrelApi {
   quickCheck(): Promise<Ack>;
   requestReview(alertId: string, justification: string): Promise<Ack>;
   openLink(url: string): Promise<void>;
+  /** Start kestrel-uninstall.exe from the install folder (it asks for elevation and the token itself; no agent involvement). */
+  launchUninstaller(): Promise<void>;
   getWindowMode(): Promise<WindowMode>;
   setWindowMode(mode: WindowMode): Promise<void>;
   hideWindow(): Promise<void>;

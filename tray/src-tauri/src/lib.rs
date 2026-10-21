@@ -395,6 +395,52 @@ fn is_safe_link(url: &str) -> bool {
                 .all(|c| c.is_ascii_digit() || "+-() ".contains(c))
 }
 
+/// Start `kestrel-uninstall.exe` from the install folder (next to this
+/// app). `ShellExecuteW` (not `CreateProcess`) so its requireAdministrator
+/// manifest raises the UAC prompt. The agent is not involved: the tool asks
+/// for the uninstall token itself.
+#[tauri::command]
+fn launch_uninstaller() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let dir = exe.parent().ok_or("no install folder")?.to_path_buf();
+        let tool = dir.join("kestrel-uninstall.exe");
+        if !tool.is_file() {
+            return Err("The uninstall tool is not installed on this PC.".into());
+        }
+        let w = |s: &std::path::Path| -> Vec<u16> {
+            use std::os::windows::ffi::OsStrExt;
+            s.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+        };
+        let (file, cwd) = (w(&tool), w(&dir));
+        let verb: Vec<u16> = "open\0".encode_utf16().collect();
+        // SAFETY: valid NUL-terminated strings.
+        let h = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                cwd.as_ptr(),
+                SW_SHOWNORMAL,
+            )
+        };
+        // > 32 = started; ERROR_CANCELLED (1223) when the UAC prompt is declined.
+        if h as isize > 32 {
+            Ok(())
+        } else {
+            Err(format!("The uninstall tool could not start (code {}).", h as isize))
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Only available on Windows.".into())
+    }
+}
+
 #[tauri::command]
 fn get_window_mode(app: AppHandle) -> WindowMode {
     *state(&app).mode.lock().unwrap()
@@ -814,6 +860,7 @@ pub fn run() {
             quick_check,
             request_review,
             open_link,
+            launch_uninstaller,
             get_window_mode,
             set_window_mode,
             mica_enabled,
