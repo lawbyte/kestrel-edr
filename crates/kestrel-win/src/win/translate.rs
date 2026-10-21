@@ -84,6 +84,11 @@ struct Held {
     /// Image whose first-run facts are awaited (H7).
     waiting_facts: Option<String>,
     facts_deadline: i64,
+    /// Soak 2026-10-21: a direct child of the agent whose spawn the agent
+    /// has not recorded yet is held until it is (or until this deadline),
+    /// independent of the command-line wait, so `agent_spawned` is never
+    /// decided before the spawning thread recorded the child. 0 = no wait.
+    registry_until: i64,
 }
 
 pub struct Translator {
@@ -115,6 +120,9 @@ pub struct Translator {
     /// Direct children of the agent with an unspoofed creator, pending the
     /// spawn-registry check at send time: pid → (create FILETIME, creator, seen).
     agent_child_candidates: HashMap<u32, (u64, u32, i64)>,
+    /// Held items of agent children waiting for the spawn registry (per pid,
+    /// in order), outside the FIFO so they never delay other processes.
+    registry_side: VecDeque<Held>,
     /// Integrity level of live processes from their ProcessStart (V-H5).
     integrities: HashMap<u32, Integrity>,
 }
@@ -184,6 +192,7 @@ impl Translator {
             persist_dedup: Dedup::default(),
             pending_persist: VecDeque::new(),
             agent_child_candidates: HashMap::new(),
+            registry_side: VecDeque::new(),
             integrities: HashMap::new(),
         }
     }
@@ -255,6 +264,7 @@ impl Translator {
                 waiting_cmdline: true,
                 waiting_facts: None,
                 facts_deadline: 0,
+                registry_until: 0,
             });
             return;
         }
@@ -272,13 +282,39 @@ impl Translator {
                 waiting_cmdline: false,
                 waiting_facts: None,
                 facts_deadline: 0,
+                registry_until: 0,
             });
         } else {
             self.send(ev);
         }
     }
 
-    fn hold_start(&mut self, ev: Event, now: i64, cmdline: bool, facts: Option<String>) {
+    /// Soak 2026-10-21 (PS-01 Burn): on-disk signature facts of an HKLM
+    /// RunOnce target in `%ProgramData%\Package Cache\{…}\` (rare; blocking
+    /// Authenticode check, hash only when already cached).
+    fn runonce_target(&self, key: &str, data: Option<&str>) -> Option<TargetFileFacts> {
+        let path = crate::filters::package_cache_runonce_target(
+            key,
+            data?,
+            kestrel_common::system_drive(),
+        )?;
+        let f = self.s.enricher.file_blocking(&path, false);
+        Some(TargetFileFacts {
+            path,
+            signed: f.signed,
+            signer: f.signer,
+            sha256: f.sha256,
+        })
+    }
+
+    fn hold_start(
+        &mut self,
+        ev: Event,
+        now: i64,
+        cmdline: bool,
+        facts: Option<String>,
+        registry_until: i64,
+    ) {
         let pid = ev.pid;
         self.early_pids.remove(&pid);
         *self.held_pids.entry(pid).or_default() += 1;
@@ -289,6 +325,7 @@ impl Translator {
             waiting_cmdline: cmdline,
             facts_deadline: now + super::enrich::FIRST_RUN_BUDGET_MS,
             waiting_facts: facts,
+            registry_until,
         };
         // Ahead of any events of this pid that arrived before its start.
         match self.held.iter().position(|x| x.pid == pid) {
@@ -316,6 +353,7 @@ impl Translator {
                 waiting_cmdline: false,
                 waiting_facts: None,
                 facts_deadline: 0,
+                registry_until: 0,
             },
         );
         self.release_early_waits(ev.pid);
@@ -340,6 +378,26 @@ impl Translator {
             p.motw_zone = f.motw_zone;
             p.file_size = f.file_size;
         }
+    }
+
+    /// Is the agent child `pid` still waiting for the spawn registry?
+    fn registry_pending(&self, pid: u32, until: i64, now: i64) -> bool {
+        let recorded = self
+            .agent_child_candidates
+            .get(&pid)
+            .map(|(ft, _, _)| crate::spawnreg::is_recorded(pid, *ft))
+            .unwrap_or(true);
+        crate::spawnreg::registry_wait_pending(recorded, now, until)
+    }
+
+    fn send_held(&mut self, h: Held) {
+        if let Some(c) = self.held_pids.get_mut(&h.pid) {
+            *c -= 1;
+            if *c == 0 {
+                self.held_pids.remove(&h.pid);
+            }
+        }
+        self.send(h.ev);
     }
 
     fn release(&mut self, now: i64) {
@@ -370,17 +428,41 @@ impl Translator {
             if front.waiting_cmdline && front.deadline > now {
                 break;
             }
+            // Re-review N8: an agent child still waiting for the spawn
+            // registry (and every later event of the same pid) moves to a
+            // per-pid side queue instead of blocking the FIFO for others.
+            let pid = front.pid;
+            let until = front.registry_until;
+            let to_side = (until != 0 && self.registry_pending(pid, until, now))
+                || self.registry_side.iter().any(|h| h.pid == pid);
             let h = self.held.pop_front().expect("front exists");
-            if let Some(c) = self.held_pids.get_mut(&h.pid) {
-                *c -= 1;
-                if *c == 0 {
-                    self.held_pids.remove(&h.pid);
+            if to_side {
+                self.registry_side.push_back(h);
+                continue;
+            }
+            self.send_held(h);
+        }
+        // Side queue: release a pid's items (in order) once its start is
+        // recorded or its deadline has passed.
+        let ready: Vec<u32> = self
+            .registry_side
+            .iter()
+            .filter(|h| matches!(h.ev.data, EventData::ProcessStart(_)))
+            .filter(|h| !self.registry_pending(h.pid, h.registry_until, now))
+            .map(|h| h.pid)
+            .collect();
+        for pid in ready {
+            let mut keep = VecDeque::new();
+            for h in std::mem::take(&mut self.registry_side) {
+                if h.pid == pid {
+                    self.send_held(h);
+                } else {
+                    keep.push_back(h);
                 }
             }
-            self.send(h.ev);
+            self.registry_side = keep;
         }
     }
-
     fn gc(&mut self) {
         let now = now_ms();
         self.last_gc = Instant::now();
@@ -688,8 +770,13 @@ impl Translator {
                     self.hold_start(
                         ev,
                         now,
-                        waiting || wait_registry,
+                        waiting,
                         wait_facts.then(|| image.clone()),
+                        if wait_registry {
+                            now + crate::spawnreg::AGENT_CHILD_WAIT_MS
+                        } else {
+                            0
+                        },
                     );
                 } else {
                     if let Some(f) = cached.filter(|f| f.revocation_pending || f.sha256.is_none()) {
@@ -995,6 +1082,12 @@ impl Translator {
                     value_name.to_ascii_lowercase(),
                 ));
                 self.ensure_known(pid);
+                let data = if op == RegistryOp::Set {
+                    render_sysmon(ty, &data)
+                } else {
+                    None
+                };
+                let target = self.runonce_target(&key, data.as_deref());
                 let ev = self.base(
                     ts,
                     pid,
@@ -1002,12 +1095,9 @@ impl Translator {
                         attribution: Default::default(),
                         key,
                         value_name,
-                        data: if op == RegistryOp::Set {
-                            render_sysmon(ty, &data)
-                        } else {
-                            None
-                        },
+                        data,
                         op,
+                        target,
                     },
                 );
                 self.emit(ev);
@@ -1213,12 +1303,14 @@ impl Translator {
                 _ => None,
             };
             let attribution = writer.map_or(Attribution::None, |w| w.attribution);
+            let target = self.runonce_target(&p.key, data.as_deref());
             let ev_data = EventData::RegistrySet {
                 attribution,
                 key: p.key,
                 value_name: p.value_name,
                 data,
                 op: p.op,
+                target,
             };
             match writer {
                 // Never dropped, even when the agent wrote it (hardening):

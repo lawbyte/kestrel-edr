@@ -114,6 +114,10 @@ const MAX_ANCESTRY: usize = 6;
 const MAX_DNS_PER_PROC: usize = 256;
 const MAX_TOUCHED: usize = 32;
 const BLOCK_TTL_SECS: u64 = 24 * 3600;
+/// Restart Manager files-in-use check masks seen from the msiserver service
+/// (soak 2026-10-21: 0x411 = QUERY_INFORMATION | VM_READ | TERMINATE) and the
+/// QUERY_LIMITED_INFORMATION (0x1000) variants of the same check.
+const RM_ACCESS_MASKS: &[u32] = &[0x411, 0x1410, 0x1411];
 const NUM_CATEGORIES: usize = 14;
 const LARGE_IMAGE_BYTES: u64 = 100 * 1024 * 1024;
 
@@ -659,6 +663,14 @@ struct ProcState {
     first_cred_ts: Option<TimestampMs>,
     last_cred_ts: Option<TimestampMs>,
     last_dpapi_ts: Option<TimestampMs>,
+    /// Soak 2026-10-21 / re-review N2: credential reads were only WAM
+    /// token-cache reads by a Microsoft-signed WAM client (ST-04 is then
+    /// Audit-only); any other read or DPAPI unprotect sets `non_wam_cred`.
+    wam_cred: bool,
+    /// Lab 2026-10-21: DPAPI "Chromium" unprotect by a signed Program Files
+    /// Electron app (its own safeStorage key).
+    own_app_dpapi: bool,
+    non_wam_cred: bool,
     dns: HashMap<String, String>,
     st13: Option<&'static str>,
     fired: Vec<(String, TimestampMs)>,
@@ -1113,6 +1125,10 @@ pub(crate) struct EngineState {
     browser_stops: VecDeque<(TimestampMs, u32)>,
     last_browser_start: TimestampMs,
     kill_intents: VecDeque<(TimestampMs, ProcessGuid)>,
+    /// Browser processes that were the target of an injection / memory-write /
+    /// thread-context / debugger signal (ST-07's inputs) in their lifetime:
+    /// never treated as a genuine importer by ST-16. Bounded.
+    tampered: HashSet<ProcessGuid>,
     debug_ports: HashMap<u16, TimestampMs>,
     clickfix: Vec<ClickfixPending>,
     canaries: Mutex<CanaryState>,
@@ -1164,6 +1180,7 @@ impl EngineState {
             browser_stops: VecDeque::new(),
             last_browser_start: i64::MIN,
             kill_intents: VecDeque::new(),
+            tampered: HashSet::new(),
             debug_ports: HashMap::new(),
             clickfix: vec![],
             canaries: Mutex::new(CanaryState::default()),
@@ -1648,6 +1665,35 @@ impl EngineState {
             || is_lolbin(&file_name_lower(&p.image))
     }
 
+    /// The Windows Installer service instance (ST-07 Restart Manager
+    /// exemption): System32 `msiexec.exe` with a valid Microsoft signature,
+    /// command line exactly `msiexec.exe /V`, running as SYSTEM, parent the
+    /// System32 `services.exe`. Never the client instance, `/y` / `/z`
+    /// (DllRegisterServer of an arbitrary DLL) or custom-action servers.
+    fn is_msiserver(&self, p: &ProcessInfo) -> bool {
+        if !protect::microsoft_signed(p.signed, p.signer.as_deref())
+            || protect::on_system_volume(&p.image, self.system_drive).as_deref()
+                != Some(r"\windows\system32\msiexec.exe")
+            || !is_system_user(p.user.as_deref())
+        {
+            return false;
+        }
+        let args: Vec<String> = p
+            .cmdline
+            .to_ascii_lowercase()
+            .split_whitespace()
+            .skip(1)
+            .map(str::to_string)
+            .collect();
+        if args != ["/v"] {
+            return false;
+        }
+        self.table.parent_of(p).is_some_and(|pp| {
+            file_name_lower(&pp.image) == "services.exe"
+                && path_class_of(&pp.image, self.system_drive) == PathClass::System
+                && protect::microsoft_signed(pp.signed, pp.signer.as_deref())
+        })
+    }
     fn is_benign_av(p: &ProcessInfo) -> bool {
         let name = file_name_lower(&p.image);
         !is_untrusted_location_or_signature(p)
@@ -2243,37 +2289,41 @@ impl EngineState {
 
         self.check_process_iocs(e, &info);
 
-        // ST-05 browser debugging abuse
-        if chromium && !cmd_lower.contains("--type=") {
-            if let Some(port) = parse_flag(&cmd_lower, "--remote-debugging-port=")
-                .and_then(|p| p.parse::<u16>().ok())
-            {
+        // ST-05 browser debugging abuse. Re-review N5: Chromium accepts
+        // `--`, `-` and `/` switch prefixes on Windows; parse them all.
+        let sw = crate::legit_apps::switches(&cmd_lower);
+        let has = |n: &str| sw.iter().any(|(k, _)| k == n);
+        let val = |n: &str| {
+            sw.iter()
+                .find(|(k, _)| k == n)
+                .and_then(|(_, v)| v.as_deref())
+        };
+        if chromium && !has("type") {
+            if let Some(port) = val("remote-debugging-port").and_then(|p| p.parse::<u16>().ok()) {
                 if port != 0
                     && (self.debug_ports.len() < 64 || self.debug_ports.contains_key(&port))
                 {
                     self.debug_ports.insert(port, e.ts);
                 }
             }
-            let debug = cmd_lower.contains("--remote-debugging-");
-            let alt = cmd_lower.contains("--user-data-dir")
-                || cmd_lower.contains("--headless")
-                || cmd_lower.contains("--window-position=-");
-            let load_ext = cmd_lower.contains("--load-extension");
-            let port_zero =
-                parse_flag(&cmd_lower, "--remote-debugging-port=").is_some_and(|p| p == "0");
+            let debug = sw.iter().any(|(k, _)| k.starts_with("remote-debugging-"));
+            let off_screen = val("window-position").is_some_and(|v| v.starts_with('-'));
+            let alt = has("user-data-dir") || has("headless") || off_screen;
+            let load_ext = has("load-extension");
+            let port_zero = val("remote-debugging-port") == Some("0");
             let parent_ok = parent_name == "explorer.exe" || is_browser_image(&parent_name);
             if ((debug && alt && !port_zero) || load_ext) && !parent_ok {
                 let what = if load_ext && !debug {
                     "with --load-extension (unpacked extension side-loading)".to_string()
                 } else {
                     let mut flags = vec!["remote debugging"];
-                    if cmd_lower.contains("--headless") {
+                    if has("headless") {
                         flags.push("headless");
                     }
-                    if cmd_lower.contains("--user-data-dir") {
+                    if has("user-data-dir") {
                         flags.push("an alternate profile directory");
                     }
-                    if cmd_lower.contains("--window-position=-") {
+                    if off_screen {
                         flags.push("an off-screen window");
                     }
                     format!(
@@ -2686,7 +2736,19 @@ impl EngineState {
         if proc_.image.is_empty() {
             return;
         }
+        // Soak 2026-10-21: the browser's own signed install tree (updater
+        // helpers such as Chrome's os_update_handler.exe) owns its stores;
+        // Microsoft-signed Program Files apps are WAM clients of the token
+        // broker cache (not when running a script).
+        let tampered = self.tampered.contains(&proc_.guid);
         if is_trusted_owner(&proc_, &store)
+            || crate::legit_apps::browser_store_owner(
+                &proc_,
+                store.app,
+                self.system_drive,
+                tampered,
+            )
+            .is_some()
             || benign_reader_for(&proc_, &store, &norm).is_some()
             || Self::system_trusted(&proc_)
         {
@@ -2695,7 +2757,8 @@ impl EngineState {
         if self.excluded(&proc_, ST01, e.ts) || self.iocs.allowed_process(&proc_) {
             return;
         }
-        self.on_sensitive_read(e, &proc_, &store, op);
+        let wam_client = crate::legit_apps::wam_client_reader(&proc_, store.app, self.system_drive);
+        self.on_sensitive_read(e, &proc_, &store, op, wam_client);
     }
 
     fn on_sensitive_read(
@@ -2704,8 +2767,14 @@ impl EngineState {
         proc_: &ProcessInfo,
         store: &SensitiveStore,
         op: FileOp,
+        wam_client: bool,
     ) {
         let st = self.state(&proc_.guid, e.ts);
+        if wam_client {
+            st.wam_cred = true;
+        } else {
+            st.non_wam_cred = true;
+        }
         st.add_category(store.category, e.ts);
         st.touch(store.app, store.noun);
         st.add_evidence(e);
@@ -2740,8 +2809,17 @@ impl EngineState {
                 store.app
             ),
         );
-        hit.suspend = true;
-        hit.kill_at_expiry = kill_at_expiry;
+        if wam_client {
+            // A Microsoft-signed WAM client reading the token broker cache:
+            // recorded (ST-02 / ST-04 correlation) and alerted Low / Audit,
+            // never suspended.
+            hit.severity = Severity::Low;
+            hit.mode_override = Some(RuleMode::Audit);
+            hit.summary.push_str(" (Microsoft-signed app reading the Windows sign-in (WAM) token cache, which WAM clients do; alert only)");
+        } else {
+            hit.suspend = true;
+            hit.kill_at_expiry = kill_at_expiry;
+        }
         self.emit(e, hit);
 
         if ncat >= ST02_MIN_CATEGORIES {
@@ -2802,12 +2880,57 @@ impl EngineState {
             self.disarm_canary(dl);
             return false;
         }
+        // Lab FP 2026-10-21: only secret material fires. Directory listings,
+        // attribute queries and incidental profile files (profile pictures,
+        // Preferences, icons) are what browser / password-manager import
+        // scans, backups and indexers touch.
+        if !canary::is_decoy_secret(dl) {
+            return true;
+        }
         let store = match_normalized(dl);
-        let owner_read = store.as_ref().is_some_and(|s| is_trusted_owner(&proc_, s));
         let what = store
             .as_ref()
             .map(|s| format!("{} {}", s.app, s.noun))
-            .unwrap_or_else(|| "credential store".into());
+            .unwrap_or_else(|| "credentials".into());
+        let file = crate::paths::file_name(dl).to_string();
+        // A genuine browser / password manager (Program Files on the system
+        // volume, valid signature by the exact vendor, no remote-control /
+        // dev switches, never injected into) importing from "another
+        // browser": Audit only. Nothing else is exempt (review 2026-10-21).
+        let tampered = self.tampered.contains(&proc_.guid);
+        if let Some(app) = crate::legit_apps::importer(&proc_, self.system_drive, tampered) {
+            let mut hit = Hit::new(
+                ST16,
+                &proc_.guid,
+                Severity::Medium,
+                format!(
+                    "{} (validly signed {} {}) opened \"{file}\" — decoy {what} planted by Kestrel. Browsers and password managers that import data from other browsers do this, so Kestrel did not act; if nobody ran an import, check {} for injected code",
+                    describe(&proc_),
+                    app.vendor,
+                    app.name,
+                    app.name
+                ),
+            );
+            hit.strong = false;
+            hit.mode_override = Some(RuleMode::Audit);
+            self.state(&proc_.guid, e.ts).add_evidence(e);
+            self.emit(e, hit);
+            return true;
+        }
+        // Another browser-named owner of the store (a fork not in the
+        // known-app table): only outside user-writable locations (a signed
+        // browser binary copied to AppData is not one), never at a known
+        // app's location with the wrong signer, never remote-controlled.
+        let owner_read = store.as_ref().is_some_and(|s| is_trusted_owner(&proc_, s))
+            // Re-review N4: a positive list; `C:\<new folder>` (Other) is
+            // user-creatable and never counts.
+            && matches!(
+                proc_.path_class,
+                PathClass::ProgramFiles | PathClass::System | PathClass::Windows
+            )
+            && crate::legit_apps::app_at_location(&proc_.image, self.system_drive).is_none()
+            && crate::legit_apps::remote_control_switch(&proc_.cmdline, None).is_none()
+            && !tampered;
         let mut hit = Hit::new(
             ST16,
             &proc_.guid,
@@ -2817,7 +2940,7 @@ impl EngineState {
                 Severity::Critical
             },
             format!(
-                "{} opened a decoy {what} planted by Kestrel — no legitimate program reads it",
+                "{} opened \"{file}\" — decoy {what} planted by Kestrel in a browser profile no real user data lives in. Stealers read these files; a browser or password manager importing data from other browsers can also open them",
                 describe(&proc_)
             ),
         );
@@ -2871,6 +2994,12 @@ impl EngineState {
         if trusted && (is_browser_image(&name) || name == "elevation_service.exe") {
             return;
         }
+        let tampered = self.tampered.contains(&proc_.guid);
+        if crate::legit_apps::browser_store_owner(&proc_, browser, self.system_drive, tampered)
+            .is_some()
+        {
+            return;
+        }
         let pseudo = SensitiveStore {
             category: DataCategory::BrowserMasterKey,
             owner: crate::paths::OwnerApp::Chromium,
@@ -2884,11 +3013,30 @@ impl EngineState {
         {
             return;
         }
+        // Lab 2026-10-21: Electron apps (VS Code, …) unprotect their own
+        // os_crypt / safeStorage key with the description "Chromium". A
+        // validly signed, non-browser, non-script-host image under Program
+        // Files / WindowsApps that has not read any other credential store:
+        // Low / Audit, still recorded (ST-04 then stays Audit too).
+        let own_app = browser == "Chromium"
+            && proc_.signed == SignatureState::Valid
+            && crate::legit_apps::in_program_files(&proc_.image, self.system_drive)
+            && !is_browser_image(&name)
+            && !is_lolbin(&name)
+            && !crate::legit_apps::SCRIPT_HOSTS.contains(&name.as_str())
+            && !crate::legit_apps::MACRO_HOSTS.contains(&name.as_str())
+            && !tampered
+            && !self.states.get(&proc_.guid).is_some_and(|s| s.non_wam_cred);
         let st = self.state(&proc_.guid, e.ts);
         st.add_category(DataCategory::BrowserMasterKey, e.ts);
         st.touch(browser, "DPAPI-protected secrets");
         st.add_evidence(e);
         st.last_dpapi_ts = Some(e.ts);
+        if own_app {
+            st.own_app_dpapi = true;
+        } else {
+            st.non_wam_cred = true;
+        }
         if st.first_cred_ts.is_none() {
             st.first_cred_ts = Some(e.ts);
         }
@@ -2897,8 +3045,14 @@ impl EngineState {
         let phrase = stores_phrase(&st.touched);
         let kill_at_expiry = untrusted_sig(proc_.signed) && proc_.path_class.is_user_writable();
         let mut hit = Hit::new(ST03, &proc_.guid, Severity::High, format!("{} used Windows DPAPI to decrypt {browser} secrets (\"{}\") — only the browser itself should do this", describe(&proc_), truncate(description, 40)));
-        hit.suspend = true;
-        hit.kill_at_expiry = kill_at_expiry;
+        if own_app {
+            hit.severity = Severity::Low;
+            hit.mode_override = Some(RuleMode::Audit);
+            hit.summary.push_str(" (description \"Chromium\" from a signed Program Files app: Electron's own safeStorage key; alert only)");
+        } else {
+            hit.suspend = true;
+            hit.kill_at_expiry = kill_at_expiry;
+        }
         self.emit(e, hit);
         if ncat >= ST02_MIN_CATEGORIES {
             let mut hit = Hit::new(
@@ -3152,6 +3306,17 @@ impl EngineState {
         });
         hit.actions.push(quarantine(&rp));
         hit.escalation_ip = Some((ip_norm, dst_port));
+        // Re-review N2: only WAM token-cache reads by a Microsoft-signed WAM
+        // client (e.g. VS Code sign-in, then telemetry): Audit, not a kill.
+        if self
+            .states
+            .get(&rg)
+            .is_some_and(|s| (s.wam_cred || s.own_app_dpapi) && !s.non_wam_cred)
+        {
+            hit.mode_override = Some(RuleMode::Audit);
+            hit.strong = false;
+            hit.summary.push_str(" (only the Windows sign-in (WAM) token cache and/or the app's own Electron safeStorage key were read, by a signed Program Files app; alert only)");
+        }
         hit.process = Some(rp);
         if rg != proc_.guid {
             hit.extra_evidence.push(e.clone());
@@ -3220,11 +3385,12 @@ impl EngineState {
     // ------------------------------------------------------------------
 
     fn on_target(&mut self, e: &Event, t: &TargetProcess) {
-        if !is_browser_image(&t.target_image)
-            || self.is_agent_owned(&e.guid)
-            || e.pid == 0
-            || e.pid == 4
-        {
+        let browser_target = is_browser_image(&t.target_image);
+        // Re-review N6: password managers in the importer table are tracked
+        // for tampering too (ST-16), though ST-07 itself is browser-only.
+        let known_target = browser_target
+            || crate::legit_apps::app_at_location(&t.target_image, self.system_drive).is_some();
+        if !known_target || self.is_agent_owned(&e.guid) || e.pid == 0 || e.pid == 4 {
             return;
         }
         let src = self.proc_info(e);
@@ -3232,14 +3398,39 @@ impl EngineState {
             return; // browser broker / children
         }
         if let EventData::ProcessAccess(_) = &e.data {
-            if t.is_termination() && !self.protected(&src) {
+            if browser_target && t.is_termination() && !self.protected(&src) {
                 self.kill_intents.push_back((e.ts, src.guid.clone()));
                 if self.kill_intents.len() > 256 {
                     self.kill_intents.pop_front();
                 }
             }
         }
-        if !Self::untrusted_actor(&src) || Self::is_benign_av(&src) {
+        // Remember a browser that someone injected into / wrote to /
+        // debugged: it is never a genuine ST-16 importer afterwards.
+        let tampering = match &e.data {
+            EventData::RemoteThread(_)
+            | EventData::ThreadContext(_)
+            | EventData::DebugAttach(_) => !self.protected(&src) && !Self::is_benign_av(&src),
+            EventData::ProcessAccess(_) => {
+                t.granted_access & (0x2 | 0x8 | 0x20) != 0
+                    && Self::untrusted_actor(&src)
+                    && !Self::is_benign_av(&src)
+            }
+            _ => false,
+        };
+        if tampering {
+            let target = t
+                .target_guid
+                .clone()
+                .or_else(|| self.table.by_pid(t.target_pid).map(|p| p.guid.clone()));
+            if let Some(g) = target {
+                if self.tampered.len() >= 4096 {
+                    self.tampered.clear();
+                }
+                self.tampered.insert(g);
+            }
+        }
+        if !browser_target || !Self::untrusted_actor(&src) || Self::is_benign_av(&src) {
             return;
         }
         let tname = crate::paths::file_name(&t.target_image).to_string();
@@ -3255,6 +3446,19 @@ impl EngineState {
             EventData::DebugAttach(_) => format!("attached a debugger to {tname} (pid {}) — the VoidStealer way to capture the App-Bound key", t.target_pid),
             _ => return,
         };
+        // Soak 2026-10-21 (narrowed after re-review N1): Windows Installer's
+        // Restart Manager files-in-use check opens running processes with
+        // exactly QUERY_INFORMATION | VM_READ | TERMINATE (0x411) or the
+        // limited-information variants. Only the msiserver **service
+        // instance** — Microsoft-signed System32 `msiexec.exe /V`, SYSTEM,
+        // started by System32 `services.exe` — is exempt, and only for those
+        // masks. Client-side msiexec, `msiexec /y|/z <dll>`, custom-action
+        // servers and anything else keep the full response.
+        if let EventData::ProcessAccess(_) = &e.data {
+            if RM_ACCESS_MASKS.contains(&t.granted_access) && self.is_msiserver(&src) {
+                return;
+            }
+        }
         let mut hit = Hit::new(
             ST07,
             &src.guid,
@@ -3688,16 +3892,6 @@ fn word_pos(hay: &str, w: &str) -> Option<usize> {
     None
 }
 
-fn parse_flag<'a>(cmd: &'a str, flag: &str) -> Option<&'a str> {
-    let i = cmd.find(flag)?;
-    let rest = &cmd[i + flag.len()..];
-    let rest = rest.trim_start_matches('"');
-    let end = rest
-        .find(|c: char| c.is_whitespace() || c == '"')
-        .unwrap_or(rest.len());
-    Some(&rest[..end])
-}
-
 fn event_phrase(e: &Event) -> String {
     match &e.data {
         EventData::ProcessStart(p) => format!("process start \"{}\"", truncate(&p.cmdline, 120)),
@@ -3797,14 +3991,11 @@ mod tests {
 
     #[test]
     fn flags() {
-        assert_eq!(
-            parse_flag(
-                "chrome.exe --remote-debugging-port=9333 --headless",
-                "--remote-debugging-port="
-            ),
-            Some("9333")
-        );
-        assert_eq!(parse_flag("x", "--y="), None);
+        let sw =
+            crate::legit_apps::switches("chrome.exe --remote-debugging-port=9333 -headless /x");
+        assert!(sw.contains(&("remote-debugging-port".into(), Some("9333".into()))));
+        assert!(sw.contains(&("headless".into(), None)));
+        assert!(sw.contains(&("x".into(), None)));
     }
 
     #[test]

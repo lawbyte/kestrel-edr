@@ -131,9 +131,94 @@ pub fn is_protected_target(
         && (ms_root || signer.as_deref().is_some_and(protect::is_microsoft_signer))
 }
 
+/// Soak 2026-10-21 (PS-01, WiX Burn reboot continuation): the file an
+/// **HKLM** `RunOnce` value starts when it lies directly in
+/// `%ProgramData%\Package Cache\<one folder>\` on the system volume — the
+/// only registry target whose on-disk signature the sensor verifies and
+/// attaches to the event (`RegistrySet.target`). `key` is the normalised
+/// key (`HKLM\…`), `data` the value data. Pure.
+pub fn package_cache_runonce_target(key: &str, data: &str, system_drive: char) -> Option<String> {
+    let k = key.to_ascii_lowercase().replace('/', "\\");
+    let hklm = k.starts_with(r"hklm\") || k.starts_with(r"\registry\machine\");
+    let runonce = k.ends_with(r"\currentversion\runonce");
+    if !hklm || !runonce {
+        return None;
+    }
+    let d = data.trim();
+    let path = if let Some(rest) = d.strip_prefix('"') {
+        rest.split('"').next()?.to_string()
+    } else {
+        let l = d.to_ascii_lowercase();
+        let end = l.find(".exe")? + 4;
+        d[..end].to_string()
+    };
+    let lower = path.to_ascii_lowercase().replace('/', "\\");
+    let b = lower.as_bytes();
+    if b.len() < 3 || b[1] != b':' || (b[0] as char) != system_drive.to_ascii_lowercase() {
+        return None;
+    }
+    let rest = lower[2..].strip_prefix(r"\programdata\package cache\")?;
+    let mut parts = rest.split('\\');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(dir), Some(file), None)
+            if !dir.is_empty() && dir != ".." && dir != "." && file.ends_with(".exe") =>
+        {
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_cache_runonce_targets() {
+        let k = r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce";
+        let d = r#""C:\ProgramData\Package Cache\{5393BF16-0B4D-4C7B-9E2C-6C2E0F1A2B3C}\PowerToysSetup-0.101.2362.0-x64.exe" /burn.runonce"#;
+        assert_eq!(
+            package_cache_runonce_target(k, d, 'c').as_deref(),
+            Some(
+                r"C:\ProgramData\Package Cache\{5393BF16-0B4D-4C7B-9E2C-6C2E0F1A2B3C}\PowerToysSetup-0.101.2362.0-x64.exe"
+            )
+        );
+        // unquoted with spaces
+        assert!(package_cache_runonce_target(
+            k,
+            r"C:\ProgramData\Package Cache\{G}\setup.exe /burn.runonce",
+            'c'
+        )
+        .is_some());
+        for (key, data, drive) in [
+            (
+                r"HKU\S-1-5-21-1\Software\Microsoft\Windows\CurrentVersion\RunOnce",
+                d,
+                'c',
+            ),
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+                d,
+                'c',
+            ),
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnceEx",
+                d,
+                'c',
+            ),
+            (k, d, 'd'),
+            (k, r#""D:\ProgramData\Package Cache\{G}\s.exe""#, 'c'),
+            (k, r#""C:\ProgramData\Package Cache\{G}\sub\s.exe""#, 'c'),
+            (k, r#""C:\ProgramData\Package Cache\..\s.exe""#, 'c'),
+            (k, r#""C:\ProgramData\Other\{G}\s.exe""#, 'c'),
+            (k, r#""C:\ProgramData\Package Cache\{G}\s.dll""#, 'c'),
+        ] {
+            assert!(
+                package_cache_runonce_target(key, data, drive).is_none(),
+                "{key} {data} {drive}"
+            );
+        }
+    }
 
     #[test]
     fn image_loads() {

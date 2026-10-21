@@ -724,10 +724,15 @@ fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     if !user.is_empty() {
         cmd.args(["/grant:r", &format!("{user}:F")]);
     }
+    // Recorded in the spawn registry like every agent child (re-review N8).
     let ok = cmd
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
+        .spawn()
+        .and_then(|mut child| {
+            crate::platform_win::record_spawned_child(&child);
+            child.wait()
+        })
         .map(|s| s.success())
         .unwrap_or(false);
     if !ok {

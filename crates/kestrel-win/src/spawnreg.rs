@@ -107,6 +107,20 @@ pub fn is_recorded(pid: u32, create_ft: u64) -> bool {
         .unwrap_or(false)
 }
 
+/// How long the sensor holds the `ProcessStart` of a direct agent child that
+/// the agent has not recorded yet (soak 2026-10-21: the Kernel-Process
+/// start event can be translated before the spawning thread returns from
+/// `CreateProcess` and records the child; deciding `agent_spawned` then
+/// raised a Sigma alert on the agent's own `powershell -EncodedCommand`).
+pub const AGENT_CHILD_WAIT_MS: i64 = 5_000;
+
+/// Keep holding an unrecorded agent-child start? (pure; `until` = hold
+/// deadline). Once recorded, or past the deadline, the start goes out and
+/// [`is_agent_spawned`] decides.
+pub fn registry_wait_pending(recorded: bool, now_ms: i64, until: i64) -> bool {
+    !recorded && now_ms < until
+}
+
 /// The full V-H1 check (pure apart from the registry lookup `recorded`):
 /// recorded child, ETW parent is the agent, and the event's creator (header
 /// pid) is that same parent (no PPID spoofing).
@@ -141,21 +155,32 @@ pub fn is_agent_spawned(
 #[cfg(windows)]
 pub fn record_child(child: &std::process::Child) -> bool {
     use std::os::windows::io::AsRawHandle;
+    // SAFETY: the live process handle owned by `child`.
+    unsafe { record_handle(child.id(), child.as_raw_handle() as _) }
+}
+
+/// Record a child started with a raw process handle (`CreateProcessAsUserW`,
+/// e.g. the remote-desktop helper; re-review N8). `h` must be the live
+/// handle of process `pid` returned by the create call.
+///
+/// # Safety
+/// `h` must be a valid, open process handle (`PROCESS_QUERY_LIMITED_INFORMATION`).
+#[cfg(windows)]
+pub unsafe fn record_handle(pid: u32, h: windows_sys::Win32::Foundation::HANDLE) -> bool {
     use windows_sys::Win32::Foundation::FILETIME;
     use windows_sys::Win32::System::Threading::GetProcessTimes;
-    let h = child.as_raw_handle();
     let z = FILETIME {
         dwLowDateTime: 0,
         dwHighDateTime: 0,
     };
     let (mut c, mut e, mut k, mut u) = (z, z, z, z);
-    // SAFETY: `h` is the live process handle owned by `child`.
-    let ok = unsafe { GetProcessTimes(h as _, &mut c, &mut e, &mut k, &mut u) };
+    // SAFETY: `h` is a live process handle (caller contract).
+    let ok = unsafe { GetProcessTimes(h, &mut c, &mut e, &mut k, &mut u) };
     if ok == 0 {
         return false;
     }
     let ft = ((c.dwHighDateTime as u64) << 32) | c.dwLowDateTime as u64;
-    record(child.id(), ft);
+    record(pid, ft);
     true
 }
 
@@ -208,6 +233,40 @@ mod tests {
         assert!(!agent_spawned_check(true, 777, 777, agent));
         // Agent pid unknown.
         assert!(!agent_spawned_check(true, 0, 0, 0));
+    }
+
+    /// Service start-up ordering (soak 2026-10-21): the start event of the
+    /// agent's hardening PowerShell is translated *before* the spawning
+    /// thread records the child. The start is held (no decision) until the
+    /// record lands, then `agent_spawned` is true.
+    #[test]
+    fn start_event_before_record_is_held_until_recorded() {
+        let (agent, child, ft) = (4242, 5150, 0xABCD_EF01_u64);
+        let t0 = 1_000_000;
+        let until = t0 + AGENT_CHILD_WAIT_MS;
+        // ETW start arrives first: not recorded yet → keep holding, even
+        // after the 1 s command-line wait would have released it.
+        let mut r = SpawnRegistry::new();
+        assert!(registry_wait_pending(r.contains(child, ft, t0), t0, until));
+        assert!(registry_wait_pending(
+            r.contains(child, ft, t0 + 1_500),
+            t0 + 1_500,
+            until
+        ));
+        // The spawning thread records the child; the start is released and
+        // judged the agent's own.
+        r.record(child, ft, t0 + 1_600);
+        let rec = r.contains(child, ft, t0 + 1_700);
+        assert!(!registry_wait_pending(rec, t0 + 1_700, until));
+        assert!(agent_spawned_check(rec, agent, agent, agent));
+        // Never recorded (not ours): released at the deadline, not trusted.
+        let r2 = SpawnRegistry::new();
+        assert!(!registry_wait_pending(
+            r2.contains(child, ft, until),
+            until,
+            until
+        ));
+        assert!(!agent_spawned_check(false, agent, agent, agent));
     }
 
     #[test]

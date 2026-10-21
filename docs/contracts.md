@@ -347,6 +347,7 @@ Error details such as `reason` and `remote_code` are fields of the `error` objec
 ## Event provenance fields (v1.1, additive)
 
 - `registry_set`, `task_registered`, `service_installed`, `wmi_subscription` carry `attribution: "exact" | "heuristic" | "none"` (default `exact` for older agents). Only `exact` actors may be killed or rolled back; the console shows *writer inferred* / *writer unknown* badges in the device timeline, incident evidence and hunt results, and storylines append *(writer inferred)* / *(writer unknown)*.
+- `registry_set.target` (additive, optional, 2026-10-21): `{path, signed, signer, sha256}` on-disk facts of the file the value starts, verified by the Windows sensor. Only filled for HKLM `RunOnce` values whose target is directly in `<system drive>:\ProgramData\Package Cache\<folder>\*.exe` (WiX Burn reboot continuation, PS-01); absent otherwise and from older agents.
 - `process_start.agent_spawned: bool` — a direct child the agent itself started; the console labels it *started by Kestrel*.
 - `file_activity.remote_writer: bool` (writes came via the System process from another machine over SMB; no local process is blamed) and `canary_in_place: bool` (decoy write found by content polling; the actor is inferred). Shown as *remote client over SMB* / *decoy write found by polling*.
 

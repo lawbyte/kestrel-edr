@@ -141,6 +141,13 @@ pub enum EventData {
         /// How the writer (`pid`/`guid`) was determined.
         #[serde(default)]
         attribution: Attribution,
+        /// On-disk facts of the file the value starts, verified by the
+        /// sensor when the event was translated. Only filled for narrow
+        /// cases that need them (HKLM `RunOnce` into
+        /// `%ProgramData%\Package Cache\`, WiX Burn reboot continuation);
+        /// `None` otherwise and from older agents.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<TargetFileFacts>,
     },
     NetConnect {
         proto: NetProto,
@@ -217,6 +224,20 @@ impl EventData {
             EventData::WmiSubscription(_) => EventKind::WmiSubscription,
         }
     }
+}
+
+/// On-disk facts of a file named by an event (e.g. a `RunOnce` target),
+/// verified by the sensor (Authenticode + SHA-256 of the file itself).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct TargetFileFacts {
+    /// Win32 path that was verified.
+    pub path: String,
+    #[serde(default)]
+    pub signed: SignatureState,
+    #[serde(default)]
+    pub signer: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 /// Process creation with enrichment the agent fills in from its hash/signer cache.

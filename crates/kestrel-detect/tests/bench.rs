@@ -143,6 +143,7 @@ fn mixed_events(n: usize) -> Vec<Event> {
                 pid,
                 EventData::RegistrySet {
                     attribution: Default::default(),
+                    target: None,
                     key: r"HKCU\Software\Microsoft\Office\16.0\Common".into(),
                     value_name: "x".into(),
                     data: Some("1".into()),

@@ -1,36 +1,60 @@
 //! ST-16 canary (decoy credential store) generation and arming.
 //!
-//! [`canary_specs`] returns, for one user profile:
-//! 1. a decoy Chromium profile directory `…\Google\Chrome\User Data\Profile NN`
-//!    (NN is derived from the host name, 51-98, so it is stable per host and
-//!    unlikely to collide with a real profile),
-//! 2. a decoy `Login Data` in it — a valid SQLite database with a `logins`
-//!    table holding fake entries (so a stealer proceeds and uploads fakes),
+//! # Layout (since 2026-10-21)
+//!
+//! Decoys live in the profile folders of **defunct Chromium forks** that
+//! stealers enumerate but that mainstream browsers' import wizards do not
+//! scan ([`DECOY_BROWSER_ROOTS`]: Kometa — in Lumma's built-in browser list
+//! (Cyble, SOCRadar) — and 7Star — in Vidar's (Trend Micro)). For each root,
+//! under `%LOCALAPPDATA%\<root>\User Data`:
+//! 1. `Local State` with a fake `os_crypt.encrypted_key` (DPAPI-shaped),
+//! 2. a `Default` profile (stealers always try `Default`) with
+//!    `Login Data` — a valid SQLite database with a `logins` table holding
+//!    fake entries (so a stealer proceeds and uploads fakes),
 //! 3. a decoy MetaMask wallet-extension LevelDB folder
-//!    (`Local Extension Settings\nkbihfbeogaeaoehlefnkodbefgpgknn`) with
-//!    `CURRENT`, `LOCK`, `LOG`, `MANIFEST-000001` and `000003.log` holding a
-//!    fake encrypted vault,
-//! 4. **last**, a decoy `.aws\credentials` with a fake access key.
+//!    (`Default\Local Extension Settings\nkbihfbeogaeaoehlefnkodbefgpgknn`)
+//!    with `CURRENT`, `LOCK`, `LOG`, `MANIFEST-000001` and `000003.log`
+//!    holding a fake encrypted vault;
+//!
+//! and **last**, a decoy `.aws\credentials` with a fake access key.
+//!
+//! Before 2026-10-21 the decoy was a `Google\Chrome\User Data\Profile NN`
+//! folder ([`LEGACY_DECOY_ROOT`]), planted even when Chrome was not
+//! installed. That made Chrome look installed, Edge's "import from Chrome"
+//! enumerated it at start-up and ST-16 (Protect) killed Edge (lab VM). The
+//! Windows planter removes the legacy decoys it planted (registry
+//! `canaries.json`) on upgrade.
 //!
 //! Specs are ordered so a directory precedes its files.
 //!
-//! **Agent contract** (no field for this exists in `CanarySpec`, see report):
+//! **Agent contract** (no field for this exists in `CanarySpec`):
 //! * never overwrite an existing path — skip any spec whose path exists;
+//! * never plant inside a directory spec that exists and is not Kestrel's
+//!   (the user really has that browser): skip everything below it;
 //! * plant the `.aws\credentials` decoy **only if the real file does not exist**
 //!   ([`is_conditional_canary`] tells which specs are conditional).
 //!
-//! Arming for ST-16: the Chrome decoy profile is armed as soon as the specs
-//! are generated (its name is unlikely to collide; if the agent skips it
-//! because it exists it should call `Engine::disarm_canary`). The
-//! `.aws\credentials` decoy is armed only when the agent confirms it planted it
+//! # Arming and what fires
+//!
+//! Each decoy `User Data` folder is armed as soon as the specs are generated;
+//! the agent disarms whatever it could not plant. The `.aws\credentials`
+//! decoy is armed only when the agent confirms it planted it
 //! (`Engine::arm_canary`) or when the engine sees the agent's own process
 //! create/write that file; it is disarmed again when any other process writes
 //! to it (the user configured real credentials).
 //!
+//! Only **secret material** fires ST-16 ([`is_decoy_secret`]): `Local State`
+//! (encryption key), `Login Data`, any file inside the wallet-extension
+//! folder, `.aws\credentials` (and `Cookies` / `Web Data` should they ever be
+//! planted). Directory opens / listings, attribute queries and incidental
+//! files a profile scan touches (`Preferences`, `Google Profile Picture.png`,
+//! icons, `First Run`, the extension *folder* itself) never fire.
+//!
 //! Processes that never trip ST-16: the Kestrel agent itself, PID 0/4 and the
 //! readers in [`crate::paths::CANARY_IGNORED_READERS`] (Windows Search
 //! indexer and Microsoft Defender, which read everything) when they are not
-//! unsigned / running from a user-writable path.
+//! unsigned / running from a user-writable path. Genuine browsers and
+//! password managers ([`crate::legit_apps`]) raise an Audit alert only.
 
 use crate::util::driveless;
 use crate::CanarySpec;
@@ -74,7 +98,21 @@ const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456
 const UPPER_ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const SECRET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/+";
 
-/// Decoy Chrome profile directory name for a host.
+/// Browser roots (relative to `%LOCALAPPDATA%`) that hold the decoy
+/// profiles, with the display name the sensitive-path catalog gives them.
+/// Defunct Chromium forks: in stealer target lists, not offered by the
+/// import wizards of Edge / Chrome / Firefox / Brave / Opera / Vivaldi.
+pub const DECOY_BROWSER_ROOTS: &[(&str, &str)] =
+    &[(r"Kometa", "Kometa"), (r"7Star\7Star", "7Star")];
+
+/// Pre-2026-10-21 decoy location (relative to the user profile): a hidden
+/// `Profile NN` folder in Chrome's `User Data`. No longer planted; the
+/// Windows planter removes what it planted there.
+pub const LEGACY_DECOY_ROOT: &str = r"AppData\Local\Google\Chrome\User Data";
+
+/// Legacy (pre-2026-10-21) decoy Chrome profile directory name for a host.
+/// Kept for the migration and for callers of the old API; new decoys use
+/// [`DECOY_BROWSER_ROOTS`] with a `Default` profile.
 pub fn decoy_profile_name(hostname: &str) -> String {
     format!(
         "Profile {}",
@@ -112,17 +150,6 @@ pub fn canary_specs(hostname: &str, user_profile: &str) -> Vec<CanarySpec> {
             driveless(user_profile)
         )) | 1,
     );
-    let profile_dir = join(
-        user_profile,
-        &format!(
-            r"AppData\Local\Google\Chrome\User Data\{}",
-            decoy_profile_name(hostname)
-        ),
-    );
-    let ext_dir = join(
-        &profile_dir,
-        &format!(r"Local Extension Settings\{DECOY_WALLET_EXTENSION}"),
-    );
     let user = user_profile
         .trim_end_matches(['\\', '/'])
         .rsplit(['\\', '/'])
@@ -130,27 +157,56 @@ pub fn canary_specs(hostname: &str, user_profile: &str) -> Vec<CanarySpec> {
         .unwrap_or("user")
         .to_string();
 
-    let mut v = vec![
-        CanarySpec { path: profile_dir.clone(), category: DataCategory::BrowserPasswords, content: vec![], is_dir: true },
-        CanarySpec {
-            path: join(&profile_dir, "Login Data"),
-            category: DataCategory::BrowserPasswords,
-            content: login_data_sqlite(&mut rng, &user),
-            is_dir: false,
-        },
-        CanarySpec { path: join(&profile_dir, "Local Extension Settings"), category: DataCategory::CryptoWallet, content: vec![], is_dir: true },
-        CanarySpec { path: ext_dir.clone(), category: DataCategory::CryptoWallet, content: vec![], is_dir: true },
-        CanarySpec { path: join(&ext_dir, "CURRENT"), category: DataCategory::CryptoWallet, content: b"MANIFEST-000001\n".to_vec(), is_dir: false },
-        CanarySpec { path: join(&ext_dir, "LOCK"), category: DataCategory::CryptoWallet, content: vec![], is_dir: false },
-        CanarySpec {
-            path: join(&ext_dir, "LOG"),
-            category: DataCategory::CryptoWallet,
-            content: b"2026/03/02-09:14:51.207 3a1c Reusing MANIFEST C:\\LevelDB\\MANIFEST-000001\n2026/03/02-09:14:51.208 3a1c Recovering log #3\n2026/03/02-09:14:51.211 3a1c Reusing old log 000003.log\n".to_vec(),
-            is_dir: false,
-        },
-        CanarySpec { path: join(&ext_dir, "MANIFEST-000001"), category: DataCategory::CryptoWallet, content: leveldb_manifest(), is_dir: false },
-        CanarySpec { path: join(&ext_dir, "000003.log"), category: DataCategory::CryptoWallet, content: metamask_log(&mut rng), is_dir: false },
-    ];
+    let mut v = Vec::new();
+    for (root, _) in DECOY_BROWSER_ROOTS {
+        let local = join(user_profile, r"AppData\Local");
+        // Vendor folder chain first (so the planter records it as ours and
+        // never plants into a real install of that browser).
+        let mut acc = local.clone();
+        for comp in root.split('\\') {
+            acc = join(&acc, comp);
+            v.push(CanarySpec {
+                path: acc.clone(),
+                category: DataCategory::BrowserPasswords,
+                content: vec![],
+                is_dir: true,
+            });
+        }
+        let user_data = join(&acc, "User Data");
+        let profile_dir = join(&user_data, "Default");
+        let ext_dir = join(
+            &profile_dir,
+            &format!(r"Local Extension Settings\{DECOY_WALLET_EXTENSION}"),
+        );
+        v.extend([
+            CanarySpec { path: user_data.clone(), category: DataCategory::BrowserMasterKey, content: vec![], is_dir: true },
+            CanarySpec {
+                path: join(&user_data, "Local State"),
+                category: DataCategory::BrowserMasterKey,
+                content: local_state_json(&mut rng, &user),
+                is_dir: false,
+            },
+            CanarySpec { path: profile_dir.clone(), category: DataCategory::BrowserPasswords, content: vec![], is_dir: true },
+            CanarySpec {
+                path: join(&profile_dir, "Login Data"),
+                category: DataCategory::BrowserPasswords,
+                content: login_data_sqlite(&mut rng, &user),
+                is_dir: false,
+            },
+            CanarySpec { path: join(&profile_dir, "Local Extension Settings"), category: DataCategory::CryptoWallet, content: vec![], is_dir: true },
+            CanarySpec { path: ext_dir.clone(), category: DataCategory::CryptoWallet, content: vec![], is_dir: true },
+            CanarySpec { path: join(&ext_dir, "CURRENT"), category: DataCategory::CryptoWallet, content: b"MANIFEST-000001\n".to_vec(), is_dir: false },
+            CanarySpec { path: join(&ext_dir, "LOCK"), category: DataCategory::CryptoWallet, content: vec![], is_dir: false },
+            CanarySpec {
+                path: join(&ext_dir, "LOG"),
+                category: DataCategory::CryptoWallet,
+                content: b"2026/03/02-09:14:51.207 3a1c Reusing MANIFEST C:\\LevelDB\\MANIFEST-000001\n2026/03/02-09:14:51.208 3a1c Recovering log #3\n2026/03/02-09:14:51.211 3a1c Reusing old log 000003.log\n".to_vec(),
+                is_dir: false,
+            },
+            CanarySpec { path: join(&ext_dir, "MANIFEST-000001"), category: DataCategory::CryptoWallet, content: leveldb_manifest(), is_dir: false },
+            CanarySpec { path: join(&ext_dir, "000003.log"), category: DataCategory::CryptoWallet, content: metamask_log(&mut rng), is_dir: false },
+        ]);
+    }
     // Conditional decoy: only when the real file does not exist (agent checks).
     let key_id = format!("AKIA{}", rng.alnum(16, UPPER_ALNUM));
     let secret = rng.alnum(40, SECRET);
@@ -163,13 +219,86 @@ pub fn canary_specs(hostname: &str, user_profile: &str) -> Vec<CanarySpec> {
     v
 }
 
-/// Paths armed immediately when specs are generated (the decoy Chrome profile directory).
+/// Paths armed immediately when specs are generated: each decoy browser's
+/// `User Data` directory.
 pub(crate) fn immediate_arm_prefixes(specs: &[CanarySpec]) -> Vec<String> {
     specs
-        .first()
+        .iter()
         .filter(|s| s.is_dir)
-        .map(|s| vec![driveless(&s.path)])
-        .unwrap_or_default()
+        .map(|s| driveless(&s.path))
+        .filter(|d| d.ends_with(r"\user data"))
+        .collect()
+}
+
+/// Is this (normalised, driveless) path inside an armed decoy **secret
+/// material** — a file a stealer reads to steal credentials — rather than
+/// a directory or an incidental profile file a browser / password-manager
+/// import scan, backup or indexer touches? See the module docs.
+pub fn is_decoy_secret(path: &str) -> bool {
+    let n = crate::paths::normalize_path(path);
+    if n.ends_with(r"\.aws\credentials") {
+        return true;
+    }
+    let Some(store) = crate::paths::match_normalized(&n) else {
+        return false;
+    };
+    if matches!(
+        store.category,
+        DataCategory::CryptoWallet | DataCategory::PasswordManager
+    ) {
+        // Extension storage: the extension *folder* itself (a listing) is
+        // not secret; any file inside it is.
+        let comps: Vec<&str> = n.split('\\').filter(|c| !c.is_empty()).collect();
+        if let Some(i) = comps
+            .iter()
+            .position(|c| *c == "local extension settings" || *c == "sync extension settings")
+        {
+            return comps.len() > i + 2;
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Fake Local State (os_crypt key)
+// ---------------------------------------------------------------------------
+
+fn base64(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(B64[((n >> (18 - 6 * i)) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// Chromium `Local State` with a DPAPI-shaped `os_crypt.encrypted_key`
+/// ("DPAPI" + a fake DPAPI blob) and one `Default` profile.
+fn local_state_json(rng: &mut Prng, user: &str) -> Vec<u8> {
+    let mut key = b"DPAPI".to_vec();
+    // DPAPI blob header (version 1 + provider GUID df9d8cd0-1501-11d1-8c7a-00c04fc297eb).
+    key.extend_from_slice(&[
+        0x01, 0x00, 0x00, 0x00, 0xd0, 0x8c, 0x9d, 0xdf, 0x01, 0x15, 0xd1, 0x11, 0x8c, 0x7a, 0x00,
+        0xc0, 0x4f, 0xc2, 0x97, 0xeb,
+    ]);
+    key.extend(rng.bytes(206));
+    let user_l = user.to_ascii_lowercase();
+    format!(
+        "{{\"browser\":{{\"enabled_labs_experiments\":[],\"last_redirect_origin\":\"\"}},\"os_crypt\":{{\"encrypted_key\":\"{}\"}},\"profile\":{{\"info_cache\":{{\"Default\":{{\"active_time\":1772443291.207,\"name\":\"Person 1\",\"user_name\":\"{user_l}@corp-mail.com\"}}}},\"last_used\":\"Default\",\"profiles_order\":[\"Default\"]}}}}",
+        base64(&key)
+    )
+    .into_bytes()
 }
 
 // ---------------------------------------------------------------------------
@@ -396,12 +525,33 @@ mod tests {
     #[test]
     fn specs_shape() {
         let v = canary_specs("FIN-LAPTOP-07", r"C:\Users\alice");
-        assert_eq!(v.len(), 10);
+        // Kometa: 1 vendor dir + 11; 7Star: 2 vendor dirs + 11; aws
+        assert_eq!(v.len(), 12 + 13 + 1);
         assert!(v[0].is_dir);
-        assert!(v[0]
-            .path
-            .starts_with(r"C:\Users\alice\AppData\Local\Google\Chrome\User Data\Profile "));
+        assert_eq!(v[0].path, r"C:\Users\alice\AppData\Local\Kometa");
+        assert!(
+            !v.iter()
+                .any(|s| s.path.to_ascii_lowercase().contains(r"\google\chrome")),
+            "never make a mainstream browser look installed"
+        );
+        let prefixes = immediate_arm_prefixes(&v);
+        assert_eq!(
+            prefixes,
+            [
+                r"\users\alice\appdata\local\kometa\user data",
+                r"\users\alice\appdata\local\7star\7star\user data"
+            ]
+        );
+        let state = v.iter().find(|s| s.path.ends_with("Local State")).unwrap();
+        let js = String::from_utf8_lossy(&state.content);
+        assert!(js.contains("\"encrypted_key\":\"RFBBUEkB"), "{js}");
+        assert!(is_decoy_secret(&state.path));
+        assert_eq!(
+            crate::paths::classify_sensitive_path(&state.path).map(|c| c.0),
+            Some(DataCategory::BrowserMasterKey)
+        );
         let login = v.iter().find(|s| s.path.ends_with("Login Data")).unwrap();
+        assert!(is_decoy_secret(&login.path));
         assert!(login.content.starts_with(b"SQLite format 3\0"));
         assert_eq!(login.content.len(), 8192);
         assert!(crate::paths::classify_sensitive_path(&login.path).is_some());
@@ -424,6 +574,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn secret_vs_incidental() {
+        let base = r"C:\Users\alice\AppData\Local\Kometa\User Data";
+        for p in [
+            r"\Local State",
+            r"\Default\Login Data",
+            r"\Default\Network\Cookies",
+            r"\Default\Web Data",
+            r"\Default\Local Extension Settings\nkbihfbeogaeaoehlefnkodbefgpgknn\000003.log",
+            r"\Default\Local Extension Settings\nkbihfbeogaeaoehlefnkodbefgpgknn\CURRENT",
+        ] {
+            assert!(is_decoy_secret(&format!("{base}{p}")), "{p}");
+        }
+        for p in [
+            "",
+            r"\Default",
+            r"\Default\Preferences",
+            r"\Default\Secure Preferences",
+            r"\Default\Google Profile Picture.png",
+            r"\Default\Google Profile.ico",
+            r"\First Run",
+            r"\Default\Local Extension Settings",
+            r"\Default\Local Extension Settings\nkbihfbeogaeaoehlefnkodbefgpgknn",
+            r"\Default\Login Data-journal",
+        ] {
+            assert!(!is_decoy_secret(&format!("{base}{p}")), "{p}");
+        }
+        assert!(is_decoy_secret(r"C:\Users\alice\.aws\credentials"));
+        assert!(!is_decoy_secret(r"C:\Users\alice\.aws\config"));
+    }
+
+    #[test]
+    fn base64_encoding() {
+        assert_eq!(base64(b"DPAPI"), "RFBBUEk=");
+        assert_eq!(base64(b"ab"), "YWI=");
+        assert_eq!(base64(b"abc"), "YWJj");
+        assert_eq!(base64(b""), "");
     }
 
     #[test]

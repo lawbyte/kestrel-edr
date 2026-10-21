@@ -15,7 +15,7 @@ use crate::etwparse::filetime_to_ms;
 use crate::filters;
 use crate::proctrack::descendants;
 use kestrel_common::ProcessGuid;
-use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
 use windows_sys::Win32::System::Threading::{
     IsProcessCritical, TerminateProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
     PROCESS_SUSPEND_RESUME, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
@@ -140,16 +140,33 @@ pub fn resume(pid: u32, expect: Option<(&str, &ProcessGuid)>, self_pid: u32) -> 
     }
 }
 
-fn terminate(t: &Target) -> Result<(), String> {
+/// Outcome of a successful [`terminate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ended {
+    Terminated,
+    /// TerminateProcess failed because the process was already exiting
+    /// (it returns ACCESS_DENIED for a terminating process; lab 2026-10-21).
+    AlreadyExited,
+}
+
+fn terminate(t: &Target) -> Result<Ended, String> {
     if unsafe { TerminateProcess(t.h.raw(), KILL_EXIT_CODE) } == 0 {
-        return Err(format!(
-            "TerminateProcess({}) failed: {}",
-            t.pid,
-            last_err()
-        ));
+        let err = last_err();
+        // The handle has SYNCHRONIZE: signalled = the process has exited.
+        if unsafe { WaitForSingleObject(t.h.raw(), 200) } == WAIT_OBJECT_0 {
+            return Ok(Ended::AlreadyExited);
+        }
+        return Err(format!("TerminateProcess({}) failed: {err}", t.pid));
     }
     unsafe { WaitForSingleObject(t.h.raw(), 2_000) };
-    Ok(())
+    Ok(Ended::Terminated)
+}
+
+fn ended_text(e: Ended) -> &'static str {
+    match e {
+        Ended::Terminated => "terminated",
+        Ended::AlreadyExited => "process already exited:",
+    }
 }
 
 /// Kill a process (and optionally its descendants). Descendants are found
@@ -169,7 +186,10 @@ pub fn kill(
     };
     if !tree {
         return match terminate(&root) {
-            Ok(()) => (true, format!("terminated {} (pid {pid})", root.image)),
+            Ok(x) => (
+                true,
+                format!("{} {} (pid {pid})", ended_text(x), root.image),
+            ),
             Err(e) => (false, e),
         };
     }
@@ -197,7 +217,7 @@ pub fn kill(
     // Deepest descendants first, root last.
     for t in targets.iter().rev() {
         match terminate(t) {
-            Ok(()) => killed.push(format!(
+            Ok(_) => killed.push(format!(
                 "{} ({})",
                 kestrel_common::file_name_lower(&t.image),
                 t.pid
@@ -207,7 +227,7 @@ pub fn kill(
     }
     let root_ok = terminate(&root);
     let mut detail = match &root_ok {
-        Ok(()) => format!("terminated {} (pid {pid})", root.image),
+        Ok(x) => format!("{} {} (pid {pid})", ended_text(*x), root.image),
         Err(e) => format!("root kill failed: {e}"),
     };
     if !killed.is_empty() {
@@ -220,4 +240,36 @@ pub fn kill(
         detail.push_str(&format!("; skipped: {}", skipped.join("; ")));
     }
     (root_ok.is_ok() && failed.is_empty(), detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lab 2026-10-21: TerminateProcess on a process that is already exiting
+    /// fails with ACCESS_DENIED; the outcome says it already exited. (Only
+    /// touches a `cmd /c exit` child this test started itself.)
+    #[test]
+    fn terminate_reports_already_exited() {
+        let cmd = format!(r"{}\System32\cmd.exe", system_root());
+        let mut child = std::process::Command::new(cmd)
+            .args(["/c", "exit", "0"])
+            .spawn()
+            .expect("spawn cmd");
+        let pid = child.id();
+        // Keep our handle open (the process object stays) until it exited.
+        let _ = child.try_wait();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let t = match open_target(pid, PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, None, 0) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("cannot reopen exited child ({e}); skipping");
+                let _ = child.wait();
+                return;
+            }
+        };
+        assert_eq!(terminate(&t), Ok(Ended::AlreadyExited));
+        assert_eq!(ended_text(Ended::AlreadyExited), "process already exited:");
+        let _ = child.wait();
+    }
 }

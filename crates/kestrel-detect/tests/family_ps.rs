@@ -66,6 +66,7 @@ fn reg(ts: i64, guid: &str, pid: u32, key: &str, value: &str, data: &str) -> Eve
         pid,
         EventData::RegistrySet {
             attribution: Default::default(),
+            target: None,
             key: key.into(),
             value_name: value.into(),
             data: Some(data.into()),
@@ -206,6 +207,7 @@ fn ps01_unknown_signature_is_alert_only_and_hkcu_long_form() {
         10,
         EventData::RegistrySet {
             attribution: Default::default(),
+            target: None,
             key: run_key(),
             value_name: "z".into(),
             data: None,

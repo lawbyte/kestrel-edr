@@ -835,6 +835,7 @@ detection:
             data: data.map(String::from),
             op,
             attribution: Default::default(),
+            target: None,
         })
     }
 

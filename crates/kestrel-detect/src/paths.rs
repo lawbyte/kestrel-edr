@@ -418,11 +418,10 @@ const O_TOKENBROKER: &[&str] = &[
     "msedgewebview2.exe",
     "onedrive.exe",
     "ms-teams.exe",
-    "olk.exe",
-    "outlook.exe",
-    "winword.exe",
-    "excel.exe",
-    "powerpnt.exe",
+    // Office (WINWORD, EXCEL, POWERPNT, OUTLOOK, olk) is deliberately not an
+    // owner (re-review N2, 2026-10-21): VBA runs arbitrary code in it. Its
+    // token-cache reads go through `legit_apps::wam_client_reader` instead:
+    // a Low Audit ST-01 that is recorded for ST-02 / ST-04 correlation.
 ];
 const O_GCLOUD: &[&str] = &[
     "python.exe",

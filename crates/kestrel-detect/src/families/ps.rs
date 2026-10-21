@@ -757,6 +757,113 @@ impl Persistence {
             .map(|b| b.app)
     }
 
+    /// Soak 2026-10-21 (hardened after re-review N3): a WiX Burn bundle
+    /// (e.g. PowerToys setup) sets **HKLM** `RunOnce` to its cached copy in
+    /// `%ProgramData%\Package Cache\{…}\` to resume after a reboot. Benign
+    /// only when **all** hold:
+    /// * HKLM RunOnce (needs admin), exact attribution, a direct command
+    ///   (no script-host chain);
+    /// * the writer is a Burn engine — image `%WINDIR%\Temp\{GUID}\.be\<x>.exe`
+    ///   or `%TEMP%\{GUID}\.cr\<x>.exe` on the system volume — validly signed
+    ///   by a named signer, not a LOLBin, not alerted, with a trusted parent
+    ///   or the same bundle (name + signer) as its parent;
+    /// * the target is `<system drive>:\ProgramData\Package Cache\{…}\<x>.exe`
+    ///   with the writer's file name, and the sensor verified the file **on
+    ///   disk** (`RegistrySet.target`): valid signature by exactly the
+    ///   writer's signer, and the same SHA-256 when both hashes are known.
+    ///
+    /// Anything else (no on-disk facts: older agent; another signer; a
+    /// generic registry editor as writer) is judged as before.
+    fn burn_reboot_continuation(
+        ctx: &Ctx,
+        e: &Event,
+        r: &Resolved,
+        p: &Payload,
+        w: &Writer,
+        loc: &Loc,
+    ) -> bool {
+        let key = loc.location.to_ascii_lowercase();
+        let hklm = key.starts_with(r"hklm\") || key.starts_with(r"\registry\machine\");
+        if loc.kind != AutorunKind::RegistryValue
+            || !hklm
+            || !key.ends_with(r"\currentversion\runonce")
+            || !r.chain.is_empty()
+            || p.url
+            || p.known_unsigned()
+            || w.unsigned_or_lolbin
+            || w.alerted
+            || !w.attributed
+            || w.attribution != Attribution::Exact
+        {
+            return false;
+        }
+        let EventData::RegistrySet {
+            target: Some(target),
+            ..
+        } = &e.data
+        else {
+            return false;
+        };
+        let (Some(path), Some(info)) = (p.path.as_deref(), w.info.as_ref()) else {
+            return false;
+        };
+        let signer = match (info.signed, info.signer.as_deref()) {
+            (SignatureState::Valid, Some(s)) if !s.trim().is_empty() => s.trim(),
+            _ => return false,
+        };
+        let drive = ctx.system_drive();
+        // Writer: a Burn engine copy on the system volume.
+        let Some(wrest) = crate::protect::on_system_volume(&info.image, drive) else {
+            return false;
+        };
+        let burn_engine = crate::paths::glob_match_path(r"\windows\temp\{*}\.be\*.exe", &wrest)
+            || crate::paths::glob_match_path(r"\users\*\appdata\local\temp\{*}\.cr\*.exe", &wrest);
+        if !burn_engine {
+            return false;
+        }
+        // Parent: trusted (V-H6), or the same bundle one step up the Burn
+        // chain (original download / `.cr` clean-room copy: same file name,
+        // valid signature by the same signer). Burn copies live in Temp /
+        // Downloads, which alone makes them "untrusted actors".
+        let parent_ok = w.parent_trusted
+            || ctx.table().parent_of(info).is_some_and(|pp| {
+                pp.signed == SignatureState::Valid
+                    && pp
+                        .signer
+                        .as_deref()
+                        .is_some_and(|s| s.trim().eq_ignore_ascii_case(signer))
+                    && file_name_lower(&pp.image) == file_name_lower(&info.image)
+            });
+        if !parent_ok {
+            return false;
+        }
+        // Target: the same bundle in the Package Cache on the system drive.
+        let n = crate::paths::normalize_path(path);
+        let b = n.as_bytes();
+        if b.len() < 3 || b[1] != b':' || (b[0] as char) != drive.to_ascii_lowercase() {
+            return false;
+        }
+        if !crate::paths::glob_match_path(r"\programdata\package cache\*\*.exe", &n[2..])
+            || n.split('\\').any(|c| c == "..")
+            || file_name_lower(&n) != file_name_lower(&info.image)
+        {
+            return false;
+        }
+        // On-disk facts of exactly that file.
+        if crate::paths::normalize_path(&target.path) != n
+            || target.signed != SignatureState::Valid
+            || !target
+                .signer
+                .as_deref()
+                .is_some_and(|s| s.trim().eq_ignore_ascii_case(signer))
+        {
+            return false;
+        }
+        match (target.sha256.as_deref(), info.sha256.as_deref()) {
+            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+            _ => true,
+        }
+    }
     /// PS-02 condition: a script host / LOLBin chain with tradecraft.
     /// Domain logon script on SYSVOL / NETLOGON written by a non-untrusted
     /// process (gpsvc, gpscript): normal in AD estates.
@@ -1083,7 +1190,10 @@ impl Persistence {
         );
         let candidate = (p.user_writable || (hidden_logon_task && !trusted_place))
             && p.signed != SignatureState::Valid;
-        if !candidate || Self::baseline(&r, &p, &w, cmd).is_some() {
+        if !candidate
+            || Self::baseline(&r, &p, &w, cmd).is_some()
+            || Self::burn_reboot_continuation(ctx, e, &r, &p, &w, &loc)
+        {
             return;
         }
         let strong_ctx = p.motw || p.just_dropped || w.suspicious();

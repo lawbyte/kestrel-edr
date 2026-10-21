@@ -465,6 +465,7 @@ fn rw03_unsigned_process_cannot_hide_behind_kestrel_service_name() {
         10,
         EventData::RegistrySet {
             attribution: Default::default(),
+            target: None,
             key: r"HKLM\SYSTEM\CurrentControlSet\Control\SafeBoot\Network\KestrelAgent".into(),
             value_name: String::new(),
             data: Some("Service".into()),
@@ -838,6 +839,7 @@ fn odd_input_never_panics_and_state_is_bounded() {
         81,
         EventData::RegistrySet {
             attribution: Default::default(),
+            target: None,
             key: String::new(),
             value_name: String::new(),
             data: None,

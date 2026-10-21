@@ -504,8 +504,8 @@ fn canary_specs_and_conditional_aws_decoy() {
     let aws = specs.last().unwrap();
     assert!(is_conditional_canary(&aws.path));
     assert_eq!(aws.category, DataCategory::CloudToken);
-    // not armed until the agent plants it
-    assert_eq!(e.armed_canaries().len(), 1);
+    // not armed until the agent plants it (the two decoy `User Data` folders are)
+    assert_eq!(e.armed_canaries().len(), DECOY_BROWSER_ROOTS.len());
     e.process(&start(
         0,
         "agent",
@@ -536,7 +536,7 @@ fn canary_specs_and_conditional_aws_decoy() {
     assert!(e
         .process(&write(20, "agent", 900, r"C:\Users\alice\.aws\credentials"))
         .is_empty());
-    assert_eq!(e.armed_canaries().len(), 2);
+    assert_eq!(e.armed_canaries().len(), DECOY_BROWSER_ROOTS.len() + 1);
     e.process(&start(
         30,
         "reader2",
@@ -574,16 +574,16 @@ fn canary_specs_and_conditional_aws_decoy() {
             r"C:\Users\alice\.aws\credentials"
         ))
         .is_empty());
-    assert_eq!(e.armed_canaries().len(), 1);
+    assert_eq!(e.armed_canaries().len(), DECOY_BROWSER_ROOTS.len());
     // explicit API
     e.arm_canary(&aws.path);
-    assert_eq!(e.armed_canaries().len(), 2);
+    assert_eq!(e.armed_canaries().len(), DECOY_BROWSER_ROOTS.len() + 1);
     e.disarm_canary(&aws.path);
-    assert_eq!(e.armed_canaries().len(), 1);
+    assert_eq!(e.armed_canaries().len(), DECOY_BROWSER_ROOTS.len());
 }
 
 #[test]
-fn canary_owner_read_alerts_without_killing_browser() {
+fn canary_genuine_browser_import_is_audit_only() {
     let mut e = engine(Policy::default());
     e.canaries(r"C:\Users\alice");
     e.process(&start(
@@ -600,11 +600,33 @@ fn canary_owner_read_alerts_without_killing_browser() {
         10,
         "chrome",
         700,
-        r"C:\Users\alice\AppData\Local\Google\Chrome\User Data\Profile 88\Login Data",
+        r"C:\Users\alice\AppData\Local\Kometa\User Data\Default\Login Data",
     ));
     let d = first(&out, "ST-16");
-    assert_eq!(d.alert.severity, Severity::High);
+    assert_eq!(d.alert.severity, Severity::Medium);
+    assert_eq!(d.alert.mode, RuleMode::Audit);
     assert!(d.actions.is_empty());
+    // A browser-named binary that is not a known genuine install (here a
+    // signed Yandex browser in a per-user folder) is not an importer.
+    e.process(&start(
+        20,
+        "yb",
+        701,
+        r"C:\Users\alice\AppData\Local\Yandex\YandexBrowser\Application\browser.exe",
+        "browser.exe",
+        None,
+        SignatureState::Valid,
+        Some("YANDEX LLC"),
+    ));
+    let out = e.process(&read(
+        30,
+        "yb",
+        701,
+        r"C:\Users\alice\AppData\Local\Kometa\User Data\Default\Login Data",
+    ));
+    let d = first(&out, "ST-16");
+    assert_eq!(d.alert.mode, RuleMode::Protect);
+    assert_eq!(kills(&d.actions), [("yb".to_string(), true)]);
 }
 
 // ---------------------------------------------------------------- suspend windows

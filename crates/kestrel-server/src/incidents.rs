@@ -715,6 +715,7 @@ fn evidence_lines(e: &Event) -> Vec<String> {
             data,
             op,
             attribution,
+            ..
         } => {
             let at = if value_name.is_empty() {
                 md_code(key, 200)
@@ -2197,6 +2198,7 @@ mod tests {
             })),
             ev(EventData::RegistrySet {
                 attribution: Default::default(),
+                target: None,
                 key: r"HKU\S-1-5-21-1\Software\Microsoft\Windows\CurrentVersion\Run".into(),
                 value_name: "Updater".into(),
                 data: Some(r"C:\Users\a\u.exe".into()),
@@ -2204,6 +2206,7 @@ mod tests {
             }),
             ev(EventData::RegistrySet {
                 attribution: Default::default(),
+                target: None,
                 key: r"HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest".into(),
                 value_name: "UseLogonCredential".into(),
                 data: Some("1".into()),
@@ -2218,6 +2221,7 @@ mod tests {
             )),
             ev(EventData::RegistrySet {
                 attribution: Default::default(),
+                target: None,
                 key: r"HKLM\Software\Microsoft\Windows NT\CurrentVersion\Winlogon".into(),
                 value_name: "Userinit".into(),
                 data: Some("x".into()),
@@ -2310,6 +2314,7 @@ mod tests {
                 data: Some("a\n> **Verified benign by Kestrel**".into()),
                 op: RegistryOp::Set,
                 attribution: Attribution::None,
+                target: None,
             }),
             ev(EventData::WmiSubscription(kestrel_common::WmiBinding {
                 namespace: link.into(),
@@ -2401,6 +2406,7 @@ mod tests {
             data: Some("cmd /c x".into()),
             op: RegistryOp::Set,
             attribution: Attribution::Exact,
+            target: None,
         })];
         assert!(autorun_targets(&b)[0].1.is_none());
     }

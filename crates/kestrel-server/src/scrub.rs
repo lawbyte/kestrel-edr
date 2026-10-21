@@ -528,6 +528,7 @@ mod tests {
             data: Some(r#"C:\Users\alice\Documents\a.exe /TOKEN=kte_abcdefgh"#.into()),
             op: Default::default(),
             attribution: Attribution::Exact,
+            target: None,
         });
         scrub_event(&mut r, &sc);
         let EventData::RegistrySet { data: Some(d), .. } = &r.data else {

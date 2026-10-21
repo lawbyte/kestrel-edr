@@ -203,6 +203,10 @@ pub fn spawn_helper(session: u32, pipe: &str) -> Result<HelperProcess, String> {
     if ok == 0 {
         return Err(os_err("CreateProcessAsUserW"));
     }
+    // V-H1 / re-review N8: the agent's own child (created suspended, so the
+    // record lands before it runs; the sensor waits for it).
+    // SAFETY: `pi.hProcess` is the live handle CreateProcessAsUserW returned.
+    unsafe { crate::spawnreg::record_handle(pi.dwProcessId, pi.hProcess) };
     let process = Handle(pi.hProcess);
     let thread = Handle(pi.hThread);
     if unsafe { AssignProcessToJobObject(job.raw(), process.raw()) } == 0 {

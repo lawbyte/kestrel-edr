@@ -19,6 +19,7 @@ use kestrel_common::{
 };
 
 pub mod catalog;
+pub mod legit_apps;
 pub mod paths;
 pub mod protect;
 pub mod table;
@@ -27,7 +28,10 @@ mod canary;
 mod sigma;
 mod util;
 
-pub use canary::{decoy_profile_name, is_conditional_canary, DECOY_WALLET_EXTENSION};
+pub use canary::{
+    decoy_profile_name, is_conditional_canary, is_decoy_secret, DECOY_BROWSER_ROOTS,
+    DECOY_WALLET_EXTENSION, LEGACY_DECOY_ROOT,
+};
 pub use sigma::{validate_sigma, SigmaRuleInfo};
 pub use table::ProcessTable;
 
@@ -158,7 +162,8 @@ impl Engine {
 
     /// Arm a decoy path for ST-16 after the agent planted it. Required for
     /// conditional decoys (`.aws\credentials`, see [`is_conditional_canary`]);
-    /// the decoy Chrome profile is armed by [`Engine::canaries`] itself.
+    /// the decoy browser `User Data` folders are armed by [`Engine::canaries`]
+    /// itself (the agent disarms whatever it could not plant).
     pub fn arm_canary(&mut self, path: &str) {
         self.inner.arm_canary(path)
     }

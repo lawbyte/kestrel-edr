@@ -342,6 +342,42 @@ impl DecoyFs for SafeDecoyFs {
             Err(_) => RemoveResult::NotOurs,
         }
     }
+
+    fn remove_empty_dir(&self, path: &Path) -> RemoveResult {
+        let Some((parent, name)) = split(path) else {
+            return RemoveResult::NotOurs;
+        };
+        let dir = match open_dir(&parent) {
+            Ok(d) => d,
+            Err(_) if std::fs::symlink_metadata(&parent).is_err() => return RemoveResult::Gone,
+            Err(_) => return RemoveResult::NotOurs,
+        };
+        // Relative to the verified parent, the link itself (never its target).
+        let h = match open_in_dir(
+            &dir,
+            &name,
+            DELETE | FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            FILE_SHARE_READ,
+            FILE_OPEN,
+            FILE_DIRECTORY_FILE,
+        ) {
+            Ok(h) => h,
+            Err(RelOpenError::NotFound) => return RemoveResult::Gone,
+            Err(_) => return RemoveResult::NotOurs,
+        };
+        match attr_tag(&h) {
+            Some((attrs, _))
+                if attrs & FILE_ATTRIBUTE_REPARSE_POINT == 0
+                    && attrs & FILE_ATTRIBUTE_DIRECTORY != 0 => {}
+            _ => return RemoveResult::NotOurs,
+        }
+        // Fails (STATUS_DIRECTORY_NOT_EMPTY) unless the folder is empty.
+        if delete_now_by_handle(&h) {
+            RemoveResult::Removed
+        } else {
+            RemoveResult::NotOurs
+        }
+    }
 }
 
 /// Plant decoys for every profile (SYSTEM only). Returns the decoy paths
@@ -484,6 +520,14 @@ mod tests {
             1
         );
         assert!(w.is_dir());
+        // Empty-directory removal (decoy migration): only when empty.
+        std::fs::write(w.join("user-file"), b"u").unwrap();
+        assert_eq!(fs.remove_empty_dir(&w), RemoveResult::NotOurs);
+        assert!(w.join("user-file").exists());
+        std::fs::remove_file(w.join("user-file")).unwrap();
+        assert_eq!(fs.remove_empty_dir(&w), RemoveResult::Removed);
+        assert!(!w.exists());
+        assert_eq!(fs.remove_empty_dir(&w), RemoveResult::Gone);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -518,6 +562,9 @@ mod tests {
         assert!(fs
             .write_file(&link.join("new.docx"), b"x", None, false)
             .is_err());
+        // The junction itself is never removed as an "empty decoy folder".
+        assert_eq!(fs.remove_empty_dir(&link), RemoveResult::NotOurs);
+        assert!(link.exists());
         assert_eq!(
             std::fs::read(victim.join("!Payroll Q3.xlsx")).unwrap(),
             b"victim data"

@@ -217,6 +217,10 @@ pub trait DecoyFs {
     ) -> std::io::Result<()>;
     /// Delete `path` only if it is a plain file whose SHA-256 is `sha`.
     fn remove_if_ours(&self, path: &Path, sha: &str) -> RemoveResult;
+    /// Delete the directory `path` only if it is a real (non-link) and
+    /// **empty** directory. `Removed`, `Gone` (absent), `NotOurs` (not
+    /// empty, a link / reparse point, not a directory) or `Failed`.
+    fn remove_empty_dir(&self, path: &Path) -> RemoveResult;
 }
 
 /// Portable, path-based [`DecoyFs`] (link checks before and after; not
@@ -278,6 +282,89 @@ impl DecoyFs for StdFs<'_> {
             _ => RemoveResult::NotOurs,
         }
     }
+
+    fn remove_empty_dir(&self, path: &Path) -> RemoveResult {
+        match self.probe(path) {
+            Probe::Absent => RemoveResult::Gone,
+            Probe::Dir => match std::fs::read_dir(path).map(|mut d| d.next().is_none()) {
+                Ok(true) => match std::fs::remove_dir(path) {
+                    Ok(()) => RemoveResult::Removed,
+                    Err(_) => RemoveResult::Failed,
+                },
+                Ok(false) => RemoveResult::NotOurs,
+                Err(_) => RemoveResult::Failed,
+            },
+            _ => RemoveResult::NotOurs,
+        }
+    }
+}
+
+/// Folders (relative to `%LOCALAPPDATA%`, lower-case) the pre-2026-10-21
+/// ST-16 decoy created implicitly above its recorded `Profile NN` folder.
+/// Removed on upgrade only when they are empty real directories (Chrome is
+/// then not installed: an empty `Google\Chrome\User Data` is what made the
+/// decoy look like an installed Chrome to Edge's importer).
+const LEGACY_IMPLICIT_PARENTS: &[&str] = &[r"google\chrome\user data", r"google\chrome", r"google"];
+
+/// Upgrade / migration: remove every decoy recorded in `reg` that is not
+/// part of the current `specs` (e.g. the legacy `Google\Chrome\User
+/// Data\Profile NN` decoy): files only while they still hold exactly what
+/// Kestrel planted, directories only when empty, deepest first, never
+/// through a link. Then the empty legacy parent folders the old layout
+/// created implicitly. Entries that could not be removed because of an
+/// I/O failure stay recorded for the next attempt; everything else is
+/// forgotten (a non-empty / changed object is the user's now). Returns the
+/// removed paths.
+pub fn retire_stale(
+    fs: &dyn DecoyFs,
+    specs: &[CanarySpec],
+    reg: &mut CanaryRegistry,
+) -> Vec<String> {
+    let current: std::collections::HashSet<String> = specs.iter().map(|s| key(&s.path)).collect();
+    let mut stale: Vec<(String, CanaryRecord)> = reg
+        .planted
+        .iter()
+        .filter(|(k, _)| !current.contains(*k))
+        .map(|(k, r)| (k.clone(), r.clone()))
+        .collect();
+    if stale.is_empty() {
+        return vec![];
+    }
+    // Deepest first: files and sub-folders before their parents.
+    stale.sort_by_key(|(k, _)| std::cmp::Reverse(k.matches('\\').count()));
+    let mut removed = Vec::new();
+    let mut legacy_bases: Vec<std::path::PathBuf> = Vec::new();
+    for (k, rec) in stale {
+        let path = Path::new(&rec.path);
+        let r = match rec.sha256.as_deref() {
+            Some(sha) => fs.remove_if_ours(path, sha),
+            None => fs.remove_empty_dir(path),
+        };
+        match r {
+            RemoveResult::Removed => removed.push(rec.path.clone()),
+            RemoveResult::Gone | RemoveResult::NotOurs => {}
+            RemoveResult::Failed => continue, // keep the record, retry later
+        }
+        reg.planted.remove(&k);
+        // `…\AppData\Local\Google\Chrome\User Data\<x>` → remember `…\AppData\Local`.
+        let lower = rec.path.replace('/', "\\").to_ascii_lowercase();
+        if let Some(i) = lower.find(r"\appdata\local\google\chrome\user data\") {
+            let base = Path::new(&rec.path[..i + r"\appdata\local".len()]).to_path_buf();
+            if !legacy_bases.contains(&base) {
+                legacy_bases.push(base);
+            }
+        }
+    }
+    for base in legacy_bases {
+        for rel in LEGACY_IMPLICIT_PARENTS {
+            let p = rel.split('\\').fold(base.clone(), |acc, c| acc.join(c));
+            // Case of the on-disk names does not matter on NTFS.
+            if fs.remove_empty_dir(&p) == RemoveResult::Removed {
+                removed.push(p.to_string_lossy().into_owned());
+            }
+        }
+    }
+    removed
 }
 
 /// Plant `specs`; returns paths that now hold Kestrel canaries. `set_hidden`
@@ -299,18 +386,38 @@ pub fn plant_with(
     hidden: bool,
 ) -> Vec<String> {
     let mut ok = Vec::new();
+    // Directory specs that exist and are not Kestrel's (the user really has
+    // that browser): nothing is planted below them.
+    let mut foreign_dirs: Vec<String> = Vec::new();
     for spec in specs {
         let path = Path::new(&spec.path);
         let k = key(&spec.path);
+        if foreign_dirs
+            .iter()
+            .any(|d| k.starts_with(d.as_str()) && k.as_bytes().get(d.len()) == Some(&b'\\'))
+        {
+            continue;
+        }
         let rec = reg.planted.get(&k);
         let probe = fs.probe(path);
         if probe == Probe::Foreign {
             tracing::warn!(path = %spec.path, "not planting canary: link / junction / foreign object at the path");
+            if spec.is_dir {
+                foreign_dirs.push(k);
+            }
             continue;
         }
         let exists = probe != Probe::Absent;
         if spec.is_dir {
-            if exists && probe != Probe::Dir {
+            if exists && (probe != Probe::Dir || rec.is_none()) {
+                // A real folder of that browser (or a file in the way).
+                // Review F9: malware or a login script could pre-create the
+                // folder to suppress the decoys, so say so loudly.
+                tracing::warn!(
+                    path = %spec.path,
+                    "decoy not planted: folder exists and is not Kestrel's (a real install of that browser, or decoy suppression)"
+                );
+                foreign_dirs.push(k);
                 continue;
             }
             match decide(true, exists, None, rec, "") {
@@ -442,6 +549,155 @@ mod tests {
         let ok3 = plant(&specs, &mut reg, &h);
         assert_eq!(ok3.len(), 1);
         assert_eq!(std::fs::read(&specs[0].path).unwrap(), b"now real");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn std_fs() -> StdFs<'static> {
+        StdFs {
+            set_hidden: &|_: &Path| {},
+        }
+    }
+
+    /// Never plant inside a folder of a browser that is really installed.
+    #[test]
+    fn never_plants_into_a_foreign_browser_folder() {
+        let d = tmpdir("foreign");
+        let real = d.join("Kometa");
+        std::fs::create_dir_all(real.join("User Data")).unwrap();
+        let specs = vec![
+            CanarySpec {
+                path: real.to_string_lossy().into(),
+                category: DataCategory::BrowserPasswords,
+                content: vec![],
+                is_dir: true,
+            },
+            CanarySpec {
+                path: real.join("User Data").to_string_lossy().into(),
+                category: DataCategory::BrowserPasswords,
+                content: vec![],
+                is_dir: true,
+            },
+            CanarySpec {
+                path: real
+                    .join("User Data")
+                    .join("Local State")
+                    .to_string_lossy()
+                    .into(),
+                category: DataCategory::BrowserMasterKey,
+                content: b"decoy".to_vec(),
+                is_dir: false,
+            },
+            CanarySpec {
+                path: d.join("elsewhere").to_string_lossy().into(),
+                category: DataCategory::CryptoWallet,
+                content: vec![],
+                is_dir: true,
+            },
+        ];
+        let mut reg = CanaryRegistry::default();
+        let ok = plant_with(&std_fs(), &specs, &mut reg, false);
+        assert_eq!(ok, vec![specs[3].path.clone()]);
+        assert!(!real.join("User Data").join("Local State").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Upgrade: the legacy `Google\Chrome\User Data\Profile NN` decoy (and
+    /// the empty Chrome folders it implied) is removed; a changed file and a
+    /// real Chrome install are left alone.
+    #[test]
+    fn retires_legacy_chrome_decoy() {
+        let d = tmpdir("retire");
+        let local = d
+            .join("Users")
+            .join("employee")
+            .join("AppData")
+            .join("Local");
+        let profile = local
+            .join("Google")
+            .join("Chrome")
+            .join("User Data")
+            .join("Profile 68");
+        let ext = profile.join("Local Extension Settings").join("nkbih");
+        let legacy = vec![
+            CanarySpec {
+                path: profile.to_string_lossy().into(),
+                category: DataCategory::BrowserPasswords,
+                content: vec![],
+                is_dir: true,
+            },
+            CanarySpec {
+                path: profile.join("Login Data").to_string_lossy().into(),
+                category: DataCategory::BrowserPasswords,
+                content: b"sqlite decoy".to_vec(),
+                is_dir: false,
+            },
+            CanarySpec {
+                path: profile
+                    .join("Local Extension Settings")
+                    .to_string_lossy()
+                    .into(),
+                category: DataCategory::CryptoWallet,
+                content: vec![],
+                is_dir: true,
+            },
+            CanarySpec {
+                path: ext.to_string_lossy().into(),
+                category: DataCategory::CryptoWallet,
+                content: vec![],
+                is_dir: true,
+            },
+            CanarySpec {
+                path: ext.join("000003.log").to_string_lossy().into(),
+                category: DataCategory::CryptoWallet,
+                content: b"vault".to_vec(),
+                is_dir: false,
+            },
+        ];
+        let mut reg = CanaryRegistry::default();
+        assert_eq!(plant_with(&std_fs(), &legacy, &mut reg, false).len(), 5);
+        // Edge's importer dropped nothing; the new layout is planted elsewhere.
+        let new_specs = vec![CanarySpec {
+            path: local.join("Kometa").to_string_lossy().into(),
+            category: DataCategory::BrowserPasswords,
+            content: vec![],
+            is_dir: true,
+        }];
+        let removed = retire_stale(&std_fs(), &new_specs, &mut reg);
+        assert!(removed.len() >= 5, "{removed:?}");
+        assert!(reg.planted.is_empty());
+        assert!(
+            !local.join("Google").exists(),
+            "empty legacy parents removed"
+        );
+        assert!(local.exists());
+        assert_eq!(plant_with(&std_fs(), &new_specs, &mut reg, false).len(), 1);
+        // Idempotent.
+        assert!(retire_stale(&std_fs(), &new_specs, &mut reg).is_empty());
+
+        // A real Chrome next to a legacy decoy: decoy removed, Chrome kept;
+        // a decoy the user changed is kept (and forgotten).
+        let mut reg = CanaryRegistry::default();
+        assert_eq!(plant_with(&std_fs(), &legacy, &mut reg, false).len(), 5);
+        let real_default = local
+            .join("Google")
+            .join("Chrome")
+            .join("User Data")
+            .join("Default");
+        std::fs::create_dir_all(&real_default).unwrap();
+        std::fs::write(real_default.join("Login Data"), b"real").unwrap();
+        std::fs::write(ext.join("000003.log"), b"user changed it").unwrap();
+        let removed = retire_stale(&std_fs(), &new_specs, &mut reg);
+        assert!(removed.iter().any(|p| p.ends_with("Login Data")));
+        assert!(!profile.join("Login Data").exists());
+        assert_eq!(
+            std::fs::read(ext.join("000003.log")).unwrap(),
+            b"user changed it"
+        );
+        assert_eq!(
+            std::fs::read(real_default.join("Login Data")).unwrap(),
+            b"real"
+        );
+        assert!(reg.planted.is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 

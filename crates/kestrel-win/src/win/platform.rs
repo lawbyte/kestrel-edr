@@ -789,6 +789,16 @@ impl Platform for WindowsPlatform {
         let Ok(mut reg) = i.canary_reg.lock() else {
             return vec![];
         };
+        // Lab FP 2026-10-21: remove decoys of an older layout (the legacy
+        // `Google\Chrome\User Data\Profile NN` that made Chrome look
+        // installed to Edge's importer) before planting the current set.
+        let retired = canary::retire_stale(&super::rcanary::SafeDecoyFs, specs, &mut reg);
+        if !retired.is_empty() {
+            tracing::info!(
+                removed = retired.len(),
+                "removed decoys of an older canary layout"
+            );
+        }
         // V-H8: handle-based, never follows a link planted in the profile.
         let ok = canary::plant_with(&super::rcanary::SafeDecoyFs, specs, &mut reg, true);
         if let Ok(mut c) = i.canaries.write() {

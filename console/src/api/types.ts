@@ -213,6 +213,13 @@ export type EventData =
       data?: string | null
       op?: RegistryOp
       attribution?: Attribution
+      /** On-disk facts of the started file (only HKLM RunOnce → ProgramData\Package Cache; newer agents). */
+      target?: {
+        path: string
+        signed?: SignatureState
+        signer?: string | null
+        sha256?: string | null
+      } | null
     }
   | {
       type: 'net_connect'

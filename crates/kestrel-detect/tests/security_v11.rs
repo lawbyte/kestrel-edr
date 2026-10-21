@@ -70,6 +70,7 @@ fn reg_set(ts: i64, guid: &str, pid: u32, key: &str, value: &str, data: &str) ->
             data: Some(data.into()),
             op: RegistryOp::Set,
             attribution: Attribution::Exact,
+            target: None,
         },
     )
 }
@@ -1356,6 +1357,7 @@ fn runmru_set(ts: i64, data: &str, attr: Attribution) -> Event {
                 data: Some(data.into()),
                 op: RegistryOp::Set,
                 attribution: Attribution::Exact,
+                target: None,
             },
         ),
         attr,

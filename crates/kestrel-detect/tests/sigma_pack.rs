@@ -458,6 +458,7 @@ fn persistence_fires() {
         "actor",
         EventData::RegistrySet {
             attribution: Default::default(),
+            target: None,
             key: r"HKU\S-1-5-21-1\Software\Microsoft\Windows\CurrentVersion\Run".into(),
             value_name: "Updater".into(),
             data: Some(r"C:\Users\alice\AppData\Local\Temp\upd.exe".into()),
@@ -473,6 +474,7 @@ fn persistence_fires() {
         "actor",
         EventData::RegistrySet {
             attribution: Default::default(),
+            target: None,
             key: r"HKU\S-1-5-21-1\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run"
                 .into(),
             value_name: String::new(),
@@ -550,4 +552,96 @@ fn unknown_parent_does_not_suppress_pack_rule() {
     let mut e = pack_engine();
     let out = replay(&mut e, &ev);
     assert!(sigma_hits(&out).is_empty(), "{:?}", sigma_hits(&out));
+}
+
+/// Soak 2026-10-21: SIG-ca2092a1 ("Suspicious Encoded PowerShell Command
+/// Line") fired on the agent's own AppLocker query. Service start-up
+/// ordering: the engine starts with the agent pid known, the agent itself is
+/// seeded from the process snapshot (never via a ProcessStart), and the
+/// hardening PowerShell's start arrives marked `agent_spawned`. It must stay
+/// silent; the same start without `agent_spawned` (PPID spoofing, a user
+/// running the same command) still fires.
+#[test]
+fn agent_own_encoded_powershell_is_silent_at_service_startup() {
+    let cmd = "\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQAgAD0AIAAnAFMAdABvAHAAJwA7ACAARwBlAHQALQBBAHAAcABMAG8AYwBrAGUAcgBQAG8AbABpAGMAeQAgAC0ARQBmAGYAZQBjAHQAaQB2AGUAIAAtAFgAbQBsAA==";
+    let run = |spawned: bool| {
+        let ctx = HostContext {
+            agent_pid: 50,
+            ..host()
+        };
+        let mut e = Engine::new(ctx, Policy::default(), bundle()).unwrap();
+        let seed = |guid: &str,
+                    pid: u32,
+                    ppid: u32,
+                    parent: Option<&str>,
+                    image: &str,
+                    cmd: &str,
+                    user: &str,
+                    signer: &str| ProcessInfo {
+            guid: g(guid),
+            pid,
+            ppid,
+            parent_guid: parent.map(g),
+            image: image.into(),
+            cmdline: cmd.into(),
+            user: Some(user.into()),
+            integrity: Some(Integrity::System),
+            start_ts: T0 - 60_000,
+            exit_ts: None,
+            signer: Some(signer.into()),
+            signed: SignatureState::Valid,
+            sha256: None,
+            motw_zone: None,
+            file_size: None,
+            path_class: PathClass::Other,
+        };
+        e.seed_process(seed(
+            "services",
+            700,
+            600,
+            None,
+            r"C:\Windows\System32\services.exe",
+            "services.exe",
+            r"NT AUTHORITY\SYSTEM",
+            "Microsoft Windows Publisher",
+        ));
+        e.seed_process(seed(
+            "agent",
+            50,
+            700,
+            Some("services"),
+            AGENT,
+            "\"C:\\Program Files\\Kestrel\\kestrel-agent.exe\" service",
+            r"NT AUTHORITY\SYSTEM",
+            "Kestrel",
+        ));
+        let mut s = as_user(
+            start(
+                10,
+                "ps-applocker",
+                5150,
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                cmd,
+                Some(("agent", 50)),
+                SignatureState::Valid,
+                Some("Microsoft Windows"),
+            ),
+            r"NT AUTHORITY\SYSTEM",
+        );
+        if spawned {
+            s = spawned_by_agent(s);
+        }
+        e.process(&s)
+    };
+    let out = run(true);
+    assert!(sigma_hits(&out).is_empty(), "{}", dump(&out));
+    assert!(alerts(&out).is_empty(), "{}", dump(&out));
+    let out = run(false);
+    assert!(
+        sigma_hits(&out)
+            .iter()
+            .any(|h| h.starts_with("SIG-ca2092a1")),
+        "{}",
+        dump(&out)
+    );
 }

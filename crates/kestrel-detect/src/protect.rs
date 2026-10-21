@@ -118,7 +118,9 @@ fn split_volume(image: &str) -> (Option<char>, String, bool) {
     }
 }
 
-fn on_system_volume(image: &str, system_drive: char) -> Option<String> {
+/// Driveless normalised rest of `image` when it is on the system volume
+/// (or a driveless rooted / `\SystemRoot\` path); `None` otherwise.
+pub(crate) fn on_system_volume(image: &str, system_drive: char) -> Option<String> {
     let (drive, rest, known) = split_volume(image);
     if !known {
         return None;
