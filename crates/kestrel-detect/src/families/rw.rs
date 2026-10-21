@@ -19,9 +19,9 @@
 use super::{Ctx, Family, FamilyHit};
 use crate::catalog::meta;
 use kestrel_common::{
-    file_name_lower, Alert, Event, EventData, FileActivity, PathClass, ProcessGuid, ProcessInfo,
-    ProcessStart, RegistryOp, ResponseAction, RuleCategory, RuleMeta, RuleMode, Severity,
-    SignatureState, TargetProcess, TimestampMs,
+    file_name_lower, Alert, Event, EventData, FileActivity, Integrity, PathClass, ProcessGuid,
+    ProcessInfo, ProcessStart, RegistryOp, ResponseAction, RuleCategory, RuleMeta, RuleMode,
+    Severity, SignatureState, TargetProcess, TimestampMs,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -163,8 +163,15 @@ pub(crate) struct Ransomware {
     safeboot_marks: HashMap<ProcessGuid, TimestampMs>,
     /// Subjects of RW-06/07 alerts (RW-08 combination).
     impact_marks: HashMap<ProcessGuid, TimestampMs>,
-    /// RW-12 inputs: (ts, rule, subject).
-    host_hits: VecDeque<(TimestampMs, &'static str, ProcessInfo)>,
+    /// Subjects of RW-06 alerts (RW-07 in-place escalation, V-H9).
+    rw06_marks: HashMap<ProcessGuid, TimestampMs>,
+    /// Subjects of alert-only, in-place RW-07 hits (heuristic actor): their
+    /// RW-07 alert does not count as an impact mark.
+    inplace_marks: HashMap<ProcessGuid, TimestampMs>,
+    /// Processes that exited with a non-zero code (RW-12, V-M4).
+    failed: HashMap<ProcessGuid, TimestampMs>,
+    /// RW-12 inputs: (ts, rule, subject, lineage key set at alert time).
+    host_hits: VecDeque<(TimestampMs, &'static str, ProcessInfo, HashSet<ProcessGuid>)>,
     /// Last RW-12 hit (host-level cool-down).
     last_rw12: Option<TimestampMs>,
     /// Ransomware-alert state (RW-06 thresholds halved) until this time.
@@ -300,12 +307,22 @@ impl Lineage {
     }
 }
 
+/// Validly signed program that is not a LOLBin / script host, wherever it
+/// is installed (per-user VS Code, Teams, Slack in AppData included).
+fn signed_program(ctx: &Ctx, p: &ProcessInfo) -> bool {
+    p.signed == SignatureState::Valid && !p.image.is_empty() && !ctx.is_lolbin(&name_of(p))
+}
+
+/// Lineage stop (V-M5): protected, agent, trusted system binary, Explorer,
+/// or any validly signed non-LOLBin program (a signed app that launched a
+/// shell is not the ransomware).
 fn is_stop(ctx: &Ctx, p: &ProcessInfo) -> bool {
     ctx.protected(p)
         || ctx.is_agent(p)
         || ctx.system_trusted(p)
         || is_real_explorer(ctx, p)
         || trusted_tool(ctx, p)
+        || signed_program(ctx, p)
 }
 
 fn lineage(ctx: &Ctx, guid: &ProcessGuid) -> Lineage {
@@ -336,13 +353,13 @@ fn admin_context(ctx: &Ctx, lin: &Lineage) -> bool {
         .skip(1)
         .all(|p| SHELLS.contains(&name_of(p).as_str()));
     shells_only
-        && lin
-            .stop
-            .as_ref()
-            .is_some_and(|s| is_real_explorer(ctx, s) || trusted_tool(ctx, s))
+        && lin.stop.as_ref().is_some_and(|s| {
+            is_real_explorer(ctx, s) || trusted_tool(ctx, s) || signed_program(ctx, s)
+        })
 }
 
-/// Kill each process (tree) and quarantine user-writable, non-LOLBin images.
+/// Kill each process (tree) and quarantine user-writable, non-LOLBin images
+/// that are not validly signed (V-M5).
 fn contain(ctx: &Ctx, procs: &[ProcessInfo]) -> Vec<ResponseAction> {
     let mut out = Vec::new();
     for p in procs {
@@ -355,6 +372,7 @@ fn contain(ctx: &Ctx, procs: &[ProcessInfo]) -> Vec<ResponseAction> {
             tree: true,
         });
         if !p.image.is_empty()
+            && p.signed != SignatureState::Valid
             && ctx.path_class(&p.image).is_user_writable()
             && !ctx.is_lolbin(&name_of(p))
         {
@@ -1036,6 +1054,32 @@ impl Ransomware {
         fa: &FileActivity,
         out: &mut Vec<FamilyHit>,
     ) {
+        // V-H9: writes by the System process are a remote SMB client; no
+        // local process may be blamed or acted on (remote encryption is
+        // RW-09, deferred). Decoy tamper is still reported.
+        if fa.remote_writer || e.pid == 4 {
+            if !fa.canary_hits.is_empty() {
+                let path = fa.canary_hits.first().map(String::as_str).unwrap_or("");
+                let mut h = FamilyHit::new(
+                    RW07,
+                    &e.guid,
+                    Severity::Critical,
+                    format!(
+                        "A remote client over SMB modified Kestrel ransomware decoy files ({path}); another computer on the network may be encrypting this PC's shared folders. Find the client in the file server's session list."
+                    ),
+                );
+                h.dedup_key = Some(format!("{RW07}:remote"));
+                // Alert only, with the synthetic "unknown writer" subject
+                // (the engine refuses pid 4 subjects and any action on it).
+                let mut subject = crate::engine::unknown_subject(e.ts);
+                subject.cmdline = "(remote client over SMB, via the System process)".into();
+                h.guid = subject.guid.clone();
+                h.process = Some(subject);
+                h.remediation_only = true;
+                out.push(h);
+            }
+            return;
+        }
         let Some(actor) = ctx.process(&e.guid).cloned() else {
             // The process table has not seen it (sensor raced the start
             // event): still alert, without actions.
@@ -1059,9 +1103,19 @@ impl Ransomware {
         };
         let secs = (fa.window_ms / 1000).max(1);
 
+        let rw06_level = rw06_triggers(fa, ctx.now < self.ransom_alert_until);
+        let mut rw07_in_place_only = false;
+
         // RW-07: canary.
         if !fa.canary_hits.is_empty() {
             let soft = allowed || explorer;
+            // V-H9: an in-place write found by content polling is blamed on
+            // the last process that opened the decoy for writing (a guess:
+            // malware can make Word/Acrobat that process). Alert only, unless
+            // the same process also shows an RW-06-level aggregate.
+            let in_place_only = fa.canary_in_place
+                && !rw06_level
+                && !marked(&self.rw06_marks, &e.guid, ctx.now, RW08_COMBINE_MS);
             let path = fa.canary_hits.first().map(String::as_str).unwrap_or("");
             let mut h = FamilyHit::new(
                 RW07,
@@ -1071,7 +1125,16 @@ impl Ransomware {
                 } else {
                     Severity::Critical
                 },
-                if soft {
+                if fa.canary_in_place {
+                    format!(
+                        "A Kestrel ransomware decoy file ({path}) was rewritten in place; {shown} was the last program seen opening it for writing{}. Check that the file and its neighbours were not encrypted.",
+                        if in_place_only {
+                            " (inferred, so no action was taken against it)"
+                        } else {
+                            " and it is also rewriting many other files"
+                        }
+                    )
+                } else if soft {
                     format!(
                         "{shown} changed a Kestrel ransomware decoy file ({path}); this is usually a person or sync tool, but check that the file was not encrypted."
                     )
@@ -1081,15 +1144,22 @@ impl Ransomware {
                     )
                 },
             );
-            if !soft {
+            if !soft && !in_place_only {
                 h.actions = containment(isolate);
                 h.strong = true;
+            }
+            if in_place_only {
+                // Never feeds RW-08's "combined" escalation either.
+                rw07_in_place_only = true;
+                mark(&mut self.inplace_marks, &e.guid, ctx.now);
+            } else {
+                self.inplace_marks.remove(&e.guid);
             }
             out.push(h);
         }
 
         // RW-06: mass encryption.
-        if rw06_triggers(fa, ctx.now < self.ransom_alert_until) {
+        if rw06_level {
             let ext = fa
                 .top_new_ext
                 .as_deref()
@@ -1129,9 +1199,10 @@ impl Ransomware {
                 fa.note_dirs >= RW08_FALLBACK_DIRS && note != "desktop.ini" && note != "thumbs.db";
             if name_hit || fallback {
                 let combined = marked(&self.impact_marks, &e.guid, ctx.now, RW08_COMBINE_MS)
-                    || out
-                        .iter()
-                        .any(|h| (h.rule == RW06 || h.rule == RW07) && h.guid == e.guid);
+                    || out.iter().any(|h| {
+                        (h.rule == RW06 || (h.rule == RW07 && !rw07_in_place_only))
+                            && h.guid == e.guid
+                    });
                 let act = (name_hit || combined) && !allowed && !explorer;
                 let mut h = FamilyHit::new(
                     RW08,
@@ -1188,23 +1259,83 @@ impl Ransomware {
         }
     }
 
+    /// Lineage key set of an alert subject for RW-12 grouping: its lineage
+    /// members plus the launcher the walk stopped at (unless that is
+    /// Explorer or a protected process, which everything shares).
+    fn lineage_keys(ctx: &Ctx, subject: &ProcessInfo) -> HashSet<ProcessGuid> {
+        let lin = lineage(ctx, &subject.guid);
+        let mut keys: HashSet<ProcessGuid> = lin.guids().cloned().collect();
+        keys.insert(subject.guid.clone());
+        if let Some(s) = &lin.stop {
+            if !is_real_explorer(ctx, s) && !ctx.protected(s) {
+                keys.insert(s.guid.clone());
+            }
+        }
+        keys
+    }
+
     fn rw12(&mut self, ctx: &Ctx, a: &Alert, rule: &'static str, out: &mut Vec<FamilyHit>) {
         let now = a.ts;
         while self
             .host_hits
             .front()
-            .is_some_and(|(t, _, _)| now - *t > RW12_WINDOW_MS)
+            .is_some_and(|(t, _, _, _)| now - *t > RW12_WINDOW_MS)
         {
             self.host_hits.pop_front();
+        }
+        // V-M4: only Protect-mode alerts or the high-confidence variants
+        // (Critical; RW-04 only when escalated) count. A failed
+        // `vssadmin delete shadows` plus `wevtutil cl x` by a standard user
+        // must not isolate the host.
+        // RW-04's own escalation is already a same-lineage correlation:
+        // only an RW-04 alert in Protect mode counts.
+        let high_conf =
+            a.mode == RuleMode::Protect || (rule != RW04 && a.severity == Severity::Critical);
+        // Shadow-copy deletion, bcdedit, SafeBoot keys and log clearing need
+        // an elevated token: a known non-elevated subject cannot have
+        // succeeded, so it is not a kill-chain step.
+        let not_elevated = matches!(
+            a.process.integrity,
+            Some(Integrity::Untrusted | Integrity::Low | Integrity::Medium)
+        );
+        if !high_conf || (not_elevated && rule != RW05) {
+            return;
         }
         if self.host_hits.len() >= MAX_HOST_HITS {
             self.host_hits.pop_front();
         }
-        self.host_hits.push_back((now, rule, a.process.clone()));
-        let distinct: HashSet<&str> = self.host_hits.iter().map(|(_, r, _)| *r).collect();
-        if distinct.len() < 2 {
+        let keys = Self::lineage_keys(ctx, &a.process);
+        self.host_hits
+            .push_back((now, rule, a.process.clone(), keys));
+        // Hits whose process is known to have failed do not count; the
+        // rest must share a lineage with at least one other hit (exit codes
+        // are often unknown, so the same launching chain is required).
+        let live: Vec<usize> = (0..self.host_hits.len())
+            .filter(|&i| !self.failed.contains_key(&self.host_hits[i].2.guid))
+            .collect();
+        let mut group: Vec<usize> = Vec::new();
+        for &i in &live {
+            let g: Vec<usize> = live
+                .iter()
+                .copied()
+                .filter(|&j| {
+                    j == i
+                        || self.host_hits[i]
+                            .3
+                            .intersection(&self.host_hits[j].3)
+                            .next()
+                            .is_some()
+                })
+                .collect();
+            let distinct: HashSet<&str> = g.iter().map(|&j| self.host_hits[j].1).collect();
+            if distinct.len() >= 2 && g.len() > group.len() {
+                group = g;
+            }
+        }
+        if group.is_empty() {
             return;
         }
+        let distinct: HashSet<&str> = group.iter().map(|&j| self.host_hits[j].1).collect();
         if self
             .last_rw12
             .is_some_and(|t| now >= t && now - t < RW12_WINDOW_MS)
@@ -1219,7 +1350,7 @@ impl Ransomware {
         rules.sort_unstable();
         let mut actions = Vec::new();
         let mut seen: HashSet<ProcessGuid> = HashSet::new();
-        for (_, _, p) in &self.host_hits {
+        for p in group.iter().map(|&j| &self.host_hits[j].2) {
             if !seen.insert(p.guid.clone()) {
                 continue;
             }
@@ -1274,6 +1405,7 @@ fn rw06_triggers(fa: &FileActivity, halved: bool) -> bool {
 
 impl Family for Ransomware {
     fn on_event(&mut self, ctx: &Ctx, e: &Event, out: &mut Vec<FamilyHit>) {
+        let start = out.len();
         match &e.data {
             EventData::ProcessStart(ps) => self.on_start(ctx, e, ps, out),
             EventData::ScriptBlock { content, .. } => self.on_script(ctx, e, content, out),
@@ -1286,7 +1418,18 @@ impl Family for Ransomware {
                 ..
             } => self.on_registry(ctx, e, key, value_name, data.as_deref(), *op, out),
             EventData::FileActivity(fa) => self.on_file_activity(ctx, e, fa, out),
+            // RW-12 (V-M4): a prep command that failed does not count.
+            EventData::ProcessStop {
+                exit_code: Some(code),
+            } if *code != 0 => mark(&mut self.failed, &e.guid, e.ts),
             _ => {}
+        }
+        // A guessed or unknown registry writer is never acted on (V-H6/H7).
+        if matches!(e.data, EventData::RegistrySet { .. }) {
+            let attr = ctx.attribution(e);
+            for h in out[start..].iter_mut() {
+                h.apply_attribution(attr, e.ts);
+            }
         }
     }
 
@@ -1307,10 +1450,14 @@ impl Family for Ransomware {
         self.safeboot_marks
             .retain(|_, t| now - *t <= RW03_AUTOLOGON_MS);
         self.impact_marks.retain(|_, t| now - *t <= RW08_COMBINE_MS);
+        self.rw06_marks.retain(|_, t| now - *t <= RW08_COMBINE_MS);
+        self.inplace_marks
+            .retain(|_, t| now - *t <= RW08_COMBINE_MS);
+        self.failed.retain(|_, t| now - *t <= RW12_WINDOW_MS);
         while self
             .host_hits
             .front()
-            .is_some_and(|(t, _, _)| now - *t > RW12_WINDOW_MS)
+            .is_some_and(|(t, _, _, _)| now - *t > RW12_WINDOW_MS)
         {
             self.host_hits.pop_front();
         }
@@ -1330,7 +1477,14 @@ impl Family for Ransomware {
         let ts = a.ts;
         match rule {
             RW06 | RW07 => {
-                mark(&mut self.impact_marks, &a.process.guid, ts);
+                // An alert-only in-place RW-07 (heuristic actor) is not an
+                // impact mark (V-H9).
+                if rule == RW06 || !self.inplace_marks.contains_key(&a.process.guid) {
+                    mark(&mut self.impact_marks, &a.process.guid, ts);
+                }
+                if rule == RW06 {
+                    mark(&mut self.rw06_marks, &a.process.guid, ts);
+                }
                 return;
             }
             RW04 => {}
@@ -1359,6 +1513,10 @@ impl Family for Ransomware {
         self.prep_marks.remove(guid);
         self.safeboot_marks.remove(guid);
         self.impact_marks.remove(guid);
+        self.rw06_marks.remove(guid);
+        self.inplace_marks.remove(guid);
+        // `failed` expires by time only: the exit code must outlive the
+        // table entry for the whole RW-12 window.
     }
 }
 

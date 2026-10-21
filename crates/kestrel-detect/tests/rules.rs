@@ -1485,8 +1485,13 @@ fn process_table_through_engine() {
 
 /// Real-host regression (VM, 2026-10-21): the agent's own hardening checks run
 /// `powershell.exe -EncodedCommand …`; SigmaHQ encoded-PowerShell rules fired
-/// on every hardening pass. Children (and grandchildren) of the agent are the
-/// agent's own work; the same command from a user shell still alerts.
+/// on every hardening pass. A direct child the agent recorded spawning
+/// (`agent_spawned`) is the agent's own work; the same command from a user
+/// shell still alerts.
+///
+/// V-H1 (security review v1.1): parentage alone no longer counts. A child
+/// whose parent merely *is* the agent (spoofed PPID, or the agent image
+/// started by a user) and every grandchild are ordinary subjects.
 #[test]
 fn agent_children_are_not_subjects() {
     const ENC: &str = r#"
@@ -1517,7 +1522,7 @@ level: high
         SignatureState::Valid,
         None,
     ));
-    let out = e.process(&start(
+    let mut hard = start(
         10,
         "hard",
         51,
@@ -1526,8 +1531,14 @@ level: high
         Some(("agent", 50)),
         SignatureState::Valid,
         Some("Microsoft Windows"),
-    ));
+    );
+    if let EventData::ProcessStart(p) = &mut hard.data {
+        p.agent_spawned = true;
+    }
+    let out = e.process(&hard);
     assert!(rule_ids(&out).is_empty(), "agent child: {}", dump(&out));
+    // V-H1: the grandchild is not the agent's work (the old engine
+    // propagated agent status down the tree: a full bypass).
     let out = e.process(&start(
         20,
         "grand",
@@ -1538,9 +1549,28 @@ level: high
         SignatureState::Valid,
         Some("Microsoft Windows"),
     ));
-    assert!(
-        rule_ids(&out).is_empty(),
+    assert_eq!(
+        rule_ids(&out),
+        ["SIG-11111111"],
         "agent grandchild: {}",
+        dump(&out)
+    );
+    // V-H1: a child of the agent that the agent did not record spawning
+    // (PPID spoofing) is an ordinary subject.
+    let out = e.process(&start(
+        25,
+        "spoof",
+        53,
+        ps,
+        cmd,
+        Some(("agent", 50)),
+        SignatureState::Valid,
+        Some("Microsoft Windows"),
+    ));
+    assert_eq!(
+        rule_ids(&out),
+        ["SIG-11111111"],
+        "spoofed child: {}",
         dump(&out)
     );
     e.process(&start(

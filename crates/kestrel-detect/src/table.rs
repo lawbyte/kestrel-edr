@@ -21,6 +21,8 @@ pub struct ProcessTable {
     procs: HashMap<ProcessGuid, ProcessInfo>,
     by_pid: HashMap<u32, Vec<ProcessGuid>>,
     children: HashMap<ProcessGuid, Vec<ProcessGuid>>,
+    /// Normalised image path → processes with that image (V-L14).
+    by_image: HashMap<String, Vec<ProcessGuid>>,
     retention_ms: i64,
     max_entries: usize,
 }
@@ -111,9 +113,23 @@ impl ProcessTable {
             procs: HashMap::new(),
             by_pid: HashMap::new(),
             children: HashMap::new(),
+            by_image: HashMap::new(),
             retention_ms,
             max_entries: max_entries.max(16),
         }
+    }
+
+    /// Processes (live or retained) whose image is `path` (case-insensitive,
+    /// `/` or `\`, `\\?\` / `\??\` prefixes and quotes ignored).
+    pub fn by_image(&self, path: &str) -> Vec<&ProcessInfo> {
+        let k = image_key(path);
+        if k.is_empty() {
+            return vec![];
+        }
+        self.by_image
+            .get(&k)
+            .map(|v| v.iter().filter_map(|g| self.procs.get(g)).collect())
+            .unwrap_or_default()
     }
 
     /// Parent of a process: by `parent_guid` when known, else the live (or most
@@ -188,9 +204,31 @@ impl ProcessTable {
                 }
             }
         }
+        let ik = image_key(&info.image);
+        if let Some(old) = self.procs.get(&guid) {
+            let ok = image_key(&old.image);
+            if ok != ik {
+                self.unindex_image(&ok, &guid);
+            }
+        }
+        if !ik.is_empty() {
+            let v = self.by_image.entry(ik).or_default();
+            if !v.contains(&guid) {
+                v.push(guid.clone());
+            }
+        }
         self.procs.insert(guid, info);
         if self.procs.len() > self.max_entries {
             self.enforce_cap();
+        }
+    }
+
+    fn unindex_image(&mut self, key: &str, guid: &ProcessGuid) {
+        if let Some(v) = self.by_image.get_mut(key) {
+            v.retain(|g| g != guid);
+            if v.is_empty() {
+                self.by_image.remove(key);
+            }
         }
     }
 
@@ -260,6 +298,7 @@ impl ProcessTable {
         let Some(p) = self.procs.remove(guid) else {
             return;
         };
+        self.unindex_image(&image_key(&p.image), guid);
         if let Some(v) = self.by_pid.get_mut(&p.pid) {
             v.retain(|g| g != guid);
             if v.is_empty() {
@@ -289,6 +328,18 @@ impl ProcessTable {
             self.children.remove(guid);
         }
     }
+}
+
+/// Comparison key of an image path for [`ProcessTable::by_image`].
+pub fn image_key(path: &str) -> String {
+    let l = path
+        .trim()
+        .trim_matches('"')
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    l.trim_start_matches(r"\\?\")
+        .trim_start_matches(r"\??\")
+        .to_string()
 }
 
 #[cfg(test)]
@@ -409,5 +460,29 @@ mod tests {
         assert!(t.len() <= 100);
         // the newest survive
         assert!(t.get(&g("q199")).is_some());
+    }
+}
+
+#[cfg(test)]
+mod image_index_tests {
+    use super::tests::info;
+    use super::*;
+
+    #[test]
+    fn by_image_tracks_insert_replace_and_removal() {
+        let mut t = ProcessTable::with_limits(1000, 100);
+        t.insert(info("a", 1, None, 0, 0, r"C:\Tools\x.exe"));
+        t.insert(info("b", 2, None, 0, 1, r"c:/tools/X.EXE"));
+        t.insert(info("c", 3, None, 0, 2, r"C:\Tools\y.exe"));
+        assert_eq!(t.by_image(r"\\?\C:\TOOLS\x.exe").len(), 2);
+        assert_eq!(t.by_image(r#""C:\Tools\y.exe""#).len(), 1);
+        // replace with a different image re-indexes
+        t.insert(info("c", 3, None, 0, 2, r"C:\Tools\x.exe"));
+        assert_eq!(t.by_image(r"C:\Tools\x.exe").len(), 3);
+        assert!(t.by_image(r"C:\Tools\y.exe").is_empty());
+        t.mark_exit(&ProcessGuid("a".into()), 5);
+        t.evict(2000);
+        assert_eq!(t.by_image(r"C:\Tools\x.exe").len(), 2);
+        assert!(t.by_image("").is_empty());
     }
 }

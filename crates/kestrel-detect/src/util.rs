@@ -224,6 +224,12 @@ pub fn describe_proc(p: &ProcessInfo) -> String {
     }
 }
 
+/// SYSTEM account by SID or name (`S-1-5-18`, `NT AUTHORITY\SYSTEM`, `SYSTEM`).
+pub fn is_system_user(user: Option<&str>) -> bool {
+    user.map(|u| u.trim().to_ascii_lowercase())
+        .is_some_and(|u| u == "s-1-5-18" || u == r"nt authority\system" || u == "system")
+}
+
 /// Join with commas and a final "and".
 pub fn join_and(items: &[String]) -> String {
     match items.len() {

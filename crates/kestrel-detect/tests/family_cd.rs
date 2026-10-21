@@ -909,7 +909,9 @@ fn cd10_reg_save_sam_kills_system_alerts() {
     let sam = alert_for(&out, "CD-10", "reg-5");
     assert_eq!(sam.alert.severity, Severity::Critical);
     assert_eq!(killed(&sam.actions), vec!["reg-5"]);
-    assert_eq!(quarantined(&sam.actions), vec![r"C:\Users\Public\sam.save"]);
+    // V-H4: the output path is attacker text and C:\Users\Public is not the
+    // subject's own profile, so it is not quarantined (only the kill stays).
+    assert!(quarantined(&sam.actions).is_empty(), "{:?}", sam.actions);
     let sys = alert_for(&out, "CD-10", "reg-6");
     assert_eq!(sys.alert.severity, Severity::High);
     assert!(sys.actions.is_empty());

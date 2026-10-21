@@ -869,15 +869,32 @@ fn defragsvc_reading_a_decoy_is_ignored() {
     e.arm_canary(&decoy);
     let svchost = r"C:\Windows\System32\svchost.exe";
     let ms = Some("Microsoft Windows Publisher");
-    e.process(&start(
-        0,
-        "defrag",
-        70,
-        svchost,
-        r"C:\Windows\system32\svchost.exe -k defragsvc",
-        None,
-        SignatureState::Valid,
-        ms,
+    // V-M12: the exemption needs SYSTEM and a services.exe parent.
+    e.process(&as_user(
+        start(
+            -10,
+            "scm",
+            60,
+            r"C:\Windows\System32\services.exe",
+            r"C:\Windows\system32\services.exe",
+            None,
+            SignatureState::Valid,
+            ms,
+        ),
+        r"NT AUTHORITY\SYSTEM",
+    ));
+    e.process(&as_user(
+        start(
+            0,
+            "defrag",
+            70,
+            svchost,
+            r"C:\Windows\system32\svchost.exe -k defragsvc",
+            Some(("scm", 60)),
+            SignatureState::Valid,
+            ms,
+        ),
+        "S-1-5-18",
     ));
     let out = e.process(&read(10, "defrag", 70, &decoy));
     assert!(rule_ids(&out).is_empty(), "{}", dump(&out));

@@ -402,9 +402,13 @@ fn ps07_service_installs() {
         removals(&user_path.actions),
         [(AutorunKind::Service, "WinDefendUpd".into(), None, None)]
     );
-    assert_eq!(
-        quarantined(&user_path.actions),
-        [r"C:\Users\Public\svc\wdupd.exe"]
+    // V-H4: the payload path is attacker text in a shared folder the
+    // installer was not seen creating, so it is not quarantined (the service
+    // is still disabled and the installer killed).
+    assert!(
+        quarantined(&user_path.actions).is_empty(),
+        "{:?}",
+        user_path.actions
     );
     assert_eq!(kills(&user_path.actions), [("inst".to_string(), true)]);
     // smbexec-style cmd wrapper, creator unknown: disable only — no kill of
@@ -529,9 +533,12 @@ fn ps10_winlogon_and_bootexecute_restore_defaults() {
         ]
     );
     let userinit = ps(&out)[0];
-    assert_eq!(
-        quarantined(&userinit.actions),
-        [r"C:\Users\Public\svc\u.exe"]
+    // V-H4: C:\Users\Public is not the writer's profile and the writer was
+    // not seen creating the file: no quarantine of an attacker-named path.
+    assert!(
+        quarantined(&userinit.actions).is_empty(),
+        "{:?}",
+        userinit.actions
     );
     assert_eq!(kills(&userinit.actions), [("evil".to_string(), true)]);
 }

@@ -22,9 +22,9 @@ use crate::catalog::meta;
 use crate::paths::{glob_match, normalize_path, BenignKind, BENIGN_READERS};
 use crate::protect;
 use kestrel_common::{
-    file_name_lower, AutorunKind, Event, EventData, FileOp, PathClass, ProcessGuid, ProcessInfo,
-    ProcessStart, RegistryOp, ResponseAction, RuleCategory, RuleMeta, ServiceInstall, Severity,
-    SignatureState, TargetProcess, TimestampMs,
+    file_name_lower, Attribution, AutorunKind, Event, EventData, FileOp, PathClass, ProcessGuid,
+    ProcessInfo, ProcessStart, RegistryOp, ResponseAction, RuleCategory, RuleMeta, ServiceInstall,
+    Severity, SignatureState, TargetProcess, TimestampMs,
 };
 use std::collections::HashMap;
 
@@ -132,9 +132,41 @@ impl CredDump {
 
 impl Family for CredDump {
     fn on_event(&mut self, ctx: &Ctx, e: &Event, out: &mut Vec<FamilyHit>) {
-        if e.pid == 0 || e.pid == 4 {
+        // Unattributed registry / service changes (pid 0) are still judged
+        // on their content (V-H7); everything else needs a real actor.
+        let attributed_kind = super::carries_attribution(e);
+        if (e.pid == 0 && !attributed_kind) || e.pid == 4 {
             return;
         }
+        let start = out.len();
+        self.dispatch(ctx, e, out);
+        // V-H5/H6/H7: never act on a guessed or unknown writer; the value
+        // itself is still remediated.
+        if attributed_kind {
+            let attr = ctx.attribution(e);
+            for h in out[start..].iter_mut() {
+                h.apply_attribution(attr, e.ts);
+            }
+        }
+    }
+
+    fn tick(&mut self, ctx: &Ctx, _out: &mut Vec<FamilyHit>) {
+        self.prune(ctx.now);
+        if self
+            .shadow_created
+            .is_some_and(|t| ctx.now.saturating_sub(t) > SHADOW_WINDOW_MS)
+        {
+            self.shadow_created = None;
+        }
+    }
+
+    fn forget(&mut self, guid: &ProcessGuid) {
+        self.procs.remove(guid);
+    }
+}
+
+impl CredDump {
+    fn dispatch(&mut self, ctx: &Ctx, e: &Event, out: &mut Vec<FamilyHit>) {
         match &e.data {
             EventData::ProcessStart(ps) => self.on_start(ctx, e, ps, out),
             EventData::ProcessAccess(t) => self.on_access(ctx, e, t, out),
@@ -159,20 +191,6 @@ impl Family for CredDump {
             EventData::ServiceInstalled(s) => self.on_service(ctx, e, s, out),
             _ => {}
         }
-    }
-
-    fn tick(&mut self, ctx: &Ctx, _out: &mut Vec<FamilyHit>) {
-        self.prune(ctx.now);
-        if self
-            .shadow_created
-            .is_some_and(|t| ctx.now.saturating_sub(t) > SHADOW_WINDOW_MS)
-        {
-            self.shadow_created = None;
-        }
-    }
-
-    fn forget(&mut self, guid: &ProcessGuid) {
-        self.procs.remove(guid);
     }
 }
 
@@ -221,7 +239,13 @@ impl CredDump {
             } else {
                 let mut actions = vec![kill(&p)];
                 if let Some(f) = &file_arg {
-                    actions.push(quarantine_path(f));
+                    // V-H4: the path is attacker text (the dump may even
+                    // fail): quarantine only inside the subject's own
+                    // profile. The kernel-observed write (CD-04) still
+                    // quarantines wherever the dump really lands.
+                    if ctx.attacker_path_ok(f, p.user.as_deref()) {
+                        actions.push(quarantine_path(f));
+                    }
                     self.state(&p.guid, e.ts).dump_target = Some(f.clone());
                 }
                 let mut h = FamilyHit::new(
@@ -376,7 +400,11 @@ impl CredDump {
                     );
                     if strong {
                         let mut actions = vec![kill(&p)];
-                        if let Some(o) = &outfile {
+                        // V-H4: attacker-named output path.
+                        if let Some(o) = outfile
+                            .as_ref()
+                            .filter(|o| ctx.attacker_path_ok(o, p.user.as_deref()))
+                        {
                             actions.push(quarantine_path(o));
                         }
                         h = h.with_actions(actions);
@@ -543,7 +571,11 @@ impl CredDump {
         // ---- CD-01 (behavioural branch): rundll32 → LSASS ----------------
         if name == "rundll32.exe" {
             let mut actions = vec![kill(&p)];
-            if let Some(f) = &dump_target {
+            // V-H4: still a path from the command line, not an observed write.
+            if let Some(f) = dump_target
+                .as_ref()
+                .filter(|f| ctx.attacker_path_ok(f, p.user.as_deref()))
+            {
                 actions.push(quarantine_path(f));
             }
             let mut h = FamilyHit::new(
@@ -887,7 +919,9 @@ impl CredDump {
             return;
         }
         let p = proc_of(ctx, e);
-        if ctx.is_agent(&p) {
+        // Only the agent as the *exact* writer is its own work; a guess that
+        // lands on it is an unknown writer (V-H6).
+        if ctx.attribution(e) == Attribution::Exact && ctx.is_agent(&p) {
             return;
         }
         let num = data.and_then(parse_num);
@@ -939,7 +973,9 @@ impl CredDump {
                 "security packages" | "authentication packages" | "notification packages"
             ))
             || (nk == LSA_OSCONFIG && vn == "security packages");
-        if pkg_value && set && !installer_writer(ctx, &p) {
+        // A writer exemption needs the writer to be known exactly (V-H6).
+        let exact = ctx.attribution(e) == Attribution::Exact;
+        if pkg_value && set && !(exact && installer_writer(ctx, &p)) {
             let unknown: Vec<String> = data
                 .unwrap_or("")
                 .split(['\n', ',', ';', '\0'])
@@ -955,6 +991,8 @@ impl CredDump {
                 let actions = unknown
                     .iter()
                     .filter(|s| s.contains('\\'))
+                    // V-H4: package paths are attacker text.
+                    .filter(|s| ctx.attacker_path_ok(s, p.user.as_deref()))
                     .map(|s| quarantine_path(s))
                     .collect();
                 let mut h = FamilyHit::new(
@@ -1014,7 +1052,7 @@ impl CredDump {
         } else if nk == KSLD
             && set
             && (vn == "imagepath" || vn == "allowedprocessname")
-            && !defender_writer(ctx, &p)
+            && !(exact && defender_writer(ctx, &p))
         {
             Some("changed the Microsoft Defender KslD driver service (the KslDump technique reads LSASS memory through an old, vulnerable copy)")
         } else {
@@ -1054,7 +1092,7 @@ impl CredDump {
             return;
         }
         let p = proc_of(ctx, e);
-        if ctx.is_agent(&p) {
+        if ctx.attribution(e) == Attribution::Exact && ctx.is_agent(&p) {
             return;
         }
         let mut h = FamilyHit::new(
@@ -1481,11 +1519,12 @@ fn normalize_key(key: &str) -> String {
             k = format!("{to}{r}");
         }
     }
-    for cs in [r"\controlset001\", r"\controlset002\", r"\controlset003\"] {
-        if let Some(i) = k.find(cs) {
-            if &k[..i] == r"hklm\system" {
-                k = format!(r"hklm\system\currentcontrolset\{}", &k[i + cs.len()..]);
-            }
+    // Any numbered control set (`ControlSet001` … `ControlSet999`), V-L18.
+    if let Some(rest) = k.strip_prefix(r"hklm\system\controlset") {
+        let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+        if digits > 0 && (rest.len() == digits || rest.as_bytes()[digits] == b'\\') {
+            let tail = rest[digits..].trim_start_matches('\\');
+            k = format!(r"hklm\system\currentcontrolset\{tail}");
         }
     }
     if let Some(r) = k.strip_prefix(r"hklm\software\wow6432node\") {
@@ -1821,5 +1860,41 @@ mod tests {
         assert_eq!(parse_num("0x200"), Some(512));
         assert_eq!(parse_num("dword:00000200"), Some(512));
         assert_eq!(parse_num("abc"), None);
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::normalize_key;
+
+    #[test]
+    fn any_numbered_control_set_folds_v_l18() {
+        for cs in [
+            "ControlSet001",
+            "ControlSet002",
+            "ControlSet004",
+            "ControlSet017",
+        ] {
+            assert_eq!(
+                normalize_key(&format!(
+                    r"\REGISTRY\MACHINE\SYSTEM\{cs}\Control\SecurityProviders\WDigest"
+                )),
+                r"hklm\system\currentcontrolset\control\securityproviders\wdigest",
+                "{cs}"
+            );
+        }
+        assert_eq!(
+            normalize_key(r"HKLM\SYSTEM\ControlSet005"),
+            r"hklm\system\currentcontrolset"
+        );
+        // not a control set
+        assert_eq!(
+            normalize_key(r"HKLM\SYSTEM\ControlSetX\Control"),
+            r"hklm\system\controlsetx\control"
+        );
+        assert_eq!(
+            normalize_key(r"HKLM\SOFTWARE\ControlSet001\x"),
+            r"hklm\software\controlset001\x"
+        );
     }
 }

@@ -27,9 +27,9 @@ use super::autorun::{self, Env, Resolved};
 use super::{Ctx, Family, FamilyHit};
 use crate::catalog::meta;
 use kestrel_common::{
-    file_name_lower, Alert, AutorunKind, Event, EventData, FileOp, PathClass, ProcessGuid,
-    ProcessInfo, ProcessStart, RegistryOp, ResponseAction, RuleCategory, RuleMeta, RuleMode,
-    Severity, SignatureState, TaskChange, TaskOp, TimestampMs, WmiBinding,
+    file_name_lower, Alert, Attribution, AutorunKind, Event, EventData, FileOp, PathClass,
+    ProcessGuid, ProcessInfo, ProcessStart, RegistryOp, ResponseAction, RuleCategory, RuleMeta,
+    RuleMode, Severity, SignatureState, TaskChange, TaskOp, TimestampMs, WmiBinding,
 };
 use std::collections::HashMap;
 
@@ -229,6 +229,8 @@ const TRACKED_EXTS: &[&str] = &[
 #[derive(Debug, Clone)]
 struct Dropped {
     ts: TimestampMs,
+    /// The process that created it (kernel-attributed file event).
+    by: ProcessGuid,
 }
 
 /// One autorun attributed to a process (PS-15 rollback).
@@ -274,6 +276,12 @@ struct Writer {
     signed_program: bool,
     /// Known unsigned / invalid signature, or a LOLBin / script host.
     unsigned_or_lolbin: bool,
+    /// How the sensor determined the writer (V-H5/H6/H7).
+    attribution: Attribution,
+    /// The writer's parent is not an untrusted actor and not alerted (or is
+    /// unknown). A signed tool (`reg.exe`, `schtasks.exe`) run by malware
+    /// must not launder the write (V-H6).
+    parent_trusted: bool,
 }
 
 impl Writer {
@@ -281,8 +289,28 @@ impl Writer {
         self.attributed && (self.untrusted || self.alerted)
     }
 
+    /// Windows component writer that exempts a change: exact attribution
+    /// and a trusted parent.
+    fn trusted_system(&self) -> bool {
+        self.system && self.exempt_ok()
+    }
+
+    /// Validly signed management tool writer that lowers a hit to Audit
+    /// level: exact attribution and a trusted parent.
+    fn trusted_signed_program(&self) -> bool {
+        self.signed_program && self.exempt_ok()
+    }
+
+    fn exempt_ok(&self) -> bool {
+        self.attribution == Attribution::Exact && self.parent_trusted && !self.alerted
+    }
+
     fn describe(&self) -> String {
         match &self.info {
+            Some(p) if self.attribution == Attribution::Heuristic => format!(
+                "{} (writer inferred by correlation)",
+                crate::util::describe_proc(p)
+            ),
             Some(p) if self.attributed => crate::util::describe_proc(p),
             Some(p) => format!(
                 "{} (creator not attributed)",
@@ -303,6 +331,8 @@ struct Payload {
     signed: SignatureState,
     motw: bool,
     just_dropped: bool,
+    /// Creator of the payload file when it was seen being dropped.
+    dropped_by: Option<ProcessGuid>,
     running: Vec<ProcessInfo>,
 }
 
@@ -517,6 +547,32 @@ fn quarantine(path: &str) -> ResponseAction {
     }
 }
 
+/// Shells a person types in. Launched by Explorer or hosted by a terminal,
+/// they are the user's interactive session, not part of a malicious tree.
+const INTERACTIVE_SHELLS: &[&str] = &[
+    "cmd.exe",
+    "powershell.exe",
+    "pwsh.exe",
+    "powershell_ise.exe",
+    "windowsterminal.exe",
+    "wt.exe",
+    "openconsole.exe",
+];
+
+fn interactive_shell(ctx: &Ctx, p: &ProcessInfo) -> bool {
+    if !INTERACTIVE_SHELLS.contains(&file_name_lower(&p.image).as_str()) {
+        return false;
+    }
+    match ctx.table().parent_of(p) {
+        Some(pp) => matches!(
+            file_name_lower(&pp.image).as_str(),
+            "explorer.exe" | "windowsterminal.exe" | "wt.exe" | "openconsole.exe"
+        ),
+        // Parent gone or never seen: assume the user's shell (never roll back).
+        None => true,
+    }
+}
+
 fn bounded_insert(m: &mut HashMap<ProcessGuid, TimestampMs>, g: &ProcessGuid, ts: TimestampMs) {
     if m.len() >= MAX_GUIDS && !m.contains_key(g) {
         if let Some(oldest) = m.iter().min_by_key(|(_, t)| **t).map(|(k, _)| k.clone()) {
@@ -551,7 +607,12 @@ impl Persistence {
     // ---- context ----
 
     fn writer(&self, ctx: &Ctx, e: &Event) -> Writer {
-        let info = ctx.process(&e.guid).cloned();
+        let attribution = ctx.attribution(e);
+        let info = match attribution {
+            // pid 0: nobody to look up, never the table entry of guid "".
+            Attribution::None => None,
+            _ => ctx.process(&e.guid).cloned(),
+        };
         let Some(p) = info else {
             return Writer {
                 info: None,
@@ -561,6 +622,8 @@ impl Persistence {
                 system: false,
                 signed_program: false,
                 unsigned_or_lolbin: false,
+                attribution: Attribution::None,
+                parent_trusted: false,
             };
         };
         // Task Scheduler / SCM / WMI hosts stand in when the creator is unknown.
@@ -568,7 +631,13 @@ impl Persistence {
             file_name_lower(&p.image).as_str(),
             "svchost.exe" | "services.exe" | "wmiprvse.exe" | "taskhostw.exe" | "taskeng.exe"
         ) && ctx.system_trusted(&p);
-        let attributed = !host && !ctx.is_agent(&p);
+        // Only a kernel-attributed writer is "the" writer: a heuristic guess
+        // is never recorded for PS-15, never killed and never exempts.
+        let attributed = !host && !ctx.is_agent(&p) && attribution == Attribution::Exact;
+        let parent_trusted = match ctx.table().parent_of(&p) {
+            Some(pp) => !ctx.untrusted_actor(pp) && !self.tree_alerted(ctx, &pp.guid),
+            None => true,
+        };
         let untrusted = ctx.untrusted_actor(&p);
         let alerted = self.tree_alerted(ctx, &p.guid);
         let system = ctx.system_trusted(&p);
@@ -589,6 +658,8 @@ impl Persistence {
             system,
             signed_program,
             unsigned_or_lolbin,
+            attribution,
+            parent_trusted,
         }
     }
 
@@ -640,11 +711,8 @@ impl Persistence {
             ..Default::default()
         };
         // signature / MOTW only when the payload is a known process image
-        let mut procs: Vec<&ProcessInfo> = ctx
-            .table()
-            .iter()
-            .filter(|q| !q.image.is_empty() && same_path(&q.image, &path))
-            .collect();
+        // (image index: no full table scan per event, V-L14)
+        let mut procs: Vec<&ProcessInfo> = ctx.table().by_image(&path);
         procs.sort_by_key(|q| std::cmp::Reverse(q.start_ts));
         if let Some(q) = procs.first() {
             p.signed = q.signed;
@@ -657,10 +725,12 @@ impl Persistence {
             .map(|q| (*q).clone())
             .collect();
         let key = path.replace('/', "\\").to_ascii_lowercase();
-        p.just_dropped = self
+        let drop = self
             .drops
             .get(&key)
-            .is_some_and(|d| ctx.now - d.ts < JUST_DROPPED_MS);
+            .filter(|d| ctx.now - d.ts < JUST_DROPPED_MS);
+        p.just_dropped = drop.is_some();
+        p.dropped_by = drop.map(|d| d.by.clone());
         p.path = Some(path);
         p
     }
@@ -771,8 +841,7 @@ impl Persistence {
         if loc.is_kestrel() {
             return;
         }
-        let quarantine = p
-            .quarantinable()
+        let quarantine = Self::owned_payload(p, w)
             .filter(|q| loc.kind != AutorunKind::StartupFile || !same_path(q, &loc.location));
         let rec = Rec {
             ts: ctx.now,
@@ -860,15 +929,27 @@ impl Persistence {
             return vec![];
         }
         let mut v = vec![loc.remove()];
-        if let Some(q) = p.quarantinable() {
+        if let Some(q) = Self::owned_payload(p, w) {
             if loc.kind != AutorunKind::StartupFile || !same_path(&q, &loc.location) {
                 v.push(quarantine(&q));
             }
         }
         let writer_guid = w.info.as_ref().map(|i| i.guid.clone());
-        if kill_payload {
+        let writer_user = w
+            .info
+            .as_ref()
+            .and_then(|i| i.user.as_deref())
+            .map(str::to_ascii_lowercase);
+        // V-M11: only a payload the writer owns (its own profile, or a file
+        // it was seen creating), and only instances run by the same account.
+        if kill_payload && Self::owned_payload(p, w).is_some() {
             for r in &p.running {
+                let same_user = match (&writer_user, r.user.as_deref()) {
+                    (Some(wu), Some(ru)) => wu == &ru.to_ascii_lowercase(),
+                    _ => false,
+                };
                 if Some(&r.guid) != writer_guid.as_ref()
+                    && same_user
                     && !ctx.protected(r)
                     && !ctx.is_agent(r)
                     && r.path_class.is_user_writable()
@@ -897,6 +978,29 @@ impl Persistence {
             }
         }
         v
+    }
+
+    /// The quarantinable payload path when the (exactly attributed) writer
+    /// owns it (V-H4 / V-M11): the path came from autorun text the writer
+    /// chose, so it is only acted on inside the writer's own profile, or
+    /// when the writer was seen creating that very file (never under
+    /// `\Windows\` or `\ProgramData\Microsoft\`).
+    fn owned_payload(p: &Payload, w: &Writer) -> Option<String> {
+        let q = p.quarantinable()?;
+        let info = w.info.as_ref()?;
+        if w.attribution != Attribution::Exact || !w.attributed {
+            return None;
+        }
+        if super::attacker_named_quarantinable(&q, info.user.as_deref()) {
+            return Some(q);
+        }
+        let created_by_writer = p.dropped_by.as_ref() == Some(&info.guid);
+        let n = crate::paths::normalize_path(&q);
+        let rest = crate::util::strip_drive(&n);
+        let sensitive = rest.starts_with(r"\windows\")
+            || rest.starts_with(r"\programdata\microsoft\")
+            || rest.split('\\').any(|c| c == "..");
+        (created_by_writer && !sensitive).then_some(q)
     }
 
     fn forget_rec(&mut self, g: &ProcessGuid, remove: &ResponseAction) {
@@ -1041,7 +1145,7 @@ impl Persistence {
             Severity::High
         };
         // A validly signed management tool (RMM, updater) writing it: Audit level.
-        let audit_level = w.attributed && w.signed_program && !w.alerted;
+        let audit_level = w.attributed && w.trusted_signed_program();
         let actions = if audit_level {
             vec![]
         } else {
@@ -1086,7 +1190,13 @@ impl Persistence {
                 self.prune(ctx.now);
             }
             if self.drops.len() < MAX_DROPS {
-                self.drops.insert(lower.clone(), Dropped { ts: ctx.now });
+                self.drops.insert(
+                    lower.clone(),
+                    Dropped {
+                        ts: ctx.now,
+                        by: e.guid.clone(),
+                    },
+                );
             }
         }
         // PS-03: top-level item of a user or common Startup folder.
@@ -1108,15 +1218,16 @@ impl Persistence {
         if let Some(info) = &w.info {
             let fname = file_name_lower(&info.image);
             // user drag-and-drop / signed installers
-            if w.system && fname == "explorer.exe" {
+            if w.trusted_system() && fname == "explorer.exe" {
                 return;
             }
-            if w.signed_program && !w.alerted {
+            if w.trusted_signed_program() {
                 return;
             }
             if fname == "msiexec.exe"
                 && matches!(info.path_class, PathClass::System)
                 && info.signed == SignatureState::Valid
+                && w.exempt_ok()
             {
                 return;
             }
@@ -1301,10 +1412,9 @@ impl Persistence {
         if let Some(svc) = rest.strip_prefix(r"system\currentcontrolset\services\") {
             if !svc.contains('\\') && v == "imagepath" && !data.trim().is_empty() {
                 let w = self.writer(ctx, e);
-                let by_scm = w
-                    .info
-                    .as_ref()
-                    .is_some_and(|p| file_name_lower(&p.image) == "services.exe" && w.system);
+                let by_scm = w.info.as_ref().is_some_and(|p| {
+                    file_name_lower(&p.image) == "services.exe" && w.trusted_system()
+                });
                 if !by_scm {
                     let name = key.rsplit('\\').next().unwrap_or(svc).to_string();
                     self.ps07(ctx, e, &name, data, None, None, out);
@@ -1358,7 +1468,7 @@ impl Persistence {
             return; // default location (also when redirected with the profile)
         }
         // Group Policy folder redirection (gpsvc in svchost, gpscript)
-        if w.system {
+        if w.trusted_system() {
             return;
         }
         let common = v == "common startup";
@@ -1793,7 +1903,7 @@ impl Persistence {
         let p = self.classify(ctx, &r);
         self.record(ctx, &w, &loc, &p, out);
         // Kiosk / Shell Launcher configuration by a Windows component: Audit level.
-        let audit_level = w.system || (w.signed_program && !w.alerted);
+        let audit_level = w.trusted_system() || w.trusted_signed_program();
         let actions = if audit_level {
             vec![]
         } else {
@@ -1889,7 +1999,7 @@ impl Persistence {
             what: "the Session Manager BootExecute value".into(),
         };
         self.record(ctx, &w, &loc, &Payload::default(), out);
-        let audit_level = w.system || (w.signed_program && !w.alerted);
+        let audit_level = w.trusted_system() || w.trusted_signed_program();
         let actions = if audit_level {
             vec![]
         } else {
@@ -2038,6 +2148,14 @@ impl Family for Persistence {
             }
             _ => {}
         }
+        // V-H5/H6/H7: a guessed or unknown writer is never acted on; the
+        // persistence object itself is still removed.
+        if super::carries_attribution(e) {
+            let attr = ctx.attribution(e);
+            for h in out[start..].iter_mut() {
+                h.apply_attribution(attr, e.ts);
+            }
+        }
         self.flush_late(ctx, start, out);
     }
 
@@ -2073,7 +2191,13 @@ impl Family for Persistence {
                 .into_iter()
                 .map(|p| p.guid),
         );
+        // V-L15: never an interactive shell the user typed in (an
+        // Explorer- or terminal-launched cmd / PowerShell / terminal): its
+        // other autoruns are the user's own work.
         for a in ctx.ancestry(&subj.guid, 3) {
+            if interactive_shell(ctx, &a) {
+                break;
+            }
             if ctx.untrusted_actor(&a) && !ctx.system_trusted(&a) && !ctx.protected(&a) {
                 tree.push(a.guid);
             } else {
@@ -2085,8 +2209,10 @@ impl Family for Persistence {
         let consume = ctx.protect(PS15);
         let mut recs = Vec::new();
         for g in &tree {
-            if consume && self.rolled.len() < MAX_GUIDS {
-                self.rolled.insert(g.clone(), ctx.now);
+            if consume {
+                // Bounded with oldest-first eviction (V-L15: never stop
+                // recording once full).
+                bounded_insert(&mut self.rolled, g, ctx.now);
             }
             let v = if consume {
                 self.created.remove(g)
@@ -2218,6 +2344,18 @@ pub(crate) fn catalog() -> Vec<RuleMeta> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rolled_set_evicts_oldest_instead_of_filling_up_v_l15() {
+        let mut m: HashMap<ProcessGuid, TimestampMs> = HashMap::new();
+        for i in 0..(MAX_GUIDS as i64 + 50) {
+            bounded_insert(&mut m, &ProcessGuid(format!("g{i}")), i);
+        }
+        assert_eq!(m.len(), MAX_GUIDS);
+        let last = ProcessGuid(format!("g{}", MAX_GUIDS + 49));
+        assert!(m.contains_key(&last), "late entries are still recorded");
+        assert!(!m.contains_key(&ProcessGuid("g0".into())));
+    }
 
     #[test]
     fn key_normalisation() {

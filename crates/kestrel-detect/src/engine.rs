@@ -770,6 +770,28 @@ struct Hit {
     attack: Option<Vec<String>>,
     /// Dedup key when it differs from the rule id (IOC alerts dedup per indicator).
     dedup_key: Option<String>,
+    /// Only `RemoveAutorun` actions survive; no suspend / kill / quarantine.
+    /// With an [`unknown_subject`] this is the one way a pid-0 subject is
+    /// emitted (V-H7).
+    remediation_only: bool,
+}
+
+/// Guid of the synthetic subject used for persistence / credential changes
+/// whose writer is unknown (`Attribution::None`, pid 0).
+pub(crate) const UNKNOWN_WRITER_GUID: &str = "unattributed-writer";
+
+/// Synthetic alert subject for an unattributed change: pid 0, no image, a
+/// fixed guid. `emit` accepts it only on `remediation_only` hits, so it can
+/// never be killed, suspended or quarantined (the action filter also refuses
+/// pid 0).
+pub(crate) fn unknown_subject(ts: TimestampMs) -> ProcessInfo {
+    let mut p = placeholder(&ProcessGuid(UNKNOWN_WRITER_GUID.into()), 0, ts);
+    p.cmdline = "(unknown writer: the change could not be attributed to a process)".into();
+    p
+}
+
+pub(crate) fn is_unknown_subject(p: &ProcessInfo) -> bool {
+    p.pid == 0 && p.guid.0 == UNKNOWN_WRITER_GUID && p.image.is_empty()
 }
 
 impl Hit {
@@ -792,6 +814,7 @@ impl Hit {
             author: None,
             attack: None,
             dedup_key: None,
+            remediation_only: false,
         }
     }
 }
@@ -837,6 +860,46 @@ fn placeholder(guid: &ProcessGuid, pid: u32, ts: TimestampMs) -> ProcessInfo {
 /// [`PathClass::of_with_system_drive`]).
 fn path_class_of(image: &str, system_drive: char) -> PathClass {
     PathClass::of_with_system_drive(image, system_drive)
+}
+
+/// Comparison key for the agent image: normalised, lower-case, **with** the
+/// drive letter (V-H1). A configured path without a drive letter is anchored
+/// on the system drive. Empty when unknown.
+fn agent_image_key(configured: &str, system_drive: char) -> String {
+    let t = configured.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    let n = normalize_path(t);
+    if has_drive_letter(&n) {
+        n
+    } else if n.starts_with('\\') && !n.starts_with(r"\\") {
+        format!("{system_drive}:{n}")
+    } else {
+        String::new()
+    }
+}
+
+/// Locations an engine-proposed quarantine never touches, whatever the rule
+/// (V-H4 defence in depth; the agent's quarantine policy re-checks): task
+/// definitions and machine key stores.
+fn never_quarantine(path: &str) -> bool {
+    let n = normalize_path(path);
+    let rest = strip_drive(&n);
+    [
+        r"\windows\system32\tasks\",
+        r"\windows\syswow64\tasks\",
+        r"\windows\tasks\",
+        r"\programdata\microsoft\crypto\",
+    ]
+    .iter()
+    .any(|p| rest.starts_with(p))
+        || rest.split('\\').any(|c| c == "..")
+}
+
+fn has_drive_letter(n: &str) -> bool {
+    let b = n.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\'
 }
 
 /// Signature that grants no trust: unsigned, invalid (incl. revoked) or not
@@ -998,8 +1061,17 @@ fn runmru_lolbin(data_lower: &str) -> Option<&'static str> {
 pub(crate) struct EngineState {
     host: HostContext,
     system_drive: char,
+    /// Normalised full path of the agent image, *with* its drive letter
+    /// (V-H1: a copy on another volume / mounted ISO is not the agent).
     agent_image: String,
+    /// The agent process itself (image at `agent_image`).
     agent_guids: HashSet<ProcessGuid>,
+    /// Direct children the agent recorded spawning (`ProcessStart.agent_spawned`)
+    /// and `conhost.exe` attached to them. Never their other descendants.
+    /// Non-tamper rules skip them; TP-* rules still apply.
+    agent_children: HashSet<ProcessGuid>,
+    /// Cached guid of the genuine lsass.exe (V-L1 / V-L14).
+    lsass_guid: Option<ProcessGuid>,
     server_ips: HashSet<String>,
     policy: Policy,
     exclusions: Vec<Excl>,
@@ -1029,11 +1101,6 @@ fn kind_bit(k: EventKind) -> u32 {
 impl EngineState {
     pub fn new(host: HostContext, policy: Policy, bundle: RuleBundle) -> Result<Self, DetectError> {
         let sigma = sigma::compile_bundle(&bundle.rules)?;
-        let agent_image = if host.agent_image.trim().is_empty() {
-            String::new()
-        } else {
-            driveless(&host.agent_image)
-        };
         let server_ips = host
             .server_ips
             .iter()
@@ -1045,11 +1112,14 @@ impl EngineState {
             .filter(|c| c.is_ascii_alphabetic())
             .map(|c| c.to_ascii_lowercase())
             .unwrap_or('c');
+        let agent_image = agent_image_key(&host.agent_image, system_drive);
         let mut s = EngineState {
             host,
             system_drive,
             agent_image,
             agent_guids: HashSet::new(),
+            agent_children: HashSet::new(),
+            lsass_guid: None,
             server_ips,
             policy: Policy::default(),
             exclusions: vec![],
@@ -1115,9 +1185,11 @@ impl EngineState {
             // Recompute: the platform's classification may predate volume awareness.
             info.path_class = path_class_of(&info.image, self.system_drive);
         }
-        self.note_agent(&info);
+        // A snapshot cannot prove the agent spawned it: never agent_spawned.
+        self.note_agent(&info, false);
         let ts = info.start_ts;
         self.table.insert(info.clone());
+        self.note_lsass(&info);
         // Known-bad processes already running at agent start: report on the next call.
         let ev = Event {
             ts,
@@ -1181,7 +1253,7 @@ impl EngineState {
             p.signed = info.signed;
             p.signer = info.signer.clone();
         }
-        if self.is_agent_guid(guid) {
+        if self.is_agent_owned(guid) {
             return vec![];
         }
         let ev = Event {
@@ -1273,30 +1345,68 @@ impl EngineState {
     // helpers
     // ------------------------------------------------------------------
 
-    fn note_agent(&mut self, info: &ProcessInfo) {
-        if !self.agent_image.is_empty()
-            && !info.image.is_empty()
-            && driveless(&info.image) == self.agent_image
-        {
+    /// Is `image` the agent's own image? Full path *including* the drive
+    /// letter (V-H1): `D:\Program Files\Kestrel\kestrel-agent.exe` on a
+    /// mounted ISO or a `\Device\…` path without a drive is not the agent.
+    fn is_agent_image(&self, image: &str) -> bool {
+        !self.agent_image.is_empty()
+            && !image.is_empty()
+            && normalize_path(image) == self.agent_image
+    }
+
+    /// Conservative variant for "never act on our own binary": the exact
+    /// agent path, or a drive-less / device path whose rest matches it.
+    fn may_be_agent_image(&self, path: &str) -> bool {
+        if self.agent_image.is_empty() || path.is_empty() {
+            return false;
+        }
+        let n = normalize_path(path);
+        n == self.agent_image || (!has_drive_letter(&n) && n == strip_drive(&self.agent_image))
+    }
+
+    /// Record agent identity for a new process (V-H1). Parentage alone never
+    /// makes a process the agent's: a parent PID can be spoofed
+    /// (`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`) and the agent image is
+    /// executable by users. Only
+    /// * the agent image itself,
+    /// * a direct child the agent recorded spawning (`agent_spawned`, set by
+    ///   the sensor from the agent's own pid + creation-time record), and
+    /// * `conhost.exe` (System32) attached to one of those children
+    ///
+    /// count; the trust is never inherited further down the tree.
+    fn note_agent(&mut self, info: &ProcessInfo, agent_spawned: bool) {
+        if self.is_agent_image(&info.image) {
             self.agent_guids.insert(info.guid.clone());
             return;
         }
-        // Processes the agent starts itself (hardening checks via PowerShell,
-        // auditpol, the YARA scanner, msiexec for updates) and their children
-        // are the agent's own work: on a real host they tripped SigmaHQ
-        // "encoded PowerShell" rules on every hardening pass. Only the agent
-        // (SYSTEM, admin-only install folder) can make itself their parent.
-        let parent = info
-            .parent_guid
-            .clone()
-            .or_else(|| self.table.parent_of(info).map(|p| p.guid.clone()));
-        if parent.is_some_and(|g| self.agent_guids.contains(&g)) {
-            self.agent_guids.insert(info.guid.clone());
+        if agent_spawned {
+            self.agent_children.insert(info.guid.clone());
+            return;
+        }
+        if file_name_lower(&info.image) == "conhost.exe"
+            && path_class_of(&info.image, self.system_drive) == PathClass::System
+        {
+            let parent = info
+                .parent_guid
+                .clone()
+                .or_else(|| self.table.parent_of(info).map(|p| p.guid.clone()));
+            if parent
+                .is_some_and(|g| self.agent_guids.contains(&g) || self.agent_children.contains(&g))
+            {
+                self.agent_children.insert(info.guid.clone());
+            }
         }
     }
 
+    /// The agent process itself (exempt from every rule, never killed).
     fn is_agent_guid(&self, g: &ProcessGuid) -> bool {
         self.agent_guids.contains(g)
+    }
+
+    /// The agent or one of its recorded direct children: skipped by every
+    /// rule except TP-* (tamper).
+    fn is_agent_owned(&self, g: &ProcessGuid) -> bool {
+        self.agent_guids.contains(g) || self.agent_children.contains(g)
     }
 
     // ---- read-only accessors for rule families (`families::Ctx`) ----
@@ -1309,11 +1419,52 @@ impl EngineState {
         self.protected(p)
     }
 
+    /// The agent or a recorded agent child (families never take these as
+    /// subjects; families have no TP rules).
     pub(crate) fn is_agent_process(&self, p: &ProcessInfo) -> bool {
-        self.is_agent_guid(&p.guid)
-            || (!self.agent_image.is_empty()
-                && !p.image.is_empty()
-                && driveless(&p.image) == self.agent_image)
+        self.is_agent_owned(&p.guid) || self.is_agent_image(&p.image)
+    }
+
+    /// Cached genuine lsass.exe (V-L1 / V-L14), see [`Self::note_lsass`].
+    pub(crate) fn lsass_guid(&self) -> Option<&ProcessGuid> {
+        self.lsass_guid.as_ref()
+    }
+
+    /// Remember lsass.exe when it is the System32 image started by
+    /// wininit.exe (System32). Any other `lsass.exe` (a user launching a copy
+    /// of System32\lsass.exe, which then exits) never re-points it.
+    /// Call after `info` is in the table. Snapshot seeding may deliver
+    /// lsass before wininit, so a System32 wininit also adopts an lsass child
+    /// that is already known (a one-off scan: wininit starts once per boot).
+    fn note_lsass(&mut self, info: &ProcessInfo) {
+        let sys = |s: &Self, p: &ProcessInfo, name: &str| {
+            file_name_lower(&p.image) == name
+                && path_class_of(&p.image, s.system_drive) == PathClass::System
+        };
+        if sys(self, info, "lsass.exe") {
+            if self
+                .table
+                .parent_of(info)
+                .is_some_and(|p| sys(self, p, "wininit.exe"))
+            {
+                self.lsass_guid = Some(info.guid.clone());
+            }
+        } else if sys(self, info, "wininit.exe") {
+            let found = self
+                .table
+                .iter()
+                .filter(|p| p.exit_ts.is_none() && sys(self, p, "lsass.exe"))
+                .filter(|p| {
+                    self.table
+                        .parent_of(p)
+                        .is_some_and(|pp| pp.guid == info.guid)
+                })
+                .max_by_key(|p| p.start_ts)
+                .map(|p| p.guid.clone());
+            if found.is_some() {
+                self.lsass_guid = found;
+            }
+        }
     }
 
     pub(crate) fn system_drive(&self) -> char {
@@ -1377,6 +1528,7 @@ impl EngineState {
         hit.extra_evidence = h.extra_evidence;
         hit.dedup_key = h.dedup_key;
         hit.process = h.process;
+        hit.remediation_only = h.remediation_only;
         if h.audit_only {
             hit.mode_override = Some(RuleMode::Audit);
         }
@@ -1510,7 +1662,8 @@ impl EngineState {
                 ResponseAction::QuarantineFile { path, .. } => {
                     !path.is_empty()
                         && path_class_of(path, self.system_drive).is_user_writable()
-                        && driveless(path) != self.agent_image
+                        && !self.may_be_agent_image(path)
+                        && !never_quarantine(path)
                 }
                 ResponseAction::BlockDestination { ip, .. } => parse_ip(ip)
                     .is_some_and(|i| !self.server_ips.contains(&i.to_string()) && !i.is_loopback()),
@@ -1518,7 +1671,7 @@ impl EngineState {
                     // Never cut the network of shared OS binaries (svchost,
                     // explorer, …): that would take the whole host offline.
                     !image.is_empty()
-                        && driveless(image) != self.agent_image
+                        && !self.may_be_agent_image(image)
                         && !matches!(
                             path_class_of(image, self.system_drive),
                             PathClass::System | PathClass::Windows
@@ -1552,13 +1705,27 @@ impl EngineState {
             .take()
             .or_else(|| self.table.get(&hit.guid).cloned())
             .unwrap_or_else(|| placeholder(&hit.guid, ev.pid, ev.ts));
-        let agent_image = !self.agent_image.is_empty()
-            && !proc_.image.is_empty()
-            && driveless(&proc_.image) == self.agent_image;
-        if !hit.tamper
-            && (proc_.pid == 0 || proc_.pid == 4 || self.is_agent_guid(&proc_.guid) || agent_image)
-        {
+        let agent_itself = self.is_agent_guid(&proc_.guid) || self.is_agent_image(&proc_.image);
+        if !hit.tamper && (proc_.pid == 0 || proc_.pid == 4 || agent_itself) {
+            // Remediation-only hits (unattributed registry / task changes,
+            // V-H7) carry a synthetic "unknown writer" subject: they may
+            // only remove the persistence object, never touch a process.
+            if !(hit.remediation_only && is_unknown_subject(&proc_)) {
+                return;
+            }
+        }
+        // V-H1: the agent's recorded direct children (hardening PowerShell,
+        // kestrel-scan, msiexec) are skipped by every rule but TP-*.
+        let tp_rule = hit.tamper || hit.rule.to_ascii_uppercase().starts_with("TP-");
+        if !tp_rule && self.agent_children.contains(&proc_.guid) {
             return;
+        }
+        if hit.remediation_only {
+            hit.actions
+                .retain(|a| matches!(a, ResponseAction::RemoveAutorun { .. }));
+            hit.suspend = false;
+            hit.kill_at_expiry = false;
+            hit.strong = false;
         }
         if !hit.tamper && self.iocs.allowed_process(&proc_) {
             return;
@@ -1691,7 +1858,13 @@ impl EngineState {
                 hit.attack.clone().unwrap_or_default(),
             ),
         };
+        let unknown = is_unknown_subject(&proc_);
         let st = self.state(&hit.guid, ev.ts);
+        if unknown {
+            // The synthetic subject is shared by unrelated unattributed
+            // changes: never mix their evidence.
+            st.evidence.clear();
+        }
         // Family tick hits carry a synthetic trigger (pid 0, empty guid).
         if !(ev.pid == 0 && ev.guid.0.is_empty()) {
             st.add_evidence(ev);
@@ -1827,6 +2000,10 @@ impl EngineState {
             for g in self.table.evict(now) {
                 self.states.remove(&g);
                 self.agent_guids.remove(&g);
+                self.agent_children.remove(&g);
+                if self.lsass_guid.as_ref() == Some(&g) {
+                    self.lsass_guid = None;
+                }
                 for f in self.families.iter_mut() {
                     f.forget(&g);
                 }
@@ -1877,9 +2054,10 @@ impl EngineState {
             file_size: ps.file_size,
             path_class: path_class_of(&ps.image, self.system_drive),
         };
-        self.note_agent(&info);
+        self.note_agent(&info, ps.agent_spawned);
         self.table.insert(info.clone());
-        if self.is_agent_guid(&info.guid) {
+        self.note_lsass(&info);
+        if self.is_agent_owned(&info.guid) {
             return;
         }
         let name = file_name_lower(&info.image);
@@ -2208,7 +2386,9 @@ impl EngineState {
             .kill_intents
             .iter()
             .rev()
-            .find(|(t, g)| *t <= e.ts && first - t <= ST08_ATTRIBUTION_MS && !self.is_agent_guid(g))
+            .find(|(t, g)| {
+                *t <= e.ts && first - t <= ST08_ATTRIBUTION_MS && !self.is_agent_owned(g)
+            })
             .map(|k| k.1.clone());
         let relaunched = self.last_browser_start > last && self.last_browser_start <= e.ts;
         match killer {
@@ -2324,7 +2504,7 @@ impl EngineState {
             }
             FileOp::Rename | FileOp::Delete => false,
         };
-        if !relevant || self.is_agent_guid(&e.guid) || e.pid == 4 || e.pid == 0 {
+        if !relevant || self.is_agent_owned(&e.guid) || e.pid == 4 || e.pid == 0 {
             return;
         }
         let proc_ = self.proc_info(e);
@@ -2432,6 +2612,7 @@ impl EngineState {
             Err(_) => (false, false),
         };
         let writes = matches!(op, FileOp::Write | FileOp::Create);
+        // Only the agent process itself plants decoys.
         if conditional_hit && writes && self.is_agent_guid(&e.guid) {
             self.arm_canary(dl);
             return true;
@@ -2439,11 +2620,11 @@ impl EngineState {
         if !armed_hit {
             return false;
         }
-        if self.is_agent_guid(&e.guid) || e.pid == 0 || e.pid == 4 {
+        if self.is_agent_owned(&e.guid) || e.pid == 0 || e.pid == 4 {
             return true;
         }
         let proc_ = self.proc_info(e);
-        if is_canary_ignored_reader(&proc_) {
+        if is_canary_ignored_reader(&proc_, self.table.parent_of(&proc_)) {
             return true;
         }
         // A real program writing a conditional decoy path (e.g. `aws configure`) replaced the decoy.
@@ -2512,7 +2693,7 @@ impl EngineState {
         let Some(browser) = dpapi_browser(description) else {
             return;
         };
-        if self.is_agent_guid(&e.guid) || e.pid == 0 || e.pid == 4 {
+        if self.is_agent_owned(&e.guid) || e.pid == 0 || e.pid == 4 {
             return;
         }
         let proc_ = self.proc_info(e);
@@ -2628,7 +2809,7 @@ impl EngineState {
     }
 
     fn on_net(&mut self, e: &Event, dst_ip: &str, dst_port: u16, dst_host: Option<&str>) {
-        if self.is_agent_guid(&e.guid) || e.pid == 0 || e.pid == 4 {
+        if self.is_agent_owned(&e.guid) || e.pid == 0 || e.pid == 4 {
             return;
         }
         let ip_norm = parse_ip(dst_ip)
@@ -2812,7 +2993,7 @@ impl EngineState {
     }
 
     fn on_dns(&mut self, e: &Event, qname: &str, answers: &[String]) {
-        if self.is_agent_guid(&e.guid) || e.pid == 0 || e.pid == 4 {
+        if self.is_agent_owned(&e.guid) || e.pid == 0 || e.pid == 4 {
             return;
         }
         let q = qname.trim_end_matches('.').to_ascii_lowercase();
@@ -2871,7 +3052,7 @@ impl EngineState {
 
     fn on_target(&mut self, e: &Event, t: &TargetProcess) {
         if !is_browser_image(&t.target_image)
-            || self.is_agent_guid(&e.guid)
+            || self.is_agent_owned(&e.guid)
             || e.pid == 0
             || e.pid == 4
         {
@@ -2935,7 +3116,7 @@ impl EngineState {
         if !is_nss && !is_sideload && !bad_sig {
             return;
         }
-        if self.is_agent_guid(&e.guid) || e.pid == 0 || e.pid == 4 {
+        if self.is_agent_owned(&e.guid) || e.pid == 0 || e.pid == 4 {
             return;
         }
         let proc_ = self.proc_info(e);
@@ -2992,13 +3173,17 @@ impl EngineState {
         let k = key.to_ascii_lowercase();
         let vn = value_name.to_ascii_lowercase();
         let d = data.unwrap_or("").to_ascii_lowercase();
-        if self.is_agent_guid(&e.guid) {
+        // V-H6/H7: only an *exactly* attributed agent write is the agent's
+        // own; a correlation guess or an unattributed change is still judged.
+        let attr = crate::families::attribution_of(e);
+        if attr == Attribution::Exact && self.is_agent_guid(&e.guid) {
             return;
         }
         // ST-10 ClickFix RunMRU / TypedPaths
         let runmru = k.contains(r"\explorer\runmru");
         let typed = k.contains(r"\explorer\typedpaths");
-        if (runmru || typed) && vn != "mrulist" {
+        // ST-10 kills the writer's children: needs the exact writer.
+        if (runmru || typed) && vn != "mrulist" && attr == Attribution::Exact {
             if let Some(bin) = runmru_lolbin(&d) {
                 self.on_clickfix_artifact(e, bin, runmru, data.unwrap_or(""));
             }
@@ -3021,7 +3206,7 @@ impl EngineState {
         };
         if let Some((rule, what)) = tp {
             let proc_ = self.proc_info(e);
-            let hit = Hit::new(
+            let mut hit = Hit::new(
                 rule,
                 &proc_.guid,
                 Severity::Critical,
@@ -3032,6 +3217,17 @@ impl EngineState {
                     truncate(data.unwrap_or(""), 40)
                 ),
             );
+            if attr != Attribution::Exact {
+                // Writer guessed or unknown: still report the tamper (even
+                // with a pid-0 / agent subject), never act on the guess.
+                hit.tamper = true;
+                hit.remediation_only = true;
+                hit.summary.push_str(if attr == Attribution::None {
+                    " (writer unknown)"
+                } else {
+                    " (writer inferred by correlation)"
+                });
+            }
             self.state(&proc_.guid, e.ts).add_evidence(e);
             self.emit(e, hit);
         }
@@ -3080,7 +3276,7 @@ impl EngineState {
     // ------------------------------------------------------------------
 
     fn on_script(&mut self, e: &Event, content: &str) {
-        if self.is_agent_guid(&e.guid) {
+        if self.is_agent_owned(&e.guid) {
             return;
         }
         let c = content.to_ascii_lowercase();
@@ -3200,7 +3396,7 @@ impl EngineState {
     // ------------------------------------------------------------------
 
     fn eval_sigma(&mut self, e: &Event) {
-        if self.is_agent_guid(&e.guid) {
+        if self.is_agent_owned(&e.guid) {
             return;
         }
         let proc_ = self.table.get(&e.guid);
@@ -3306,6 +3502,32 @@ fn event_phrase(e: &Event) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_image_key_keeps_the_drive_v_h1() {
+        let k = agent_image_key(r"C:\Program Files\Kestrel\kestrel-agent.exe", 'c');
+        assert_eq!(k, r"c:\program files\kestrel\kestrel-agent.exe");
+        assert_eq!(
+            agent_image_key(r"\Program Files\Kestrel\kestrel-agent.exe", 'd'),
+            r"d:\program files\kestrel\kestrel-agent.exe"
+        );
+        assert_eq!(agent_image_key("  ", 'c'), "");
+        assert_eq!(agent_image_key(r"\\srv\share\kestrel-agent.exe", 'c'), "");
+    }
+
+    #[test]
+    fn never_quarantine_task_and_key_stores_v_h4() {
+        assert!(never_quarantine(
+            r"C:\Windows\System32\Tasks\Microsoft\Windows\Defrag\ScheduledDefrag"
+        ));
+        assert!(never_quarantine(
+            r"C:\ProgramData\Microsoft\Crypto\RSA\MachineKeys\abc"
+        ));
+        assert!(never_quarantine(r"C:\Users\alice\..\bob\x"));
+        assert!(!never_quarantine(
+            r"C:\Users\alice\AppData\Local\Temp\x.exe"
+        ));
+    }
 
     #[test]
     fn clickfix_patterns() {

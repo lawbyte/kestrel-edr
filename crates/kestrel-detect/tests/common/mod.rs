@@ -163,6 +163,22 @@ pub fn start(
     )
 }
 
+/// Set `ProcessStart.user` on a start event.
+pub fn as_user(mut e: Event, user: &str) -> Event {
+    if let EventData::ProcessStart(p) = &mut e.data {
+        p.user = Some(user.into());
+    }
+    e
+}
+
+/// Mark a start event as a direct child the agent recorded spawning.
+pub fn spawned_by_agent(mut e: Event) -> Event {
+    if let EventData::ProcessStart(p) = &mut e.data {
+        p.agent_spawned = true;
+    }
+    e
+}
+
 pub fn read(ts: i64, guid: &str, pid: u32, path: &str) -> Event {
     ev(
         ts,

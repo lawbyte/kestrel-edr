@@ -1289,8 +1289,10 @@ pub const CANARY_IGNORED_READERS: &[&str] = &[
 /// Windows services that open files for storage maintenance and run inside
 /// the shared `svchost.exe` (so the image name alone says nothing): the
 /// Optimize Drives service (`svchost.exe -k defragsvc`). Microsoft-signed, at
-/// its exact System32 location on the system volume.
-pub fn is_os_file_maintenance_host(proc_: &ProcessInfo) -> bool {
+/// its exact System32 location on the system volume, running as SYSTEM and
+/// started by System32 `services.exe` (V-M12: a user-started, hollowed
+/// `svchost -k defragsvc` has the user's token and an untrusted parent).
+pub fn is_os_file_maintenance_host(proc_: &ProcessInfo, parent: Option<&ProcessInfo>) -> bool {
     if proc_.signed != SignatureState::Valid
         || !proc_
             .signer
@@ -1298,7 +1300,15 @@ pub fn is_os_file_maintenance_host(proc_: &ProcessInfo) -> bool {
             .is_some_and(crate::protect::is_microsoft_signer)
         || proc_.path_class != kestrel_common::PathClass::System
         || !file_name(&proc_.image).eq_ignore_ascii_case("svchost.exe")
+        || !crate::util::is_system_user(proc_.user.as_deref())
     {
+        return false;
+    }
+    let scm_parent = parent.is_some_and(|p| {
+        file_name(&p.image).eq_ignore_ascii_case("services.exe")
+            && p.path_class == kestrel_common::PathClass::System
+    });
+    if !scm_parent {
         return false;
     }
     let cmd = proc_.cmdline.to_ascii_lowercase();
@@ -1311,13 +1321,18 @@ pub fn is_os_file_maintenance_host(proc_: &ProcessInfo) -> bool {
     false
 }
 
-pub fn is_canary_ignored_reader(proc_: &ProcessInfo) -> bool {
+pub fn is_canary_ignored_reader(proc_: &ProcessInfo, parent: Option<&ProcessInfo>) -> bool {
     if is_untrusted_location_or_signature(proc_) || proc_.signed != SignatureState::Valid {
         return false;
     }
     let name = file_name(&proc_.image).to_ascii_lowercase();
-    if is_os_file_maintenance_host(proc_) {
+    if is_os_file_maintenance_host(proc_, parent) {
         return true;
+    }
+    // V-M12: Optimize Drives runs as SYSTEM (scheduled task / defragsvc);
+    // a user-started (possibly hollowed) defrag.exe is not exempt.
+    if name == "defrag.exe" && !crate::util::is_system_user(proc_.user.as_deref()) {
+        return false;
     }
     if CANARY_IGNORED_READERS.contains(&name.as_str())
         && proc_
