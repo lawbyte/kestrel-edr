@@ -64,7 +64,7 @@ pub use win::hardfs::enable_redirection_guard;
 #[cfg(windows)]
 pub use win::platform::{resolve_host_direct, WindowsPlatform};
 #[cfg(windows)]
-pub use win::service::{install_service, run_service, uninstall_service};
+pub use win::service::{install_service, run_service, service_installed, uninstall_service};
 #[cfg(windows)]
 pub use win::statedir::{secure_state_dir, StateDirResult};
 #[cfg(windows)]

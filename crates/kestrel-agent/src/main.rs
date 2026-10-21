@@ -388,6 +388,14 @@ async fn dispatch(state_dir: PathBuf, cmd: Cmd) -> Result<()> {
                 (Some(t), false) => t,
                 (None, false) => bail!("--token or --token-stdin is required"),
             };
+            if !config::AgentConfig::path(&state_dir).is_file()
+                && !platform_win::service_installed()
+            {
+                // Nothing left to protect (an earlier uninstall already removed
+                // the service and the identity): let the package go.
+                println!("Kestrel agent is not installed; nothing to remove");
+                return Ok(());
+            }
             commands::verify_uninstall(&state_dir, &token)?;
             if cfg!(windows) {
                 platform_win::uninstall_service().context("removing the service")?;
@@ -406,7 +414,7 @@ async fn dispatch(state_dir: PathBuf, cmd: Cmd) -> Result<()> {
             } else {
                 // A reinstall must enroll afresh (new device, the new token's
                 // remote-access ceiling); quarantine and logs are kept.
-                let removed = commands::retire_identity(&state_dir)?;
+                let removed = commands::retire_identity(&state_dir);
                 if !removed.is_empty() {
                     println!("Device identity removed ({})", removed.join(", "));
                 }

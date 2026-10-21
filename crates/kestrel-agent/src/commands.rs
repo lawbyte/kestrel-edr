@@ -348,28 +348,48 @@ pub fn verify_uninstall(state_dir: &Path, token: &str) -> Result<AgentConfig> {
 /// old device. Keeps evidence and restore state: `quarantine/`, `logs/`,
 /// `triage/`, and the hardening/WFP/canary state files the next agent needs
 /// to undo what this one changed. Returns the names removed.
-pub fn retire_identity(state_dir: &Path) -> Result<Vec<String>> {
-    let mut removed = Vec::new();
-    let keys = state_dir.join(config::KEYS_DIR);
-    if keys.is_dir() {
-        std::fs::remove_dir_all(&keys).with_context(|| format!("removing {}", keys.display()))?;
-        removed.push(config::KEYS_DIR.to_string());
+pub fn retire_identity(state_dir: &Path) -> Vec<String> {
+    // Best effort: never fails the uninstall. A file still held open by the
+    // exiting service is retried for a few seconds, then left behind with a
+    // warning (the key and config are what make up the identity).
+    fn remove_with_retry(p: &Path, dir: bool) -> std::io::Result<()> {
+        let mut last = Ok(());
+        for _ in 0..20 {
+            last = if dir {
+                std::fs::remove_dir_all(p)
+            } else {
+                std::fs::remove_file(p)
+            };
+            match &last {
+                Ok(()) => return Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(_) => std::thread::sleep(Duration::from_millis(250)),
+            }
+        }
+        last
     }
+    let mut removed = Vec::new();
     let wal = format!("{}-wal", store::DB_FILE);
     let shm = format!("{}-shm", store::DB_FILE);
-    for name in [
-        config::CONFIG_FILE,
-        store::DB_FILE,
-        wal.as_str(),
-        shm.as_str(),
-    ] {
+    let targets: [(&str, bool); 5] = [
+        (config::KEYS_DIR, true),
+        (config::CONFIG_FILE, false),
+        (store::DB_FILE, false),
+        (wal.as_str(), false),
+        (shm.as_str(), false),
+    ];
+    for (name, dir) in targets {
         let p = state_dir.join(name);
-        if p.is_file() {
-            std::fs::remove_file(&p).with_context(|| format!("removing {}", p.display()))?;
-            removed.push(name.to_string());
+        let exists = if dir { p.is_dir() } else { p.is_file() };
+        if !exists {
+            continue;
+        }
+        match remove_with_retry(&p, dir) {
+            Ok(()) => removed.push(name.to_string()),
+            Err(e) => eprintln!("warning: could not remove {}: {e}", p.display()),
         }
     }
-    Ok(removed)
+    removed
 }
 
 /// Upper bound on events written by `sensors-test --events-out`.
@@ -584,7 +604,7 @@ mod retire_tests {
         ] {
             std::fs::write(d.join(f), "x").unwrap();
         }
-        let removed = retire_identity(d).unwrap();
+        let removed = retire_identity(d);
         assert_eq!(
             removed,
             vec![
@@ -601,6 +621,6 @@ mod retire_tests {
         assert!(d.join("logs").is_dir() && d.join("triage").is_dir());
         assert!(d.join("hardening_state.json").is_file() && d.join("wfp_state.json").is_file());
         // Idempotent.
-        assert!(retire_identity(d).unwrap().is_empty());
+        assert!(retire_identity(d).is_empty());
     }
 }

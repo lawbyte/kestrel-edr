@@ -170,3 +170,23 @@ Read `CLAUDE.md` first. This run took Kestrel from "compiled and simulated" to "
 ## Backlog (next)
 
 P1: AMSI provider DLL; live response with signed scripts; device control (USB); dead-letter API; `agent_spawned` on alert process info; lab coverage for ST-07/ST-16/PS-03 and an upgrade 1.1.0 → 1.1.1 run; performance on low-end hardware with Office/OneDrive workloads. P2/P3 unchanged from the research report (MSP multi-tenancy, NATS, identity integrations, v3 signed driver → MVI).
+
+## Remote access — lab results (Windows 11 VM, 2026-10-21)
+
+| Check | Result |
+|---|---|
+| Install wizard → `Install-Kestrel-<profile>.cmd` (`/quiet`) downloads, verifies SHA-256, installs, enrolls with the profile | PASS (after fixing the self-signed download and the `pause`) |
+| Real uninstall retires the identity, so a reinstall enrolls as a new device with the new ceiling | PASS (after fixing the locked-outbox uninstall failure; a package left half-removed can now be uninstalled) |
+| **Unrestricted:** file manager list / 3 MB upload + download (SHA-256 match) / mkdir / rename / recursive delete | PASS |
+| **Unrestricted:** remote desktop view (frames in the portal; employee banner "IT (name) is viewing this PC — Reason: …") | PASS |
+| **Unrestricted:** control mode (banner switches to "controlling"; clicking Start in the portal opens the Start menu) | PASS |
+| Tray shows "IT ended the remote session" | PASS |
+| **Guarded:** missing reason refused; upload/mkdir wait for the employee's consent and time out after 60 s; delete/rename refused; `System32\config` blocked; Kestrel folders refused; consent results audited | PASS |
+| **None:** every file and desktop operation refused by the install ceiling even though the policy allowed full access | PASS |
+| Ceiling AND policy: an Unrestricted device refuses while its policy says off (`disabled_by_policy`) | PASS |
+
+Not yet exercised in the lab: an employee clicking **Allow** on the consent prompt, the UAC secure desktop/lock screen during a session, multi-monitor/DPI, `Ctrl+Alt+Del` (needs the `SoftwareSASGeneration` policy).
+
+**Admin notes:**
+* A device needs both an install profile and a policy that allow remote access. Existing policies default to *no remote access*.
+* The generated installer uses the first name in `KESTREL_PUBLIC_HOSTNAME`, which must be an address the endpoints can reach.

@@ -204,6 +204,20 @@ pub fn install_service(exe_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Is the agent service registered with the SCM (whatever its DACL)?
+pub fn service_installed() -> bool {
+    let Ok(mgr) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+    else {
+        return true; // cannot tell: assume it exists (the safe answer)
+    };
+    match mgr.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS) {
+        Ok(_) => true,
+        // ERROR_SERVICE_DOES_NOT_EXIST (1060) is the only "not installed".
+        Err(windows_service::Error::Winapi(e)) => e.raw_os_error() != Some(1060),
+        Err(_) => true,
+    }
+}
+
 /// Stop and delete the service; remove WFP objects and ETW sessions.
 pub fn uninstall_service() -> Result<()> {
     let mgr = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
@@ -236,6 +250,16 @@ pub fn uninstall_service() -> Result<()> {
             && std::process::id() != st.process_id.unwrap_or(0)
         {
             let _ = svc.stop();
+            // Wait (up to 30 s) until the agent process has exited, so its
+            // files (outbox database, keys) are no longer open.
+            for _ in 0..120 {
+                match svc.query_status() {
+                    Ok(st) if st.current_state != ServiceState::Stopped => {
+                        std::thread::sleep(std::time::Duration::from_millis(250))
+                    }
+                    _ => break,
+                }
+            }
         }
     }
     if let Err(e) = super::wfp::remove_all_wfp_objects() {

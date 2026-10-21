@@ -67,6 +67,10 @@ mod imp {
         kestrel_win::uninstall_service()
     }
 
+    pub fn service_installed() -> bool {
+        kestrel_win::service_installed()
+    }
+
     pub fn secure_state_dir(dir: &Path) -> Result<StateDirCheck> {
         let r = kestrel_win::secure_state_dir(dir)?;
         Ok(StateDirCheck {
@@ -156,6 +160,10 @@ mod imp {
         sc(&["delete", SERVICE_NAME])
     }
 
+    pub fn service_installed() -> bool {
+        sc(&["query", SERVICE_NAME]).is_ok()
+    }
+
     pub fn secure_state_dir(dir: &Path) -> Result<StateDirCheck> {
         let created = !dir.exists();
         std::fs::create_dir_all(dir)?;
@@ -210,6 +218,10 @@ mod imp {
 
     pub fn uninstall_service() -> Result<()> {
         bail!("service removal is Windows-only")
+    }
+
+    pub fn service_installed() -> bool {
+        false
     }
 
     /// Non-Windows (simulator / tests): plain directory, 0700 on Unix.
