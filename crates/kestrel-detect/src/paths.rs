@@ -413,6 +413,16 @@ const O_TOKENBROKER: &[&str] = &[
     "backgroundtaskhost.exe",
     "runtimebroker.exe",
     "tokenbrokerhost.exe",
+    // WAM clients read the cache in-process (lab VM: msedge.exe).
+    "msedge.exe",
+    "msedgewebview2.exe",
+    "onedrive.exe",
+    "ms-teams.exe",
+    "olk.exe",
+    "outlook.exe",
+    "winword.exe",
+    "excel.exe",
+    "powerpnt.exe",
 ];
 const O_GCLOUD: &[&str] = &[
     "python.exe",
@@ -1249,6 +1259,9 @@ pub const CANARY_IGNORED_READERS: &[&str] = &[
     "searchprotocolhost.exe",
     "searchindexer.exe",
     "searchfilterhost.exe",
+    // Malicious Software Removal Tool (monthly Windows Update scan) reads
+    // every file in user profiles; seen opening a decoy in the lab VM.
+    "mrt.exe",
     // Optimize Drives (defrag / TRIM / slab consolidation) opens every file to
     // move its clusters; seen reading a decoy profile in the lab VM.
     "defrag.exe",

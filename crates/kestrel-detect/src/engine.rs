@@ -390,6 +390,19 @@ fn cat_index(c: DataCategory) -> usize {
     c as usize
 }
 
+/// The Kestrel agent's own service key (or a subkey), not any service whose
+/// name merely starts with "Kestrel" (lab VM: a `KestrelLabSvc` tripped TP-04).
+/// `k` is lower-case. Also matches `ControlSet00N`.
+fn is_kestrel_service_key(k: &str) -> bool {
+    let Some(i) = k.find(r"\services\kestrelagent") else {
+        return false;
+    };
+    let before = &k[..i];
+    let after = &k[i + r"\services\kestrelagent".len()..];
+    (before.ends_with(r"\currentcontrolset") || before.contains(r"\controlset0"))
+        && (after.is_empty() || after.starts_with('\\'))
+}
+
 pub(crate) fn is_lolbin(name: &str) -> bool {
     LOLBINS.contains(&name)
 }
@@ -2312,6 +2325,15 @@ impl EngineState {
             return;
         }
         let proc_ = self.proc_info(e);
+        // No image at all: a process that predates the agent and that Windows
+        // will not let it open (protected processes such as token-broker
+        // hosts; lab VM). New processes always arrive with their image (the
+        // translator holds their events until ProcessStart), so this is not a
+        // blind spot for malware started after the agent; the read stays in
+        // telemetry.
+        if proc_.image.is_empty() {
+            return;
+        }
         if is_trusted_owner(&proc_, &store)
             || benign_reader_for(&proc_, &store, &norm).is_some()
             || Self::system_trusted(&proc_)
@@ -2989,7 +3011,7 @@ impl EngineState {
             || k.contains(r"\microsoft\amsi\providers\")
         {
             Some((TP03, "changed the AMSI configuration"))
-        } else if k.contains(r"\currentcontrolset\services\kestrel") {
+        } else if is_kestrel_service_key(&k) {
             Some((TP04, "modified the Kestrel service configuration"))
         } else {
             None

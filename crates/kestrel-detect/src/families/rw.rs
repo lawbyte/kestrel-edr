@@ -830,10 +830,17 @@ impl Ransomware {
                 RW05,
                 &head.guid,
                 Severity::High,
-                format!(
-                    "{} stopped or disabled {n} database, backup or security services within two minutes, as ransomware does to unlock files before encrypting them.",
-                    shown_name(&name_of(&head))
-                ),
+                if head.guid == e.guid {
+                    format!(
+                        "{} stopped or disabled {n} database, backup or security services within two minutes, as ransomware does to unlock files before encrypting them.",
+                        shown_name(&name_of(&head))
+                    )
+                } else {
+                    format!(
+                        "Commands launched under {} stopped or disabled {n} database, backup or security services within two minutes, as ransomware does to unlock files before encrypting them.",
+                        shown_name(&name_of(&head))
+                    )
+                },
             ));
         }
     }
@@ -855,9 +862,16 @@ impl Ransomware {
         {
             return;
         }
-        // Killing one's own children (test runners, launchers) is not a spree.
+        // Killing one's own process tree (browsers closing renderers, test
+        // runners, launchers) or other instances of the same program is not a
+        // spree (lab VM: msedge.exe and an admin's Stop-Process msedge).
         if let Some(tp) = t.target_guid.as_ref().and_then(|g| ctx.process(g)) {
-            if tp.parent_guid.as_ref() == Some(&actor.guid) {
+            if name_of(tp) == name_of(actor)
+                || ctx
+                    .ancestry(&tp.guid, LINEAGE_DEPTH)
+                    .iter()
+                    .any(|a| a.guid == actor.guid)
+            {
                 return;
             }
         }

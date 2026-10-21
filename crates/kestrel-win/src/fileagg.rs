@@ -191,6 +191,16 @@ pub const KNOWN_EXTENSIONS: &[&str] = &[
     "url",
 ];
 
+/// Summary milestones (files touched) that force an emission inside the
+/// re-emit interval: 10, 20, 30, 50, 100, 200, 500, then every 500.
+pub fn next_milestone(last_emitted: u32) -> u32 {
+    const M: [u32; 7] = [10, 20, 30, 50, 100, 200, 500];
+    M.iter()
+        .copied()
+        .find(|m| *m > last_emitted)
+        .unwrap_or((last_emitted / 500 + 1) * 500)
+}
+
 pub fn is_known_ext(ext: &str) -> bool {
     KNOWN_EXTENSIONS.contains(&ext)
 }
@@ -540,9 +550,14 @@ impl FileAgg {
                 st.canary_pending = true;
             }
         }
+        // Re-emit when REEMIT_MS passed, or at once when the burst crosses the
+        // next milestone: a burst that finishes inside REEMIT_MS (80 files in
+        // under 2 s in the lab VM) otherwise never gets past its first summary
+        // and RW-06's thresholds are never seen.
         let due = st.canary_pending
             || (st.ops.len() >= EMIT_MIN_FILES as usize
-                && st.last_emit.is_none_or(|t| ts - t >= REEMIT_MS));
+                && (st.last_emit.is_none_or(|t| ts - t >= REEMIT_MS)
+                    || st.ops.len() as u32 >= next_milestone(st.last_emit_files)));
         if !due {
             return None;
         }
@@ -761,6 +776,38 @@ mod tests {
         assert!(!is_appended_unknown_ext("archive.tar.gz"));
     }
 
+    /// Lab VM: 80 files XOR-encrypted and renamed in under 2 s produced one
+    /// summary (10 files) and RW-06 never fired.
+    #[test]
+    fn fast_burst_reaches_rw06_thresholds() {
+        let mut a = agg();
+        let mut out = Vec::new();
+        for i in 0..80 {
+            let ts = 1_000 + i as i64 * 10; // 800 ms in total
+            let old = doc(i, i % 4);
+            let _ = a.on_create(ts, 77, 0x2000 + i as u64, &old, 1, false);
+            if let Some(e) = a.on_rename(ts + 1, 77, 0x2000 + i as u64, &format!("{old}.k3str")) {
+                out.push(e);
+            }
+        }
+        let max = out
+            .iter()
+            .map(|e| e.activity.files_touched)
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max >= 50,
+            "largest summary {max} files ({} summaries)",
+            out.len()
+        );
+        assert!(out
+            .iter()
+            .any(|e| e.activity.files_touched >= 30 && e.activity.dirs >= 3));
+        assert_eq!(next_milestone(0), 10);
+        assert_eq!(next_milestone(30), 50);
+        assert_eq!(next_milestone(500), 1000);
+    }
+
     #[test]
     fn mass_rename_emits_with_top_ext() {
         let mut a = agg();
@@ -785,10 +832,15 @@ mod tests {
         assert_eq!(first.top_ext_pct, 100);
         assert_eq!(first.dirs, 4);
         assert!(first.sample_paths.len() <= 5);
-        // Re-emission is rate-limited to every 2 s and only while growing.
+        // Re-emission only while growing: every 2 s, or sooner when the count
+        // reaches the next milestone.
         for w in out.windows(2) {
-            assert!(w[1].ts - w[0].ts >= REEMIT_MS);
-            assert!(w[1].activity.files_touched > w[0].activity.files_touched);
+            let (a, b) = (&w[0].activity, &w[1].activity);
+            assert!(b.files_touched > a.files_touched);
+            assert!(
+                w[1].ts - w[0].ts >= REEMIT_MS
+                    || b.files_touched >= next_milestone(a.files_touched)
+            );
         }
         let last = &out.last().unwrap().activity;
         assert!(last.files_touched > 10);
