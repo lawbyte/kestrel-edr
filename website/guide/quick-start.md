@@ -220,7 +220,7 @@ Back in the console, open **Devices**. The PC appears within a few seconds of th
 
 <Shot name="guide/12-devices-online" alt="Devices list with the new PC" />
 
-Click it to see its sensor health, policy, remote-access setting and the tabs for events, alerts and response.
+Click it to see its sensor health, policy, remote-access setting and the tabs for events, alerts and response. Green rows are working. Grey rows are optional features that are switched off, such as the DPAPI audit channel, which you can turn on later under **Policies**, **Hardening**.
 
 <Shot name="guide/13-device-page" alt="Device page of the new PC" />
 
@@ -228,7 +228,7 @@ Click it to see its sensor health, policy, remote-access setting and the tabs fo
 
 The Kestrel shield appears in the notification area at the next sign-in. Clicking it opens the tray app, which shows the protection status and explains anything Kestrel stopped.
 
-<Shot src="img/tray/real-desktop.png" alt="Kestrel tray app on a Windows 11 desktop" />
+<Shot src="img/guide/14-tray.png" alt="Kestrel tray app on the Windows 11 desktop: You're protected, connected to IT, version 1.1.3" />
 
 On the PC you can also check the service from an administrator PowerShell:
 
