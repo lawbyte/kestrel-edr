@@ -3,10 +3,12 @@
 //   * en dash (U+2013) and em dash (U+2014)
 //   * emoji and other pictographs (\p{Extended_Pictographic})
 //   * banned marketing / filler phrases (case-insensitive, word-boundaried)
+//   * images that do not exist: <Shot name="x"> needs public/img/x-dark.png
+//     and x-light.png, <Shot src="p"> and ![](/p) need public/p
 // Scans .md, .mts, .ts, .vue and .css files under website/, skipping
 // node_modules, .vitepress/cache and .vitepress/dist.
 
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -53,6 +55,22 @@ for (const file of walk(root, [])) {
     for (const m of line.matchAll(dashRe)) hits.push(`dash U+${m[0].codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`)
     for (const m of line.matchAll(pictoRe)) hits.push(`pictograph U+${m[0].codePointAt(0).toString(16).toUpperCase()}`)
     for (const m of line.matchAll(bannedRe)) hits.push(`banned phrase "${m[0]}"`)
+    if (file.endsWith('.md')) {
+      for (const m of line.matchAll(/<Shot\s[^>]*?name="([^"]+)"/g)) {
+        for (const v of ['dark', 'light']) {
+          const img = join(root, 'public', 'img', `${m[1]}-${v}.png`)
+          if (!existsSync(img)) hits.push(`missing image ${relative(root, img)}`)
+        }
+      }
+      for (const m of line.matchAll(/<Shot\s[^>]*?src="([^"]+)"/g)) {
+        const img = join(root, 'public', m[1].replace(/^\//, ''))
+        if (!existsSync(img)) hits.push(`missing image ${relative(root, img)}`)
+      }
+      for (const m of line.matchAll(/!\[[^\]]*\]\((\/[^)\s]+)\)/g)) {
+        const img = join(root, 'public', m[1].replace(/^\//, ''))
+        if (!existsSync(img)) hits.push(`missing image ${relative(root, img)}`)
+      }
+    }
     for (const h of hits) problems.push(`${relative(root, file)}:${i + 1}: ${h}`)
   })
 }

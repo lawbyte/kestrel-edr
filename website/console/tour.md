@@ -118,6 +118,10 @@ Enrollment (install wizard, tokens, device groups and update rings), users and r
 
 ## Install wizard
 
-<Shot name="console/install-wizard" alt="Install agent wizard" />
+<Shot name="console/install-wizard-1" alt="Install agent wizard, step 1: remote-access profile" />
+
+<Shot name="console/install-wizard-2" alt="Install agent wizard, step 2: guardrails" />
+
+<Shot name="console/install-wizard-3" alt="Install agent wizard, step 3: group, validity and device limit" />
 
 Creates an enrollment token in three steps: remote-access profile, guardrails (for guarded or custom profiles) and token settings (group, validity, device limit). The result, shown once, is a ready-to-run `Install-Kestrel-<profile>.cmd`, a PowerShell one-liner and the bare token. See [Enroll devices](../deploy/enroll).
