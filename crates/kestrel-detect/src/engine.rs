@@ -902,6 +902,28 @@ fn path_class_of(image: &str, system_drive: char) -> PathClass {
     PathClass::of_with_system_drive(image, system_drive)
 }
 
+/// Kestrel's service (internal and display name) and the tray's Run value
+/// (`kestrel-win` consts / `installer/Kestrel.wxs`).
+const OWN_SERVICE_NAME: &str = "KestrelAgent";
+const OWN_SERVICE_DISPLAY_NAME: &str = "Kestrel EDR Agent";
+const OWN_TRAY_RUN_VALUE: &str = "KestrelTray";
+
+/// `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run` (any hive spelling,
+/// WOW6432Node view included), exactly that key.
+fn is_hklm_run_key(key: &str) -> bool {
+    let k = key.trim().trim_start_matches('\\').to_ascii_lowercase();
+    let Some(rest) = k
+        .strip_prefix(r"hklm\")
+        .or_else(|| k.strip_prefix(r"hkey_local_machine\"))
+        .or_else(|| k.strip_prefix(r"registry\machine\"))
+    else {
+        return false;
+    };
+    let rest = rest.trim_end_matches('\\');
+    rest == r"software\microsoft\windows\currentversion\run"
+        || rest == r"software\wow6432node\microsoft\windows\currentversion\run"
+}
+
 /// Comparison key for the agent image: normalised, lower-case, **with** the
 /// drive letter (V-H1). A configured path without a drive letter is anchored
 /// on the system drive. Empty when unknown.
@@ -1401,6 +1423,65 @@ impl EngineState {
         !self.agent_image.is_empty()
             && !image.is_empty()
             && normalize_path(image) == self.agent_image
+    }
+
+    /// Kestrel's own install artefacts, recognised by **exact** name and
+    /// **exact** binary (never a name prefix, never the name alone):
+    /// * a `service_installed` named `KestrelAgent` / `Kestrel EDR Agent`
+    ///   whose ImagePath is the running agent's image (quotes stripped,
+    ///   normalised, case-insensitive, drive included) with the `service`
+    ///   argument (or none);
+    /// * the HKLM `…\CurrentVersion\Run` value `KestrelTray` whose command
+    ///   is `kestrel-tray.exe` next to the agent image, with `--background`
+    ///   (or nothing).
+    ///
+    /// Kestrel's name on another binary, or the agent binary under another
+    /// service / value name, is judged like anything else.
+    pub(crate) fn is_own_install_artifact(&self, e: &Event) -> bool {
+        if self.agent_image.is_empty() {
+            return false;
+        }
+        let image_args = |cmd: &str| -> (String, String) {
+            let t = cmd.trim();
+            let t = t
+                .strip_prefix(r"\??\")
+                .or_else(|| t.strip_prefix(r"\\?\"))
+                .unwrap_or(t);
+            let (img, rest, _) = crate::families::autorun::split_image(t);
+            (normalize_path(&img), rest.trim().to_ascii_lowercase())
+        };
+        match &e.data {
+            EventData::ServiceInstalled(s) => {
+                let n = s.name.trim();
+                if !(n.eq_ignore_ascii_case(OWN_SERVICE_NAME)
+                    || n.eq_ignore_ascii_case(OWN_SERVICE_DISPLAY_NAME))
+                {
+                    return false;
+                }
+                let (img, args) = image_args(&s.image_path);
+                img == self.agent_image && (args.is_empty() || args == "service")
+            }
+            EventData::RegistrySet {
+                key,
+                value_name,
+                data: Some(data),
+                op: RegistryOp::Set,
+                ..
+            } => {
+                if !value_name.trim().eq_ignore_ascii_case(OWN_TRAY_RUN_VALUE)
+                    || !is_hklm_run_key(key)
+                {
+                    return false;
+                }
+                let Some((dir, _)) = self.agent_image.rsplit_once('\\') else {
+                    return false;
+                };
+                let tray = format!(r"{dir}\kestrel-tray.exe");
+                let (img, args) = image_args(data);
+                img == tray && (args.is_empty() || args == "--background")
+            }
+            _ => false,
+        }
     }
 
     /// Is `p` the running agent? The agent image (full path with drive) and,
@@ -2100,6 +2181,12 @@ impl EngineState {
     // ------------------------------------------------------------------
 
     pub fn process(&mut self, e: &Event) -> Vec<Output> {
+        // Kestrel's own install (lab 2026-10-21): the SCM 7045 record of the
+        // agent service and the tray's HKLM Run value written by msiexec.
+        // Not judged by any rule, Sigma or family (like agent_spawned).
+        if self.is_own_install_artifact(e) {
+            return Vec::new();
+        }
         match &e.data {
             EventData::ProcessStart(ps) => self.on_process_start(e, ps),
             EventData::ProcessStop { .. } => self.on_process_stop(e),

@@ -27,14 +27,23 @@ Three findings from a fresh 1.1.2 install in the lab VM. Details and evidence ar
    * There is no grace period. Real drops are still reported.
 3. **ST-01 on Windows Widgets reading the WAM cache.** "Microsoft Windows" (the signer of Windows inbox / WindowsApps components) is now a WAM-client signer under the same constraints. The result is Low / Audit.
 
+4. **Follow-up after the 1.1.3 lab run (same day; details in the DECISIONS addendum):**
+   * *Decoy ownership.* A file at a decoy path is armed, hidden or removed only when Kestrel can prove it planted it. Proof is either the hash recorded in `rcanaries.json`, or the content of any released version (`KNOWN_DECOY_SHA256`, append-only).
+     * A file with unknown content is never armed or touched; the decoy moves to `… 2.docx` etc.
+     * Legacy decoys are adopted and hidden without being rewritten.
+     * Uninstall scans every decoy path of every version in every profile, not only the registry, so lost records no longer leave decoys behind.
+   * *PS-07 on Kestrel's own install.* The SCM record of the `KestrelAgent` / `Kestrel EDR Agent` service with the running agent's binary, and the HKLM Run value `KestrelTray` → `kestrel-tray.exe --background` next to the agent, are dropped before any rule.
+     * Kestrel's name on another binary, or the agent binary under another name, now alerts.
+     * Before this fix, Kestrel's service name on another binary was silent.
+
 **Verification (final code).**
 
 | Check | Where | Result |
 |---|---|---|
 | `cargo fmt --all -- --check` | Windows | PASS |
 | `cargo clippy --workspace --all-targets -- -D warnings` | Windows | PASS |
-| `cargo test --workspace` incl. Postgres integration tests | Windows | PASS — 710 passed, 0 failed |
-| `cargo test --workspace --no-fail-fast` (server DB tests skip without `DATABASE_URL`) | WSL2 Kali | PASS — 702 passed, 0 failed |
+| `cargo test --workspace` incl. Postgres integration tests | Windows | Items 1-3: PASS, 710 passed, 0 failed. After item 4: **NOT RE-RUN** — the full run was stopped by the host for low memory while still compiling |
+| `cargo test --workspace --no-fail-fast` (server DB tests skip without `DATABASE_URL`) | WSL2 Kali | Items 1-3: PASS, 702 passed. After item 4: only `-p kestrel-win --lib rcanary` (13) and `-p kestrel-detect` (all suites) were run, and they PASS. The full run was stopped for low memory |
 | Console `npm run lint` / `npm test` (two strings changed) | Windows | PASS — 159 tests |
 | Agent on a real install (decoy attributes, poller, sensor restart, heartbeat) | — | **NOT RUN** (lab VM only) |
 

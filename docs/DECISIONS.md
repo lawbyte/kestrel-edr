@@ -225,3 +225,43 @@ Three findings from a fresh install of 1.1.2 in the Windows 11 lab VM. Each fix 
   * a `.js` argument;
   * "Microsoft Windows"-signed rundll32 / python in WindowsApps;
   * a browser store read by Widgets.
+
+**Addendum (same day, lab result with 1.1.3) - decoy ownership, uninstall leftovers, PS-07 on Kestrel's own install.**
+
+* **A visible `Documents\!Accounts summary.docx` (7283 bytes, Archive) was listed in `rcanaries.json` and survived several uninstalls.**
+  * *What the code did:*
+    * Arming and removal trusted `rcanaries.json` alone. The planter matched files only against the record for the current path.
+    * A record whose file no longer matched (`SkipForeign`) stayed in the registry. It was not armed, but it looked armed to anyone reading the file, and `planted()`, which arms registry entries without checks when the agent is not planting, did arm it.
+    * Uninstall (`rcanary::remove_all`) iterated **only** the registry and returned early on an empty one. It deleted only exact matches with the recorded hash. A `NotOurs` or unreadable result (e.g. a sharing violation at uninstall time is classified that way) dropped the record for good. From then on no install or uninstall ever looked at the file again.
+    * There was no notion of "content any Kestrel version wrote".
+  * *Evidence about this file:*
+    * The decoy generator (`content`, `zipw`, `fnv1a`) is byte-identical in every commit that shipped decoys (56ec926, 655e352, 92fd9d4, b6c8a52). It always produces 7271 bytes for `!Accounts summary.docx` (SHA-256 `9096b07d…`).
+    * A 7283-byte file therefore never came from a committed build. It is either a decoy that something modified after planting, or a file from an uncommitted lab build.
+    * Under the requested rule it is provably Kestrel's only if `rcanaries.json` recorded *its* hash. Otherwise it is treated as possibly user data.
+  * *Fix (`kestrel-win/src/rcanary.rs`):*
+    * **Ownership rule** (`owned`): the file's hash equals the hash recorded for that path in a `rcanaries.json` (any version), or is in `KNOWN_DECOY_SHA256`. That is an append-only list of every decoy content any released version planted: 7 names, current and retired. A test pins it to the generator.
+    * **Planting** (`plant_with`) works per slot over candidate names (`!Accounts summary.docx`, then `… 2.docx` up to `… 5.docx`):
+      * A provably-ours file is *adopted*: armed, recorded with its actual hash, and given HIDDEN through the verified handle. It is never rewritten.
+      * Otherwise the decoy is written, hidden, at the first free name.
+      * A file with unknown content is never armed, changed or hidden, and its stale record is dropped.
+      * The registry now lists exactly the armed decoys.
+      * Records of profiles not enumerated now are kept only while provably ours, in a new `retained` map (additive, `serde(default)`, never armed) so uninstall still finds them.
+      * Retired Desktop decoys are removed by the same rule.
+    * **Uninstall** (`remove_all_with`):
+      * It removes every provably-ours decoy from the registry records (planted and retained) **plus** every decoy path of every version in every profile: current, retired and candidate names. So a decoy whose record was lost is still found, even with an empty registry.
+      * It is handle-based (`SafeDecoyFs`): no links followed, and the hash is re-checked on the delete handle.
+      * Unknown files stay. Only I/O failures keep a record for the next attempt.
+  * *Lab expectation:*
+    * If the 7283-byte file's hash is the one in `rcanaries.json`, the next start hides and arms it, and uninstall removes it.
+    * If not, it stays visible and unarmed, a decoy appears as hidden `!Accounts summary 2.docx`, and uninstall removes only that decoy. The old file must then be deleted by hand once it is confirmed to be a leftover.
+    * Its SHA-256 compared with the record settles which case applies.
+* **PS-07 on Kestrel's own service install** (timing-dependent: the SCM 7045 record of the install read after the agent started; "An unidentified process installed the service \"Kestrel EDR Agent\" that runs …kestrel-agent.exe (unsigned)").
+  * *Cause:* PS-07 exempted only the internal name `KestrelAgent`, by name alone. The 7045 record carries the display name `Kestrel EDR Agent`, and the agent binary is unsigned, so PS-07's weak branch fired.
+  * *Fix:* `Engine::is_own_install_artifact` drops two events before any rule, Sigma or family runs (the same treatment as agent-spawned processes):
+    * a `service_installed` whose name is exactly `KestrelAgent` / `Kestrel EDR Agent` **and** whose ImagePath resolves to the running agent's image (quotes and `\??\` stripped, normalised, case-insensitive, drive included), with the `service` argument or none;
+    * the HKLM `…\CurrentVersion\Run` value `KestrelTray` whose command is `kestrel-tray.exe` next to the agent image, with `--background` or nothing.
+  * The old name-only exemption in PS-07 is removed. Kestrel's name on another binary is now **alerted** (it was silent before), but never proposed for removal (`is_kestrel` also matches the display name). Also alerted:
+    * the agent binary under another service name;
+    * the agent with other arguments;
+    * a `KestrelTray` value pointing elsewhere, or in HKU.
+  * Tests: `kestrel_own_install_raises_nothing` (Audit and Protect, lab evidence) and `kestrel_impostors_still_alert`. `ps07_benign_and_never_kestrel` was updated to the new rule.

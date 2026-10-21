@@ -59,6 +59,8 @@ const MAX_GLOBAL_FLAG: usize = 256;
 
 /// Kestrel's own service: never a removal target (TP-04 covers tampering).
 const KESTREL_SERVICE: &str = "kestrelagent";
+/// Its display name (the SCM 7045 record carries the display name).
+const KESTREL_SERVICE_DISPLAY: &str = "kestrel edr agent";
 
 /// Rules whose Protect-mode alert kills the subject's process tree (PS-15
 /// trigger). `Alert` does not carry the proposed actions at `on_alert` time
@@ -417,7 +419,8 @@ impl Loc {
     /// Kestrel's own service / service key.
     fn is_kestrel(&self) -> bool {
         let l = self.location.to_ascii_lowercase();
-        (self.kind == AutorunKind::Service && l == KESTREL_SERVICE)
+        (self.kind == AutorunKind::Service
+            && (l == KESTREL_SERVICE || l == KESTREL_SERVICE_DISPLAY))
             || l.contains(r"\services\kestrelagent")
     }
 }
@@ -1686,7 +1689,12 @@ impl Persistence {
         service_type: Option<u32>,
         out: &mut Vec<FamilyHit>,
     ) {
-        if name.eq_ignore_ascii_case(KESTREL_SERVICE) || image_path.trim().is_empty() {
+        // Kestrel's real install (its exact name *and* the running agent's
+        // image) never gets here: the engine drops it before any rule
+        // (`Engine::is_own_install_artifact`). Kestrel's name on another
+        // binary is judged like any service (lab 2026-10-21), but never
+        // proposed for removal.
+        if image_path.trim().is_empty() {
             return;
         }
         let w = self.writer(ctx, e);
@@ -1700,10 +1708,10 @@ impl Persistence {
             restore: None,
             what: format!("the service \"{name}\""),
         };
-        if loc.is_kestrel() {
-            return;
+        let kestrel_name = loc.is_kestrel();
+        if !kestrel_name {
+            self.record(ctx, &w, &loc, &p, out);
         }
-        self.record(ctx, &w, &loc, &p, out);
         let path_l = p.path.as_deref().unwrap_or("").to_ascii_lowercase();
         let rest = crate::util::strip_drive(&path_l);
         let users_or_temp = !p.url
@@ -1735,7 +1743,7 @@ impl Persistence {
         } else {
             Severity::Medium
         };
-        let actions = if strong {
+        let actions = if strong && !kestrel_name {
             self.actions(PS07, ctx, &loc, &p, &w, false)
         } else {
             vec![]

@@ -21,20 +21,28 @@
 //!   "show hidden files" users would still see the decoys); its traversal
 //!   advantage (reached just before Documents on a depth-first walk) is
 //!   small because modern encryptors spread files over many threads.
-//!   Earlier Desktop decoys are removed on upgrade when still exactly ours
+//!   Earlier Desktop decoys are removed on upgrade when provably ours
 //!   ([`RETIRED_DECOYS`]).
+//!
+//! Ownership ([`owned`], lab 2026-10-21): a file at a decoy path is
+//! Kestrel's only when its SHA-256 is the one recorded for that path in
+//! `rcanaries.json` (any version) or the content of a decoy some released
+//! version planted ([`KNOWN_DECOY_SHA256`]). Only such files are armed,
+//! given attributes or removed; a file with unknown content may be the
+//! user's, so the decoy moves to the next free name ([`candidate_names`]).
 //!
 //! Safety (same rules as the credential canaries in [`crate::canary`]):
 //! never overwrite an existing file, never follow a reparse point anywhere
 //! in the path, create with `create_new`, verify the final path. Folders
 //! redirected into OneDrive are skipped (decoys would sync to the cloud).
-//! The registry of what was planted (with SHA-256) lives in
-//! `<state>\rcanaries.json`; [`remove_planted`] deletes only files whose
-//! content is still exactly what Kestrel wrote (call it at uninstall).
+//! The registry of the armed decoys (with SHA-256) lives in
+//! `<state>\rcanaries.json`; [`remove_all`] (uninstall) removes every
+//! provably-ours decoy of any version, registry or not.
 
-use crate::canary::{self, CanaryRegistry, DecoyFs, Probe, RemoveResult};
+use crate::canary::{self, CanaryRecord, CanaryRegistry, DecoyFs, Probe, RemoveResult};
 use kestrel_common::DataCategory;
 use kestrel_platform::CanarySpec;
+use sha2::Digest;
 use std::path::Path;
 
 /// Registry file name in the agent state directory.
@@ -224,6 +232,88 @@ pub fn specs_for_profile(profile: &str, folder_exists: impl Fn(&str) -> bool) ->
     out
 }
 
+// ------------------------------------------------------------- ownership
+
+/// SHA-256 of every decoy content any released Kestrel version planted, for
+/// migration and uninstall ([`owned`]). **Append only**: a content change
+/// adds the new hashes and keeps the old ones, or decoys planted by older
+/// versions can no longer be recognised (lab 2026-10-21). The generator
+/// (`content`, `zipw`, `fnv1a`) is byte-identical in every commit that
+/// shipped decoys (56ec926, 655e352, 92fd9d4, b6c8a52 = 1.1.3), so this is
+/// one hash per decoy name, current and retired.
+pub const KNOWN_DECOY_SHA256: &[&str] = &[
+    // Documents
+    "75d96a5a8d110cf956427023c6800842f8f07e342853f863ea351c78792d0fb2", // !Payroll Q3.xlsx
+    "9096b07d0c558de8415202855b499e46d8a949c166f08036ce996d857cb10418", // !Accounts summary.docx
+    "d1a1faba9a497d48762da15e9dd3d05401bfee160163aa371d87d3ebc454efa8", // 0 Contract - signed.pdf
+    // Desktop (retired after 1.1.2)
+    "e179ea40aab824cd172dfd8ff470d2e1b914776972f3b3a0ba918f7968ce4cc5", // !Passwords.docx
+    "fdf18ab3366757b2bc737d8a8e3e51c63430a15f7f7f699bc28d7d1ac7e4a97d", // 0 Invoice 0917.pdf
+    // Pictures
+    "c6dfac87991ebd26ec21767458875916cc5e1641e0aea6367ccb3f899cc2bc8d", // !IMG_0001.jpg
+    "06aa1d6f66abd39c0e0d6bc993429acfe427ac0b314cad061b9e2c5f9b153a27", // 0 Scan 0917.jpg
+];
+
+/// Can Kestrel prove it planted the file at a decoy path whose content hash
+/// is `sha`? Only when `sha` is the hash recorded for that path in a
+/// `rcanaries.json` (any version) or the hash of a decoy content some
+/// released version planted. Anything else may be a real user file: never
+/// armed, never removed, never given attributes.
+pub fn owned(sha: &str, recorded: Option<&str>) -> bool {
+    recorded.is_some_and(|r| r.eq_ignore_ascii_case(sha))
+        || KNOWN_DECOY_SHA256
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(sha))
+}
+
+/// How many names a decoy slot may use: the layout name, then
+/// `<stem> 2.<ext>` … `<stem> 5.<ext>` when a file Kestrel cannot prove it
+/// planted holds the name (it may be the user's).
+pub const MAX_NAME_CANDIDATES: usize = 5;
+
+/// The names a decoy slot may use, in order (see [`MAX_NAME_CANDIDATES`]).
+/// They keep the `!` / `0` prefix and the extension.
+pub fn candidate_names(name: &str) -> Vec<String> {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s, Some(e)),
+        _ => (name, None),
+    };
+    let mut out = vec![name.to_string()];
+    for i in 2..=MAX_NAME_CANDIDATES {
+        out.push(match ext {
+            Some(e) => format!("{stem} {i}.{e}"),
+            None => format!("{stem} {i}"),
+        });
+    }
+    out
+}
+
+fn join(dir: &str, name: &str) -> String {
+    format!(r"{}\{name}", dir.trim_end_matches(['\\', '/']))
+}
+
+/// Every path in `profile` where any version may have planted a decoy (the
+/// current layout, retired names, and every candidate name of both).
+pub fn all_decoy_paths(profile: &str) -> Vec<String> {
+    let base = profile.trim_end_matches(['\\', '/']);
+    let mut out = Vec::new();
+    let names = DECOYS
+        .iter()
+        .map(|(f, n, _)| (*f, *n))
+        .chain(RETIRED_DECOYS.iter().copied());
+    for (folder, name) in names {
+        if base.is_empty() || !plain_folder(base, folder) {
+            continue;
+        }
+        for c in candidate_names(name) {
+            out.push(join(&format!(r"{base}\{folder}"), &c));
+        }
+    }
+    out
+}
+
+// -------------------------------------------------------------- planting
+
 /// Plant decoys for `profiles` (path-based [`canary::StdFs`]; the Windows
 /// agent uses [`plant_with`] and the handle-based `SafeDecoyFs`). Returns the
 /// paths that now hold our decoys.
@@ -237,97 +327,201 @@ pub fn plant(profiles: &[String], reg: &mut CanaryRegistry) -> Vec<String> {
     )
 }
 
+/// Plant / adopt decoys for `profiles` and rebuild `reg` so it lists
+/// exactly the armed decoys. Returns their paths.
+///
+/// Per decoy slot (profile × [`DECOYS`] entry), over its
+/// [`candidate_names`]:
+/// * a file Kestrel can prove it planted ([`owned`]) is **adopted**: armed,
+///   recorded with its actual hash, and given [`DECOY_ATTRS`] through the
+///   verified handle (never rewritten, so a decoy from an older version is
+///   not touched beyond its attributes);
+/// * otherwise the decoy is written (hidden) at the first free name;
+/// * a file it cannot prove it planted is never armed, never changed and
+///   its stale record is dropped (lab 2026-10-21: a visible, unproven
+///   `!Accounts summary.docx` stayed listed in `rcanaries.json`).
+///
+/// Retired decoys ([`RETIRED_DECOYS`]) that are provably ours are removed.
 pub fn plant_with(fs: &dyn DecoyFs, profiles: &[String], reg: &mut CanaryRegistry) -> Vec<String> {
-    retire_old(fs, reg);
-    let mut specs = Vec::new();
-    for p in profiles {
-        specs.extend(specs_for_profile(p, |d| {
-            fs.probe(Path::new(d)) == Probe::Dir
-        }));
-    }
-    // Hidden (also re-applied to decoys an earlier version planted visible).
-    canary::plant_with(fs, &specs, reg, DECOY_ATTRS)
-}
-
-/// Is a registry path one of the [`RETIRED_DECOYS`] (`…\<folder>\<name>`)?
-fn is_retired(path: &str) -> bool {
-    let p = path.replace('/', "\\");
-    let mut it = p.rsplit('\\');
-    let (Some(name), Some(folder)) = (it.next(), it.next()) else {
-        return false;
+    let old = std::mem::take(&mut reg.planted);
+    let recorded = |path: &str| -> Option<String> {
+        old.get(&crate::ntpath::norm_key(path))
+            .and_then(|r| r.sha256.clone())
     };
-    RETIRED_DECOYS
-        .iter()
-        .any(|(f, n)| f.eq_ignore_ascii_case(folder) && n.eq_ignore_ascii_case(name))
-}
-
-/// Remove [`RETIRED_DECOYS`] that are still exactly ours; forget the ones
-/// the user changed (or that are gone); keep the record on an I/O failure
-/// for the next attempt. Returns the removed paths.
-pub fn retire_old(fs: &dyn DecoyFs, reg: &mut CanaryRegistry) -> Vec<String> {
-    let mut removed = Vec::new();
-    let keys: Vec<String> = reg
-        .planted
-        .iter()
-        .filter(|(_, r)| is_retired(&r.path))
-        .map(|(k, _)| k.clone())
-        .collect();
-    for k in keys {
-        let Some(rec) = reg.planted.get(&k).cloned() else {
+    let mut armed = Vec::new();
+    let mut planned: std::collections::HashSet<String> = Default::default();
+    for profile in profiles {
+        let base = profile.trim_end_matches(['\\', '/']);
+        if base.is_empty() {
             continue;
-        };
-        let r = match rec.sha256.as_deref() {
-            Some(sha) => fs.remove_if_ours(Path::new(&rec.path), sha),
-            None => RemoveResult::NotOurs,
-        };
-        match r {
-            RemoveResult::Removed => {
-                removed.push(rec.path.clone());
-                reg.planted.remove(&k);
+        }
+        // Retired names: remove what is provably ours.
+        for (folder, name) in RETIRED_DECOYS {
+            if !plain_folder(base, folder) {
+                continue;
             }
-            RemoveResult::Gone | RemoveResult::NotOurs => {
-                reg.planted.remove(&k);
+            let path = join(&format!(r"{base}\{folder}"), name);
+            planned.insert(crate::ntpath::norm_key(&path));
+            if let Probe::File(sha) = fs.probe(Path::new(&path)) {
+                if owned(&sha, recorded(&path).as_deref())
+                    && fs.remove_if_ours(Path::new(&path), &sha) == RemoveResult::Removed
+                {
+                    tracing::info!(path = %path, "retired ransomware decoy removed");
+                }
             }
-            RemoveResult::Failed => {}
+        }
+        for (folder, name, kind) in DECOYS {
+            if !plain_folder(base, folder) {
+                continue;
+            }
+            let dir = format!(r"{base}\{folder}");
+            if fs.probe(Path::new(&dir)) != Probe::Dir {
+                continue;
+            }
+            let data = content(*kind, name);
+            let data_sha = crate::vault::hex(&sha2::Sha256::digest(&data));
+            let mut first_free: Option<String> = None;
+            let mut adopted = false;
+            for cand in candidate_names(name) {
+                let path = join(&dir, &cand);
+                let k = crate::ntpath::norm_key(&path);
+                planned.insert(k.clone());
+                match fs.probe(Path::new(&path)) {
+                    Probe::File(sha) if owned(&sha, recorded(&path).as_deref()) => {
+                        match fs.ensure_attributes(Path::new(&path), &sha, DECOY_ATTRS) {
+                            Ok(true) => tracing::info!(path = %path, "decoy attributes re-applied"),
+                            Ok(false) => {}
+                            Err(e) => {
+                                tracing::warn!(path = %path, "decoy attributes not applied: {e}")
+                            }
+                        }
+                        reg.planted.insert(
+                            k,
+                            CanaryRecord {
+                                path: path.clone(),
+                                sha256: Some(sha),
+                            },
+                        );
+                        armed.push(path);
+                        adopted = true;
+                    }
+                    Probe::File(_) => {
+                        tracing::warn!(path = %path, "file at a decoy name is not Kestrel's (unknown content): not armed, left alone");
+                    }
+                    Probe::Absent => {
+                        if first_free.is_none() {
+                            first_free = Some(path);
+                        }
+                    }
+                    Probe::Dir | Probe::Foreign => {
+                        tracing::warn!(path = %path, "decoy name taken by a folder / link / unreadable object: skipped");
+                    }
+                }
+            }
+            if adopted {
+                continue;
+            }
+            let Some(path) = first_free else {
+                tracing::warn!(dir = %dir, decoy = %name, "no free decoy name; decoy not planted");
+                continue;
+            };
+            match fs.write_file(Path::new(&path), &data, None, DECOY_ATTRS) {
+                Ok(()) => {
+                    reg.planted.insert(
+                        crate::ntpath::norm_key(&path),
+                        CanaryRecord {
+                            path: path.clone(),
+                            sha256: Some(data_sha),
+                        },
+                    );
+                    armed.push(path);
+                }
+                Err(e) => tracing::warn!(path = %path, "planting decoy failed: {e}"),
+            }
         }
     }
-    if !removed.is_empty() {
-        tracing::info!(removed = removed.len(), "retired Desktop ransomware decoys");
+    // Records outside the planned paths (a profile not enumerated now, an
+    // older layout): kept only while the file is still provably ours, so
+    // uninstall finds them; they are not armed.
+    for (k, rec) in old {
+        if planned.contains(&k) {
+            continue;
+        }
+        if let (Probe::File(sha), Some(r)) = (fs.probe(Path::new(&rec.path)), rec.sha256.as_deref())
+        {
+            if owned(&sha, Some(r)) {
+                reg.retained.insert(k, rec);
+            }
+        }
     }
+    armed
+}
+
+// --------------------------------------------------------------- removal
+
+/// Remove every decoy Kestrel can prove it planted ([`owned`]), from any
+/// version: the registry's records (current and retained) plus every
+/// decoy path of every version in `profiles` ([`all_decoy_paths`]), so a
+/// decoy whose record was lost is still found. Handle-based through `fs`
+/// (never follows a link); files with unknown content are left alone. The
+/// registry keeps only records that could not be removed because of an I/O
+/// failure. Returns the removed paths.
+pub fn remove_all_with(
+    fs: &dyn DecoyFs,
+    reg: &mut CanaryRegistry,
+    profiles: &[String],
+) -> Vec<String> {
+    let mut recorded: std::collections::BTreeMap<String, (String, Option<String>)> = reg
+        .planted
+        .iter()
+        .chain(reg.retained.iter())
+        .map(|(k, r)| (k.clone(), (r.path.clone(), r.sha256.clone())))
+        .collect();
+    for p in profiles {
+        for path in all_decoy_paths(p) {
+            recorded
+                .entry(crate::ntpath::norm_key(&path))
+                .or_insert((path, None));
+        }
+    }
+    let mut removed = Vec::new();
+    let mut keep = std::collections::BTreeMap::new();
+    for (k, (path, rec_sha)) in recorded {
+        let Probe::File(sha) = fs.probe(Path::new(&path)) else {
+            continue;
+        };
+        if !owned(&sha, rec_sha.as_deref()) {
+            continue;
+        }
+        // The hash is re-checked on the delete handle itself.
+        match fs.remove_if_ours(Path::new(&path), &sha) {
+            RemoveResult::Removed => removed.push(path),
+            RemoveResult::Failed => {
+                keep.insert(
+                    k,
+                    CanaryRecord {
+                        path,
+                        sha256: Some(sha),
+                    },
+                );
+            }
+            RemoveResult::Gone | RemoveResult::NotOurs => {}
+        }
+    }
+    reg.planted = keep;
+    reg.retained.clear();
     removed
 }
 
-/// Remove every planted decoy whose content is still ours (uninstall /
-/// policy turned off). Files the user changed, links and directories are
-/// left alone. Returns the removed paths; the registry keeps entries that
-/// could not be removed for a later attempt.
-pub fn remove_planted(reg: &mut CanaryRegistry) -> Vec<String> {
-    remove_planted_with(
+/// Path-based [`remove_all_with`] (tests, non-Windows).
+pub fn remove_planted(reg: &mut CanaryRegistry, profiles: &[String]) -> Vec<String> {
+    remove_all_with(
         &canary::StdFs {
             set_attrs: &|_, _| {},
         },
         reg,
+        profiles,
     )
-}
-
-pub fn remove_planted_with(fs: &dyn DecoyFs, reg: &mut CanaryRegistry) -> Vec<String> {
-    let mut removed = Vec::new();
-    let mut keep = std::collections::BTreeMap::new();
-    for (k, rec) in std::mem::take(&mut reg.planted) {
-        let r = match rec.sha256.as_deref() {
-            Some(sha) => fs.remove_if_ours(Path::new(&rec.path), sha),
-            None => RemoveResult::NotOurs,
-        };
-        match r {
-            RemoveResult::Removed => removed.push(rec.path.clone()),
-            RemoveResult::Gone | RemoveResult::NotOurs => {}
-            RemoveResult::Failed => {
-                keep.insert(k, rec);
-            }
-        }
-    }
-    reg.planted = keep;
-    removed
 }
 
 // ------------------------------------------------------------ poller logic
@@ -399,18 +593,21 @@ pub fn save_registry(state_dir: &Path, reg: &CanaryRegistry) -> std::io::Result<
 }
 
 /// Uninstall / policy-off entry point: remove every ransomware decoy Kestrel
-/// planted (only files still holding exactly our content) and update the
-/// registry in `state_dir`. Returns the removed paths.
+/// can prove it planted, from any version ([`remove_all_with`]), and update
+/// the registry in `state_dir`. Returns the removed paths.
 pub fn remove_all(state_dir: &Path) -> Vec<String> {
     let mut reg = load_registry(state_dir);
-    if reg.planted.is_empty() {
-        return vec![];
-    }
     // V-H8: on Windows (SYSTEM, user-writable profiles) handle-based only.
+    // Profiles are scanned even with an empty registry (lab 2026-10-21: a
+    // decoy whose record was lost survived every uninstall).
     #[cfg(windows)]
-    let removed = remove_planted_with(&crate::win::rcanary::SafeDecoyFs, &mut reg);
+    let removed = remove_all_with(
+        &crate::win::rcanary::SafeDecoyFs,
+        &mut reg,
+        &crate::win::host::user_profiles(),
+    );
     #[cfg(not(windows))]
-    let removed = remove_planted(&mut reg);
+    let removed = remove_planted(&mut reg, &[]);
     if let Err(e) = save_registry(state_dir, &reg) {
         tracing::warn!("saving {REGISTRY_FILE}: {e}");
     }
@@ -487,54 +684,6 @@ mod tests {
     }
 
     #[test]
-    fn retired_names() {
-        assert!(is_retired(r"C:\Users\bob\Desktop\!Passwords.docx"));
-        assert!(is_retired(r"C:\Users\bob\desktop\0 invoice 0917.pdf"));
-        assert!(is_retired("/tmp/x/Desktop/!Passwords.docx"));
-        assert!(!is_retired(r"C:\Users\bob\Documents\!Passwords.docx"));
-        assert!(!is_retired(r"C:\Users\bob\Desktop\!Payroll Q3.xlsx"));
-        assert!(!is_retired("!Passwords.docx"));
-    }
-
-    /// Upgrade from 1.1.2: the Desktop decoys are removed while still
-    /// exactly Kestrel's; a user-changed one stays (and is forgotten).
-    #[test]
-    fn retire_old_desktop_decoys() {
-        let d = std::env::temp_dir().join(format!("kestrel-rcanary-retire-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        let desk = d.join("Desktop");
-        std::fs::create_dir_all(&desk).unwrap();
-        let spec = |name: &str, kind| CanarySpec {
-            path: desk.join(name).to_string_lossy().into_owned(),
-            category: DataCategory::PasswordManager,
-            content: content(kind, name),
-            is_dir: false,
-        };
-        let legacy = vec![
-            spec("!Passwords.docx", DocKind::Docx),
-            spec("0 Invoice 0917.pdf", DocKind::Pdf),
-        ];
-        let fs = canary::StdFs {
-            set_attrs: &|_, _| {},
-        };
-        let mut reg = CanaryRegistry::default();
-        assert_eq!(canary::plant_with(&fs, &legacy, &mut reg, 0).len(), 2);
-        // The employee edited one of them.
-        std::fs::write(desk.join("0 Invoice 0917.pdf"), b"my notes").unwrap();
-        let removed = retire_old(&fs, &mut reg);
-        assert_eq!(removed.len(), 1, "{removed:?}");
-        assert!(!desk.join("!Passwords.docx").exists());
-        assert_eq!(
-            std::fs::read(desk.join("0 Invoice 0917.pdf")).unwrap(),
-            b"my notes"
-        );
-        assert!(reg.planted.is_empty());
-        // Idempotent.
-        assert!(retire_old(&fs, &mut reg).is_empty());
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
     fn headers_are_valid_and_deterministic() {
         for (_, name, kind) in DECOYS {
             let a = content(*kind, name);
@@ -576,54 +725,339 @@ mod tests {
         assert!(specs_for_profile(r"C:\Users\x\OneDrive", |_| true).is_empty());
     }
 
-    #[test]
-    fn plant_and_remove_roundtrip() {
-        let d = std::env::temp_dir().join(format!("kestrel-rcanary-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        for f in ["Documents", "Pictures"] {
-            std::fs::create_dir_all(d.join(f)).unwrap();
+    /// In-memory [`DecoyFs`] keyed by path string (both separators work on
+    /// every OS): directories, files (content + attributes).
+    #[derive(Default)]
+    struct MemFs {
+        dirs: std::cell::RefCell<std::collections::HashSet<String>>,
+        files: std::cell::RefCell<std::collections::HashMap<String, (Vec<u8>, u32)>>,
+        /// Paths whose delete fails (I/O failure).
+        stuck: std::collections::HashSet<String>,
+    }
+
+    fn sha(b: &[u8]) -> String {
+        crate::vault::hex(&sha2::Sha256::digest(b))
+    }
+
+    impl MemFs {
+        fn dir(&self, p: &str) {
+            self.dirs.borrow_mut().insert(p.to_string());
         }
-        // A real user file with a decoy name is never touched.
-        std::fs::write(d.join("Documents").join("!Payroll Q3.xlsx"), b"mine").unwrap();
-        let prof = d.to_string_lossy().replace('/', "\\");
-        let mut reg = CanaryRegistry::default();
-        // Use the platform separator for the actual filesystem test.
-        let specs = specs_for_profile(&prof, |_| true)
-            .into_iter()
-            .map(|mut s| {
-                s.path = s.path.replace('\\', std::path::MAIN_SEPARATOR_STR);
-                s
-            })
-            .collect::<Vec<_>>();
-        let hidden = std::cell::RefCell::new(Vec::new());
-        let set_attrs = |p: &Path, a: u32| hidden.borrow_mut().push((p.to_path_buf(), a));
-        let fs = canary::StdFs {
-            set_attrs: &set_attrs,
-        };
-        let ok = canary::plant_with(&fs, &specs, &mut reg, DECOY_ATTRS);
-        assert_eq!(ok.len(), DECOYS.len() - 1);
+        fn put(&self, p: &str, b: &[u8]) {
+            self.files
+                .borrow_mut()
+                .insert(p.to_string(), (b.to_vec(), 0x20));
+        }
+        fn get(&self, p: &str) -> Option<(Vec<u8>, u32)> {
+            self.files.borrow().get(p).cloned()
+        }
+    }
+
+    impl DecoyFs for MemFs {
+        fn probe(&self, path: &Path) -> Probe {
+            let p = path.to_string_lossy().into_owned();
+            if self.dirs.borrow().contains(&p) {
+                return Probe::Dir;
+            }
+            match self.files.borrow().get(&p) {
+                Some((b, _)) => Probe::File(sha(b)),
+                None => Probe::Absent,
+            }
+        }
+        fn create_dirs(&self, path: &Path, _attrs: u32) -> std::io::Result<()> {
+            self.dir(&path.to_string_lossy());
+            Ok(())
+        }
+        fn write_file(
+            &self,
+            path: &Path,
+            data: &[u8],
+            replace_sha: Option<&str>,
+            attrs: u32,
+        ) -> std::io::Result<()> {
+            let p = path.to_string_lossy().into_owned();
+            match (self.probe(path), replace_sha) {
+                (Probe::Absent, None) => {}
+                (Probe::File(c), Some(w)) if c == w => {}
+                _ => return Err(std::io::Error::other("not ours")),
+            }
+            self.files.borrow_mut().insert(p, (data.to_vec(), attrs));
+            Ok(())
+        }
+        fn ensure_attributes(&self, path: &Path, s: &str, attrs: u32) -> std::io::Result<bool> {
+            let p = path.to_string_lossy().into_owned();
+            let mut f = self.files.borrow_mut();
+            match f.get_mut(&p) {
+                Some((b, a)) if sha(b) == s => {
+                    let changed = *a & attrs != attrs;
+                    *a = (*a & !0x80) | attrs;
+                    Ok(changed)
+                }
+                _ => Err(std::io::Error::other("not ours")),
+            }
+        }
+        fn remove_if_ours(&self, path: &Path, s: &str) -> RemoveResult {
+            let p = path.to_string_lossy().into_owned();
+            let cur = self.get(&p);
+            match cur {
+                None => RemoveResult::Gone,
+                Some((b, _)) if sha(&b) == s => {
+                    if self.stuck.contains(&p) {
+                        return RemoveResult::Failed;
+                    }
+                    self.files.borrow_mut().remove(&p);
+                    RemoveResult::Removed
+                }
+                Some(_) => RemoveResult::NotOurs,
+            }
+        }
+        fn remove_empty_dir(&self, _path: &Path) -> RemoveResult {
+            RemoveResult::NotOurs
+        }
+    }
+
+    const PROF: &str = r"C:\Users\employee";
+    const DOCS: &str = r"C:\Users\employee\Documents";
+    const PICS: &str = r"C:\Users\employee\Pictures";
+    const DESK: &str = r"C:\Users\employee\Desktop";
+
+    fn lab_fs() -> MemFs {
+        let fs = MemFs::default();
+        for d in [PROF, DOCS, PICS, DESK] {
+            fs.dir(d);
+        }
+        fs
+    }
+
+    fn p(dir: &str, name: &str) -> String {
+        format!(r"{dir}\{name}")
+    }
+
+    /// The hash list is append-only and covers every name any version
+    /// planted (current and retired): the generator never changed.
+    #[test]
+    fn known_hashes_cover_every_decoy_of_every_version() {
+        let all = DECOYS.iter().map(|(_, n, k)| (*n, *k)).chain([
+            ("!Passwords.docx", DocKind::Docx),
+            ("0 Invoice 0917.pdf", DocKind::Pdf),
+        ]);
+        for (name, kind) in all {
+            let h = sha(&content(kind, name));
+            assert!(KNOWN_DECOY_SHA256.contains(&h.as_str()), "{name}: {h}");
+            assert!(owned(&h, None));
+        }
         assert_eq!(
-            std::fs::read(d.join("Documents").join("!Payroll Q3.xlsx")).unwrap(),
-            b"mine"
+            KNOWN_DECOY_SHA256.len(),
+            DECOYS.len() + RETIRED_DECOYS.len()
         );
-        // Every decoy written was marked hidden; the user's file was not.
-        assert_eq!(hidden.borrow().len(), DECOYS.len() - 1);
-        assert!(hidden
-            .borrow()
-            .iter()
-            .all(|(_, a)| *a == canary::ATTR_HIDDEN));
-        assert!(!hidden
-            .borrow()
-            .iter()
-            .any(|(p, _)| p.ends_with("!Payroll Q3.xlsx")));
-        // User edits one decoy: removal leaves it.
-        let edited = d.join("Documents").join("0 Contract - signed.pdf");
-        std::fs::write(&edited, b"changed").unwrap();
-        let removed = remove_planted(&mut reg);
-        assert_eq!(removed.len(), DECOYS.len() - 2);
-        assert!(edited.exists());
-        assert!(!d.join("Pictures").join("!IMG_0001.jpg").exists());
+        // Unknown content is never ours, unless the registry recorded it.
+        let user = sha(b"user's own document");
+        assert!(!owned(&user, None));
+        assert!(!owned(&user, Some(&sha(b"other"))));
+        assert!(owned(&user, Some(&user.to_ascii_uppercase())));
+    }
+
+    #[test]
+    fn candidate_names_keep_prefix_and_extension() {
+        let c = candidate_names("!Accounts summary.docx");
+        assert_eq!(c.len(), MAX_NAME_CANDIDATES);
+        assert_eq!(c[0], "!Accounts summary.docx");
+        assert_eq!(c[1], "!Accounts summary 2.docx");
+        assert_eq!(c[4], "!Accounts summary 5.docx");
+        assert_eq!(candidate_names("0 Scan")[1], "0 Scan 2");
+    }
+
+    /// Fresh plant: every decoy written hidden at its layout name, the
+    /// registry lists exactly those; a second run changes nothing.
+    #[test]
+    fn plant_fresh_hidden_and_idempotent() {
+        let fs = lab_fs();
+        let mut reg = CanaryRegistry::default();
+        let armed = plant_with(&fs, &[PROF.into()], &mut reg);
+        assert_eq!(armed.len(), DECOYS.len());
+        for (folder, name, _) in DECOYS {
+            let dir = if *folder == "Documents" { DOCS } else { PICS };
+            let (_, a) = fs.get(&p(dir, name)).expect(name);
+            assert_eq!(a & canary::ATTR_HIDDEN, canary::ATTR_HIDDEN, "{name}");
+        }
+        assert_eq!(reg.planted.len(), DECOYS.len());
+        let before = fs.files.borrow().clone();
+        let again = plant_with(&fs, &[PROF.into()], &mut reg);
+        assert_eq!(again.len(), DECOYS.len());
+        assert_eq!(*fs.files.borrow(), before);
+    }
+
+    /// Lab 2026-10-21 (1.1.3): a visible `!Accounts summary.docx` with
+    /// content Kestrel cannot prove it planted (7283 bytes, no matching
+    /// record) was listed in rcanaries.json. Now: not armed, untouched,
+    /// its record dropped, and the decoy goes to the next free name.
+    #[test]
+    fn unproven_file_at_decoy_name_is_not_armed() {
+        let fs = lab_fs();
+        let squatter = p(DOCS, "!Accounts summary.docx");
+        let unknown = vec![7u8; 7283];
+        fs.put(&squatter, &unknown);
+        // A stale record with another hash (e.g. an earlier plant whose
+        // file was later replaced).
+        let mut reg = CanaryRegistry::default();
+        reg.planted.insert(
+            crate::ntpath::norm_key(&squatter),
+            CanaryRecord {
+                path: squatter.clone(),
+                sha256: Some(sha(b"something else")),
+            },
+        );
+        let armed = plant_with(&fs, &[PROF.into()], &mut reg);
+        assert!(!armed.contains(&squatter), "{armed:?}");
+        assert!(!reg
+            .planted
+            .contains_key(&crate::ntpath::norm_key(&squatter)));
+        assert!(reg.retained.is_empty());
+        // Untouched: content and attributes.
+        assert_eq!(fs.get(&squatter), Some((unknown, 0x20)));
+        // Planted under the next free name, hidden, with the known content.
+        let alt = p(DOCS, "!Accounts summary 2.docx");
+        assert!(armed.contains(&alt), "{armed:?}");
+        let (b, a) = fs.get(&alt).unwrap();
+        assert_eq!(a & canary::ATTR_HIDDEN, canary::ATTR_HIDDEN);
+        assert!(owned(&sha(&b), None));
+        // Next run keeps using the alternate, plants nothing new.
+        let n = fs.files.borrow().len();
+        let again = plant_with(&fs, &[PROF.into()], &mut reg);
+        assert!(again.contains(&alt) && !again.contains(&squatter));
+        assert_eq!(fs.files.borrow().len(), n);
+        // Uninstall leaves the unproven file, removes the decoys.
+        let removed = remove_all_with(&fs, &mut reg, &[PROF.into()]);
+        assert_eq!(removed.len(), DECOYS.len(), "{removed:?}");
+        assert!(fs.get(&squatter).is_some());
+        assert_eq!(fs.files.borrow().len(), 1);
+    }
+
+    /// A visible decoy from an older version is adopted (armed, hidden
+    /// through the handle, never rewritten) when ownership is proven by
+    /// the recorded hash of a previous rcanaries.json, or by the content
+    /// of any released version even without a record.
+    #[test]
+    fn legacy_decoys_are_adopted_and_hidden() {
+        let fs = lab_fs();
+        // Proven by the registry only (content not in the known list, e.g.
+        // an unreleased build that recorded its own hash).
+        let by_record = p(DOCS, "!Accounts summary.docx");
+        let legacy = vec![9u8; 7283];
+        fs.put(&by_record, &legacy);
+        // Proven by known content, no record at all (registry lost).
+        let by_content = p(DOCS, "!Payroll Q3.xlsx");
+        fs.put(&by_content, &content(DocKind::Xlsx, "!Payroll Q3.xlsx"));
+        let mut reg = CanaryRegistry::default();
+        reg.planted.insert(
+            crate::ntpath::norm_key(&by_record),
+            CanaryRecord {
+                path: by_record.clone(),
+                sha256: Some(sha(&legacy)),
+            },
+        );
+        let armed = plant_with(&fs, &[PROF.into()], &mut reg);
+        for path in [&by_record, &by_content] {
+            assert!(armed.contains(path), "{path}: {armed:?}");
+            let (_, a) = fs.get(path).unwrap();
+            assert_eq!(a & canary::ATTR_HIDDEN, canary::ATTR_HIDDEN, "{path}");
+        }
+        // Never rewritten, recorded with its actual hash.
+        assert_eq!(fs.get(&by_record).unwrap().0, legacy);
+        assert_eq!(
+            reg.planted[&crate::ntpath::norm_key(&by_record)].sha256,
+            Some(sha(&legacy))
+        );
+        // No duplicate at the alternate name.
+        assert!(fs.get(&p(DOCS, "!Accounts summary 2.docx")).is_none());
+        // Uninstall removes both.
+        let removed = remove_all_with(&fs, &mut reg, &[PROF.into()]);
+        assert!(removed.contains(&by_record) && removed.contains(&by_content));
+        assert!(fs.files.borrow().is_empty());
         assert!(reg.planted.is_empty());
-        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Upgrade from 1.1.2: the Desktop decoys are removed while provably
+    /// Kestrel's; a user-changed one stays.
+    #[test]
+    fn retired_desktop_decoys_removed_when_provably_ours() {
+        let fs = lab_fs();
+        let pw = p(DESK, "!Passwords.docx");
+        let inv = p(DESK, "0 Invoice 0917.pdf");
+        fs.put(&pw, &content(DocKind::Docx, "!Passwords.docx"));
+        fs.put(&inv, b"my notes");
+        let mut reg = CanaryRegistry::default();
+        let armed = plant_with(&fs, &[PROF.into()], &mut reg);
+        assert!(fs.get(&pw).is_none());
+        assert_eq!(fs.get(&inv).unwrap().0, b"my notes");
+        assert!(!armed.iter().any(|a| a.contains("Desktop")));
+        assert!(!reg.planted.values().any(|r| r.path.contains("Desktop")));
+    }
+
+    /// Lab 2026-10-21: uninstall left a decoy behind because removal used
+    /// only the registry. Now every decoy path of every version is scanned
+    /// with the ownership rule, even with an empty registry; a delete
+    /// failure keeps the record for the next attempt; unknown files stay.
+    #[test]
+    fn uninstall_removes_every_provable_decoy_without_a_registry() {
+        let mut fs = lab_fs();
+        let docs = p(DOCS, "!Accounts summary.docx");
+        let alt = p(DOCS, "0 Contract - signed 2.pdf");
+        let desk = p(DESK, "0 Invoice 0917.pdf");
+        let user = p(DOCS, "!Payroll Q3.xlsx");
+        fs.put(&docs, &content(DocKind::Docx, "!Accounts summary.docx"));
+        fs.put(&alt, &content(DocKind::Pdf, "0 Contract - signed.pdf"));
+        fs.put(&desk, &content(DocKind::Pdf, "0 Invoice 0917.pdf"));
+        fs.put(&user, b"the user's real payroll");
+        let stuck = p(PICS, "!IMG_0001.jpg");
+        fs.put(&stuck, &content(DocKind::Jpg, "!IMG_0001.jpg"));
+        fs.stuck.insert(stuck.clone());
+        let mut reg = CanaryRegistry::default();
+        let removed = remove_all_with(&fs, &mut reg, &[PROF.into()]);
+        for path in [&docs, &alt, &desk] {
+            assert!(removed.contains(path), "{path}: {removed:?}");
+        }
+        assert_eq!(fs.get(&user).unwrap().0, b"the user's real payroll");
+        assert!(fs.get(&stuck).is_some());
+        assert_eq!(reg.planted.len(), 1);
+        assert!(reg.planted.contains_key(&crate::ntpath::norm_key(&stuck)));
+        // Retained records outside the scanned profiles are removed too.
+        let other = r"C:\Users\former\Documents\!Payroll Q3.xlsx";
+        fs.put(other, &content(DocKind::Xlsx, "!Payroll Q3.xlsx"));
+        reg.retained.insert(
+            crate::ntpath::norm_key(other),
+            CanaryRecord {
+                path: other.into(),
+                sha256: Some(sha(&content(DocKind::Xlsx, "!Payroll Q3.xlsx"))),
+            },
+        );
+        let removed = remove_all_with(&fs, &mut reg, &[]);
+        assert_eq!(removed, vec![other.to_string()]);
+        assert!(reg.retained.is_empty());
+    }
+
+    /// Records of profiles not enumerated now are kept as `retained` (not
+    /// armed) while provably ours, and dropped when not.
+    #[test]
+    fn records_outside_current_profiles_are_retained_not_armed() {
+        let fs = lab_fs();
+        let other = r"C:\Users\former\Documents\!Payroll Q3.xlsx";
+        let gone = r"C:\Users\former\Documents\0 Contract - signed.pdf";
+        fs.put(other, &content(DocKind::Xlsx, "!Payroll Q3.xlsx"));
+        let mut reg = CanaryRegistry::default();
+        for path in [other, gone] {
+            reg.planted.insert(
+                crate::ntpath::norm_key(path),
+                CanaryRecord {
+                    path: path.into(),
+                    sha256: Some("00".into()),
+                },
+            );
+        }
+        let armed = plant_with(&fs, &[PROF.into()], &mut reg);
+        assert!(!armed.iter().any(|a| a.contains("former")));
+        assert!(!reg.planted.values().any(|r| r.path.contains("former")));
+        assert_eq!(reg.retained.len(), 1);
+        assert!(reg.retained.contains_key(&crate::ntpath::norm_key(other)));
     }
 }

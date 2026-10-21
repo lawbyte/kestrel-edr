@@ -29,6 +29,11 @@ pub struct CanaryRecord {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanaryRegistry {
     pub planted: BTreeMap<String, CanaryRecord>,
+    /// Ransomware decoys that are provably Kestrel's but not armed (a
+    /// profile not enumerated at the last plant, an older layout): kept so
+    /// uninstall removes them. Never armed. Absent in older files.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub retained: BTreeMap<String, CanaryRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

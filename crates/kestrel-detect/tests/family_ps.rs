@@ -425,7 +425,15 @@ fn ps07_service_installs() {
 fn ps07_benign_and_never_kestrel() {
     for pol in [Policy::default(), policy_all(RuleMode::Protect)] {
         let out = run("ps_service_benign.jsonl", pol);
-        assert!(ps(&out).is_empty(), "{}", dump(&out));
+        // Lab 2026-10-21: Kestrel's service *name* on another binary
+        // (a binary in the Public profile) is alerted now (only Kestrel's real
+        // install is silent); everything else in the fixture stays benign,
+        // and Kestrel's service is never a removal target.
+        for d in ps(&out) {
+            assert_eq!(d.alert.rule_id, "PS-07", "{}", dump(&out));
+            assert!(d.alert.summary.contains("KestrelAgent"), "{}", dump(&out));
+        }
+        assert!(!ps(&out).is_empty(), "{}", dump(&out));
         for d in alerts(&out) {
             for a in &d.actions {
                 if let ResponseAction::RemoveAutorun { location, .. } = a {
@@ -819,4 +827,91 @@ fn state_is_bounded_under_flood() {
         }
     }
     assert!(started.elapsed().as_secs() < 60);
+}
+
+/// Fresh-install lab 2026-10-21 (1.1.3, timing-dependent): the SCM record
+/// of Kestrel's own service install raised PS-07 ("An unidentified process
+/// installed the service \"Kestrel EDR Agent\" …"). Kestrel's own service
+/// (exact name + the running agent's image) and the tray's HKLM Run value
+/// (exact value name + kestrel-tray.exe next to the agent) raise nothing,
+/// in any mode, from any rule, Sigma included.
+#[test]
+fn kestrel_own_install_raises_nothing() {
+    for mode in [RuleMode::Audit, RuleMode::Protect] {
+        let mut e = engine(policy_all(mode));
+        // As in the lab: the (unsigned) agent is already running.
+        e.process(&start(
+            0,
+            "agent",
+            900,
+            AGENT,
+            "kestrel-agent.exe service",
+            None,
+            SignatureState::Unsigned,
+            None,
+        ));
+        let out = replay(&mut e, &fixture("ps_kestrel_own_install.jsonl"));
+        assert!(alerts(&out).is_empty(), "{mode:?}: {}", dump(&out));
+        assert!(standalone(&out).is_empty(), "{mode:?}: {}", dump(&out));
+    }
+}
+
+/// Kestrel's name on another binary, the agent binary under another
+/// service name, and a `KestrelTray` Run value pointing elsewhere are
+/// judged like anything else.
+#[test]
+fn kestrel_impostors_still_alert() {
+    let fx = fixture("ps_kestrel_impostor.jsonl");
+    // The agent binary is unsigned (as in the lab), and known to the
+    // process table: a service running it under another name is weak-PS-07.
+    let agent_start = start(
+        0,
+        "agent",
+        900,
+        AGENT,
+        "kestrel-agent.exe service",
+        None,
+        SignatureState::Unsigned,
+        None,
+    );
+    let mut internal = fx[0].clone();
+    if let EventData::ServiceInstalled(si) = &mut internal.data {
+        si.name = "KestrelAgent".into();
+    }
+    let cases = [
+        (fx[0].clone(), "PS-07"),
+        (internal, "PS-07"),
+        (fx[1].clone(), "PS-07"),
+        (fx[2].clone(), "PS-01"),
+    ];
+    for (i, (ev, want)) in cases.into_iter().enumerate() {
+        let mut e = engine(policy_all(RuleMode::Protect));
+        e.process(&agent_start);
+        let out = e.process(&ev);
+        if i < 2 {
+            // Kestrel's service name: alerted, but never a removal target.
+            let acts: Vec<ResponseAction> = alerts(&out)
+                .iter()
+                .flat_map(|d| d.actions.clone())
+                .collect();
+            assert!(removals(&acts).is_empty(), "event {i}: {}", dump(&out));
+        }
+        let ids = ps_ids(&out);
+        assert!(ids.contains(&want.to_string()), "event {i}: {}", dump(&out));
+    }
+    // Same name and binary but another argument, or a HKCU Run value: not
+    // Kestrel's install either.
+    let mut e = engine(policy_all(RuleMode::Audit));
+    e.process(&agent_start);
+    let mut s = fx[0].clone();
+    if let EventData::ServiceInstalled(si) = &mut s.data {
+        si.image_path = format!(r#""{AGENT}" run --server https://evil.example"#);
+    }
+    assert!(!alerts(&e.process(&s)).is_empty());
+    let mut r = fixture("ps_kestrel_own_install.jsonl")[2].clone();
+    if let EventData::RegistrySet { key, data, .. } = &mut r.data {
+        *key = format!(r"HKU\{SID}\Software\Microsoft\Windows\CurrentVersion\Run");
+        *data = Some(r#""C:\Users\alice\AppData\Local\Temp\kestrel-tray.exe" --background"#.into());
+    }
+    assert!(!ps_ids(&e.process(&r)).is_empty());
 }
