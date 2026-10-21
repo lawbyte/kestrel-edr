@@ -26,8 +26,8 @@ The header shows hostname, status, OS, signed-in user, last contact and group. T
 | Kernel telemetry (ETW) | All ETW sessions running; events per minute | Check `logman query Kestrel-Core -ets` on the device and the agent logs in `C:\ProgramData\Kestrel\logs`. |
 | Events lost (1 h) | ETW events or buffers lost | Heavy I/O can drop events. More than 500 lost between heartbeats raises `TP-SRV-EVENTS-LOST`. |
 | Sysmon | Optional; adds handle-access detail | Not required. |
-| DPAPI audit channel | Needed by rule ST-03 | Set the **DPAPI audit channel** hardening control to Enforce in the policy. |
-| AMSI provider | AMSI registered | Missing or tampered; check `TP-03` alerts. |
+| DPAPI audit channel | Optional. Needed by rule ST-03 | Shown grey while off. To use ST-03, turn on the **DPAPI audit channel** hardening control in the policy. |
+| AMSI provider | Not used in this version | Shown grey. Kestrel 1.1 reads script content from PowerShell script-block logging instead; an AMSI provider is on the roadmap. AMSI tampering is still detected by `TP-03`. |
 | Outbox | Messages queued on the device | Should drain to about 0 while online. |
 
 The card also shows agent CPU, memory, uptime and the antivirus product.

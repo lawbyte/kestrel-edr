@@ -92,8 +92,8 @@ function DeviceView({ d }: { d: DeviceDetail }) {
               <Health label="Kernel telemetry (ETW)" ok={h.etw_ok} detail={h.etw_ok ? `${h.events_per_min ?? 0} events/min` : 'Session not running'} />
               <Health label="Events lost (1 h)" ok={(h.etw_events_lost ?? 0) === 0} warn={(h.etw_events_lost ?? 0) > 0 && (h.etw_events_lost ?? 0) < 500} detail={`${h.etw_events_lost ?? 0} events, ${h.etw_buffers_lost ?? 0} buffers`} />
               <Health label="Sysmon" ok={!!h.sysmon_present} neutral={!h.sysmon_present} detail={h.sysmon_present ? 'Present: adds handle-access detail' : 'Not installed (optional)'} />
-              <Health label="DPAPI audit channel" ok={!!h.dpapi_channel_enabled} detail={h.dpapi_channel_enabled ? 'Enabled: ST-03 active' : 'Disabled: ST-03 cannot fire'} />
-              <Health label="AMSI provider" ok={!!h.amsi_ok} detail={h.amsi_ok ? 'Registered' : 'Missing or tampered'} />
+              <Health label="DPAPI audit channel" ok={!!h.dpapi_channel_enabled} neutral={!h.dpapi_channel_enabled} detail={h.dpapi_channel_enabled ? 'Enabled: ST-03 active' : 'Off (optional): turn on in Policies, Hardening for ST-03'} />
+              <Health label="AMSI provider" ok={!!h.amsi_ok} neutral={!h.amsi_ok} detail={h.amsi_ok ? 'Registered' : 'Not used in this version: script content comes from PowerShell logging'} />
               <Health label="Outbox" ok={(h.outbox_depth ?? 0) < 100} warn={(h.outbox_depth ?? 0) >= 100} detail={`${h.outbox_depth ?? 0} queued messages`} />
             </div>
             <div className="mt-4 grid grid-cols-2 gap-4 border-t border-border pt-3 text-sm sm:grid-cols-4">
@@ -283,7 +283,7 @@ function Health({ label, ok, warn, neutral, detail }: { label: string; ok: boole
       <div className="min-w-0">
         <p className="text-sm font-medium">
           {label}
-          <span className="sr-only">: {ok ? 'healthy' : neutral ? 'not present' : warn ? 'warning' : 'problem'}</span>
+          <span className="sr-only">: {ok ? 'healthy' : neutral ? 'not in use' : warn ? 'warning' : 'problem'}</span>
         </p>
         <p className="text-xs text-fg-muted">{detail}</p>
       </div>
