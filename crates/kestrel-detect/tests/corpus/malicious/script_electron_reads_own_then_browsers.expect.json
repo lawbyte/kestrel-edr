@@ -1,0 +1,20 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "Electron/asar stealer",
+  "category": "script-stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "ST-03 own-app DPAPI 'Chromium' allowance (must not carry over)"
+  ],
+  "sources": [
+    "https://research.jfrog.com/post/solara-cipher-npm/",
+    "https://research.checkpoint.com/2025/from-trust-to-threat-hijacked-discord-invites-used-for-multi-stage-malware-delivery/"
+  ],
+  "notes": "Unsigned Electron app (asar payload) first reads its own Local State and safeStorage key (DPAPI 'Chromium', looks like ordinary Electron start-up), then the real Chrome/Edge/Brave Local State, Login Data and Cookies."
+}

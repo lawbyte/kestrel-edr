@@ -1,0 +1,10 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 6100, "guid": "stealer", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Users\\alice\\AppData\\Local\\OneDriveSync\\OneDriveSync.exe", "cmdline": "\"C:\\Users\\alice\\AppData\\Local\\OneDriveSync\\OneDriveSync.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "unsigned", "sha256": "2c02f9d42c19864dd7f6d27f5788e1ec4d94cf2115118b6ea5497889f65ac5a5"}
+{"ts": 1760000001000, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Local State", "op": "read"}
+{"ts": 1760000001040, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000001100, "pid": 6100, "guid": "stealer", "type": "dpapi_unprotect", "description": "Google Chrome"}
+{"ts": 1760000091000, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Local Extension Settings\\nkbihfbeogaeaoehlefnkodbefgpgknn\\000003.log", "op": "read"}
+{"ts": 1760000181000, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\key_datas", "op": "read"}
+{"ts": 1760000181040, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\D877F783D5D3EF8C\\maps", "op": "read"}
+{"ts": 1760000271000, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\discord\\Local Storage\\leveldb\\000005.ldb", "op": "read"}
+{"ts": 1760000300000, "pid": 6100, "guid": "stealer", "type": "net_connect", "proto": "tcp", "dst_ip": "198.51.100.23", "dst_port": 443, "src_port": 50101, "bytes_sent": 2400000}

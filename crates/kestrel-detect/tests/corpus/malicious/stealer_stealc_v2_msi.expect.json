@@ -1,0 +1,19 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "StealC v2",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-12"
+  ],
+  "sources": [
+    "https://www.zscaler.com/blogs/security-research/i-stealc-you-tracking-rapid-changes-stealc"
+  ],
+  "notes": "StealC v2 (2025): MSI / EXE delivery, unsigned payload in a per-user Programs folder, JSON over HTTP to a raw-IP C2, browsers + wallets + Telegram + Steam, chunked upload."
+}

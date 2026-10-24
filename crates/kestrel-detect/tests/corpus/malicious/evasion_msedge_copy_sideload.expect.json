@@ -1,0 +1,24 @@
+{
+  "must_alert": [
+    "ST-15",
+    [
+      "ST-02",
+      "ST-04"
+    ]
+  ],
+  "min_severity": "high",
+  "family": "DLL sideloading into a copied msedge.exe",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "paths::is_trusted_owner (browser name)"
+  ],
+  "sources": [
+    "https://unit42.paloaltonetworks.com/vidar-stealer-xmrig-miner-campaign-analysis/",
+    "https://www.intrinsec.com/wp-content/uploads/2026/04/TLP_CLEAR-20260424-New_Vidar.pdf"
+  ],
+  "notes": "Copied Microsoft-signed msedge.exe in ProgramData loads a rogue msedge_elf.dll (the Vidar/Lumma 2025-2026 pattern ST-15 targets), then steals.",
+  "known_gap": "ST-15 fires, but the copied msedge.exe is still a trusted browser for ST-01 / ST-02 / ST-04"
+}

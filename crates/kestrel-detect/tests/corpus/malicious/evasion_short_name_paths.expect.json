@@ -1,0 +1,24 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic (8.3 short-name paths)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-03"
+  ],
+  "evasion_targets": [
+    "paths::match_normalized (long names only)"
+  ],
+  "sources": [
+    "https://detection.fyi/sigmahq/sigma/windows/process_creation/proc_creation_win_susp_ntfs_short_name_path_use_image/",
+    "https://www.huntress.com/blog/gootloader-threat-detection-woff2-obfuscation"
+  ],
+  "notes": "Stores opened through 8.3 short names (USERDA~1, LOGIND~1, TELEGR~1, LOCALE~1). If the sensor reports the name as opened, name-based store matching misses them.",
+  "known_gap": "8.3 short names (USERDA~1, LOGIND~1) are not matched by the store catalog"
+}

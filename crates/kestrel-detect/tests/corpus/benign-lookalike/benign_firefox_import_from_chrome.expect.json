@@ -1,0 +1,17 @@
+{
+  "must_not_alert": [
+    "ST-01",
+    "ST-02",
+    "ST-03",
+    "ST-04",
+    "ST-07",
+    "ST-14",
+    "ST-16"
+  ],
+  "family": "Firefox migration wizard",
+  "category": "benign-lookalike",
+  "sources": [
+    "https://support.mozilla.org/en-US/kb/import-data-another-browser"
+  ],
+  "notes": "Firefox's migration wizard importing Chrome passwords and cookies."
+}

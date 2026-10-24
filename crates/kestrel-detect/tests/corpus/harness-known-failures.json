@@ -1,0 +1,3 @@
+{
+  "_comment": "Corpus scenarios that fail today and are tracked, not fixed. Remove an entry when its fix lands (the gate fails while a listed scenario passes). See docs/DETECTION-QUALITY.md."
+}

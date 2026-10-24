@@ -1,0 +1,21 @@
+{
+  "must_alert": [
+    "ST-05",
+    "ST-06"
+  ],
+  "min_severity": "high",
+  "family": "CDP cookie dump (Edge)",
+  "category": "abe",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-04"
+  ],
+  "sources": [
+    "https://specterops.io/blog/2025/08/27/dough-no-revisiting-cookie-theft/",
+    "https://specterops.io/blog/2026/08/13/chrome-devtools-protocol-cookie-theft/",
+    "https://developer.chrome.com/blog/remote-debugging-port"
+  ],
+  "notes": "Edge (Chromium < 136 behaviour / Edge policy) started headless with debugging on the real default profile after the running instance was killed; loader is per-user AppData, named like Edge's updater."
+}

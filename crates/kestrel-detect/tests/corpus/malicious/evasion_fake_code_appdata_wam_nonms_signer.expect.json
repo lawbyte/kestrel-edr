@@ -1,0 +1,27 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-01"
+      ],
+      "min_severity": "medium"
+    },
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic (fake VS Code, non-Microsoft signer)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "legit_apps::ms_wam_reader_per_user (exact path + Microsoft signer)"
+  ],
+  "sources": [
+    "https://blog.xpnsec.com/wam-bam/",
+    "https://www.bitdefender.com/en-us/blog/labs/fake-xeno-roblox-discord-executor",
+    "https://www.veracode.com/blog/glassworm-vs-code-extension",
+    "https://bleepingcomputer.com/news/security/self-spreading-glassworm-malware-hits-openvsx-vs-code-registries"
+  ],
+  "notes": "Code.exe at the exact per-user VS Code path, validly signed by a non-Microsoft company, reads the WAM token cache and sends to a non-Microsoft host."
+}

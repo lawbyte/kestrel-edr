@@ -1,0 +1,22 @@
+{
+  "must_alert": [
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "DLL side-load into a genuine Google-signed chrome.exe copied to the per-user Chrome install location",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "identity.rs Google publisher profile location appdata\\local\\google\\chrome\\application\\** is user-writable (any user can create it when Chrome is installed system-wide)",
+    "engine.rs:5220-5243 on_image_load taints only Unsigned|Invalid; SignatureState::Unknown (first load of a never-seen DLL) never taints",
+    "kestrel-win/src/win/translate.rs:987-991 image_load facts = file_or_request(..).unwrap_or_default(): a cache miss (every freshly dropped DLL) is emitted as signed=Unknown and never re-delivered"
+  ],
+  "notes": "Red-team round 2. The loader copies the genuine Google-signed chrome.exe into %LOCALAPPDATA%\\Google\\Chrome\\Application\\ (pinned per-user Chrome location; absent when Chrome is installed per-machine, creatable by the user) with a malicious chrome_elf.dll. The sensor emits the first image load of a freshly written DLL with signed=Unknown (async enrichment cache miss), and the engine taints only Unsigned/Invalid. chrome.exe is then genuine_browser: owner of every browser store, DPAPI is the browser's own, and the 2.4 MB upload is browser traffic. Same with a DLL signed by a stolen certificate (signed=valid). Added by the fix-round red team (2026-10-25); the engine detects it after the red-team fixes.",
+  "sources": [
+    "https://www.securityweek.com/infostealer-malware-delivered-in-emeditor-supply-chain-attack/",
+    "https://securityaffairs.com/183532/",
+    "https://bleepingcomputer.com/news/security/fake-enterprise-vpn-downloads-used-to-steal-company-credentials"
+  ]
+}

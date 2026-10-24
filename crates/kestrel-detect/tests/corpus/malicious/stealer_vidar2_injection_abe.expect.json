@@ -1,0 +1,24 @@
+{
+  "must_alert": [
+    "ST-07",
+    "ST-02",
+    "ST-04",
+    {
+      "any_of": [
+        "ST-14"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "Vidar 2.0 / 2.1",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://www.trendmicro.com/en/research/25/j/how-vidar-stealer-2-upgrades-infostealer-capabilities.html",
+    "https://www.gendigital.com/blog/insights/research/inside-vidar-abe-bypass"
+  ],
+  "notes": "Vidar 2.x (C rewrite, Oct 2025): Telegram / Steam profile dead drops, opens Chrome with PROCESS_QUERY_INFORMATION | PROCESS_CREATE_PROCESS | PROCESS_VM_READ (0x490), forks it and queues an APC calling CryptUnprotectMemory on the v20 key; multithreaded collection incl. .aws / .azure / .IdentityService; multipart upload."
+}

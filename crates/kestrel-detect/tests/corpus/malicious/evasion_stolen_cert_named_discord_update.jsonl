@@ -1,0 +1,10 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 6100, "guid": "stealer", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Users\\alice\\AppData\\Local\\Discord\\Update.exe", "cmdline": "\"C:\\Users\\alice\\AppData\\Local\\Discord\\Update.exe\" --processStart Discord.exe", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Guangzhou Kingsoft Network Technology Co., Ltd.", "sha256": "1691e7476ad5f115526a0d9f41954e6bb1f13d2a19da35144bcbe8da3e8104b6"}
+{"ts": 1760000000500, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\discord\\Local State", "op": "read"}
+{"ts": 1760000000540, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\discord\\Local Storage\\leveldb\\000005.ldb", "op": "read"}
+{"ts": 1760000000580, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Exodus\\exodus.wallet\\seed.seco", "op": "read"}
+{"ts": 1760000000620, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Exodus\\exodus.wallet\\passphrase.json", "op": "read"}
+{"ts": 1760000000660, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\key_datas", "op": "read"}
+{"ts": 1760000000700, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\D877F783D5D3EF8C\\maps", "op": "read"}
+{"ts": 1760000000840, "pid": 6100, "guid": "stealer", "type": "dns_query", "qname": "discord.com", "answers": ["162.159.135.232"]}
+{"ts": 1760000000940, "pid": 6100, "guid": "stealer", "type": "net_connect", "proto": "tcp", "dst_ip": "162.159.135.232", "dst_port": 443, "src_port": 50101, "dst_host": "discord.com", "bytes_sent": 3000000}

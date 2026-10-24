@@ -1,0 +1,25 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04",
+    "ST-07",
+    {
+      "any_of": [
+        "ST-10",
+        "ST-11"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "DeerStealer / XFiles",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://www.esentire.com/blog/dont-get-caught-in-the-headlights-deerstealer-analysis"
+  ],
+  "notes": "DeerStealer (eSentire 2025): ClickFix -> curl downloads an MSI -> msiexec drops a signed COMODO EngineX_Co64.exe into ProgramData that sideloads a patched cmdres.dll (HijackLoader) -> inject into a renamed signed Q-Dir started suspended -> new Edge instance (--no-startup-window) read from memory; browsers, wallets, VPN, Steam; HTTPS to a proxy domain.",
+  "known_gap": "ST-07 needs an 'untrusted actor'; a validly signed (renamed Q-Dir) process in ProgramData that was itself injected into is not one"
+}

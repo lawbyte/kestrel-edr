@@ -1,0 +1,34 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-15"
+      ],
+      "min_severity": "high"
+    },
+    "ST-02",
+    "ST-04",
+    {
+      "any_of": [
+        "ST-14"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "Vidar (2026 malvertising + XMRig)",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-12",
+    "PS-01",
+    "PS-05"
+  ],
+  "sources": [
+    "https://unit42.paloaltonetworks.com/vidar-stealer-xmrig-miner-campaign-analysis/",
+    "https://www.intrinsec.com/wp-content/uploads/2026/04/TLP_CLEAR-20260424-New_Vidar.pdf"
+  ],
+  "notes": "Unit 42 (Jul 2026): null-padded (491 MB) Go loader with a self-signed certificate, ip-api.com geolocation, Vidar dropped as %TEMP%\\MicrosoftUpdate.exe, a copied NisSrv.exe sideloading a fake MpClient.dll, Run key + logon task 'SystemAgentService'; zip of browsers and wallets to a raw IP:443."
+}

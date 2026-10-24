@@ -1,0 +1,21 @@
+{
+  "must_alert": [
+    [
+      "ST-05",
+      "ST-06"
+    ],
+    "ST-04"
+  ],
+  "min_severity": "high",
+  "family": "CDP cookie dump (ABE bypass)",
+  "category": "abe",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://specterops.io/blog/2025/08/27/dough-no-revisiting-cookie-theft/",
+    "https://specterops.io/blog/2026/08/13/chrome-devtools-protocol-cookie-theft/",
+    "https://developer.chrome.com/blog/remote-debugging-port"
+  ],
+  "notes": "Parent PID spoofing (PROC_THREAD_ATTRIBUTE_PARENT_PROCESS) makes explorer.exe the reported parent so ST-05's 'parent other than Explorer' condition fails; non-default port 41337 so only the port taken from the --remote-debugging-port switch links the loopback connect (ST-06)."
+}

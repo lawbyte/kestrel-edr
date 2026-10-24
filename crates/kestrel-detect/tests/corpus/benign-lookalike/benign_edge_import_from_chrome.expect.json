@@ -1,0 +1,17 @@
+{
+  "must_not_alert": [
+    "ST-01",
+    "ST-02",
+    "ST-03",
+    "ST-04",
+    "ST-07",
+    "ST-14",
+    "ST-16"
+  ],
+  "family": "Microsoft Edge import",
+  "category": "benign-lookalike",
+  "sources": [
+    "https://support.microsoft.com/en-us/microsoft-edge/import-favorites-in-microsoft-edge-a8a19ea4-ba02-4e0e-b0e8-bee6d1f5b26b"
+  ],
+  "notes": "Edge's 'Import browser data' reading Chrome's stores and decrypting its key (lab 2026-10-21)."
+}

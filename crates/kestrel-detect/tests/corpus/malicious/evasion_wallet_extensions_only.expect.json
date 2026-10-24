@@ -1,0 +1,26 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-01"
+      ],
+      "min_severity": "medium"
+    },
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "Wallet-only collector (crypto drainer prep)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "ST-02 category count"
+  ],
+  "sources": [
+    "https://www.microsoft.com/en-us/security/blog/2025/03/17/stilachirat-analysis-from-system-reconnaissance-to-cryptocurrency-theft/",
+    "https://www.intrinsec.com/wp-content/uploads/2025/09/TLP-CLEAR-Sept-2025-Acreed-infostealer-EN.pdf",
+    "https://www.veracode.com/blog/glassworm-vs-code-extension"
+  ],
+  "notes": "Only crypto wallets (one data category): wallet extension LevelDB vaults across browsers plus Exodus/Electrum/Atomic desktop wallets. ST-02 needs three categories, so ST-04 must carry it."
+}

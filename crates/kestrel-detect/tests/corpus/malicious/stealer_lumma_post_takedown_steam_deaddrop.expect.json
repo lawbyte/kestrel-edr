@@ -1,0 +1,23 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04",
+    {
+      "any_of": [
+        "ST-14"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "Lumma (post-May-2025 rebuild)",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://www.trendmicro.com/en_gb/research/25/g/lumma-stealer-returns.html",
+    "https://www.microsoft.com/en-us/security/blog/2025/05/21/lumma-stealer-breaking-down-the-delivery-techniques-and-capabilities-of-a-prolific-infostealer/"
+  ],
+  "notes": "Post-takedown Lumma builds resolve their C2 from a Steam community profile (dead drop) before the grab; then a smash-and-grab and upload."
+}

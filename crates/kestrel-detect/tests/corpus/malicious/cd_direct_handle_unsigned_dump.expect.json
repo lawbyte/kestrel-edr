@@ -1,0 +1,24 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "CD-03"
+      ],
+      "min_severity": "high"
+    },
+    "CD-04",
+    "CD-05"
+  ],
+  "min_severity": "critical",
+  "family": "Direct LSASS handle + MiniDumpWriteDump",
+  "category": "credential-dumping",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://thedfirreport.com/2025/06/30/hide-your-rdp-password-spray-leads-to-ransomhub-deployment/",
+    "https://www.elastic.co/guide/en/security/current/lsass-memory-dump-handle-access.html",
+    "https://github.com/fortra/nanodump"
+  ],
+  "notes": "Unsigned Temp tool opens LSASS with 0x1010 (VM_READ | QUERY_LIMITED), loads dbghelp and writes a .dmp."
+}

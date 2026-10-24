@@ -1,0 +1,24 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-04"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "high",
+  "family": "VBA macro token theft (WAM token-broker cache) exfiltrated to an attacker-owned Azure Storage account",
+  "category": "evasion",
+  "evasion_targets": [
+    "legit_apps.rs:337-380 wam_client_reader: EXCEL.EXE (Microsoft Corporation, Program Files) running an in-process VBA macro is not tainted (no injection, no unsigned DLL) and is not in MACRO_HOSTS",
+    "legit_apps.rs:655-700 MICROSOFT_FIRST_PARTY / microsoft_first_party: lists windows.net, azure.com, sharepoint.com, onedrive.com, azureedge.net, visualstudio.com and does NOT subtract MICROSOFT_CUSTOMER_NAMESPACES (core.windows.net, cloudapp.azure.com ...)",
+    "engine.rs st04 benign_verdict s.wam_cred && !raw && microsoft_first_party(h) => Low Audit"
+  ],
+  "notes": "Red-team round 2. A macro in a signed Office app reads the WAM token-broker cache (.tbres) and uploads it to invstatsync01.blob.core.windows.net, a storage account any attacker can create. wam_client_reader makes the read Low Audit, and the send is judged by microsoft_first_party, whose list contains the customer-controlled namespaces that MICROSOFT_ENDPOINTS deliberately excludes (the per-user allowance was narrowed after review H1, the Program Files one was not). Result: ST-01 Low + ST-04 Low, both Audit, no containment. The same works to <tenant>.sharepoint.com / OneDrive (attacker tenant), <vm>.cloudapp.azure.com, <cdn>.azureedge.net and <org>.visualstudio.com. Added by the fix-round red team (2026-10-25); the engine detects it after the red-team fixes.",
+  "sources": [
+    "https://www.securityweek.com/infostealer-malware-delivered-in-emeditor-supply-chain-attack/",
+    "https://securityaffairs.com/183532/",
+    "https://bleepingcomputer.com/news/security/fake-enterprise-vpn-downloads-used-to-steal-company-credentials"
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic (store read from a volume shadow copy)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-03"
+  ],
+  "evasion_targets": [
+    "paths::normalize_path / profile_relative (shadow-copy device paths)"
+  ],
+  "sources": [
+    "https://lolbas-project.github.io/lolbas/Binaries/Esentutl/",
+    "https://www.cisa.gov/news-events/cybersecurity-advisories/aa25-071a"
+  ],
+  "notes": "Admin-level stealer creates a shadow copy and reads the locked Cookies DB and other stores from \\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopyN\\Users\\...",
+  "known_gap": "shadow-copy device paths (GLOBALROOT HarddiskVolumeShadowCopyN Users ...) are not a profile root, so browser stores fail store_location_real"
+}

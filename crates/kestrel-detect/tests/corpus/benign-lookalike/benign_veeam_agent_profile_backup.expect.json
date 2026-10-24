@@ -1,0 +1,17 @@
+{
+  "must_not_alert": [
+    "ST-01",
+    "ST-02",
+    "ST-03",
+    "ST-04",
+    "ST-07",
+    "ST-14",
+    "ST-16"
+  ],
+  "family": "Veeam Agent for Windows",
+  "category": "benign-lookalike",
+  "sources": [
+    "https://helpcenter.veeam.com/docs/agentforwindows/userguide/"
+  ],
+  "notes": "File-level backup of the whole profile (every store) by the signed Veeam service, sent to an internal repository."
+}

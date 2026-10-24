@@ -1,0 +1,16 @@
+{
+  "must_alert": [
+    "PS-02"
+  ],
+  "min_severity": "high",
+  "family": "Hidden scheduled task (PowerShell -enc)",
+  "category": "persistence",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://unit42.paloaltonetworks.com/vidar-stealer-xmrig-miner-campaign-analysis/",
+    "https://www.bitdefender.com/en-us/blog/labs/lummastealer-second-life-castleloader"
+  ],
+  "notes": "Task hidden in a Microsoft-looking path, logon trigger, PowerShell -enc cradle."
+}

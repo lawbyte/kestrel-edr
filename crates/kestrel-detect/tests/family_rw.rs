@@ -939,3 +939,318 @@ fn odd_input_never_panics_and_state_is_bounded() {
     e.tick(T0 + 10 * 3_600_000);
     e.tick(T0 + 20 * 3_600_000);
 }
+
+// ---------------------------------------------------------------- RW-06 corpus finding 9 / FP-07 (2026-10-25)
+
+/// RW-06 alerts of `out`.
+fn rw06(out: &[Output]) -> Vec<&Detection> {
+    rw(out)
+        .into_iter()
+        .filter(|d| d.alert.rule_id == "RW-06")
+        .collect()
+}
+
+/// Engine with Explorer and an unsigned Temp locker (`locker-1`, pid 6000).
+fn with_locker(policy: Policy) -> Engine {
+    let mut e = engine(policy);
+    e.process(&explorer());
+    e.process(&start(
+        0,
+        "locker-1",
+        6000,
+        LOCKER_IMG,
+        "svc_upd.exe",
+        Some(("explorer-1", 4000)),
+        None,
+    ));
+    e
+}
+
+#[test]
+fn fam2_rw06_rename_over_original_fires_and_kills() {
+    // Corpus finding 9: encrypted copy in a self-created temp file renamed
+    // over the original document with the same extension.
+    for (policy, acts) in [
+        (Policy::default(), true),
+        (policy_all(RuleMode::Protect), true),
+        (policy_all(RuleMode::Audit), false),
+    ] {
+        let out = run(policy, "fam2_rw06_rename_over_original.jsonl");
+        let hits = rw06(&out);
+        assert_eq!(hits.len(), 1, "{:?}", rw_ids(&out));
+        let d = hits[0];
+        assert_eq!(d.alert.severity, Severity::Critical);
+        assert!(
+            d.alert.summary.contains("60 existing files"),
+            "{}",
+            d.alert.summary
+        );
+        if acts {
+            assert_eq!(kills(&d.actions), vec!["locker-1"]);
+        } else {
+            assert!(all_actions(&out).is_empty());
+        }
+    }
+}
+
+#[test]
+fn fam2_rw06_rename_over_needs_same_extension_self_renames() {
+    let mut e = with_locker(Policy::default());
+    // Self-created files renamed to a changed extension in a build tree (a
+    // compiler): no rename-over credit, and the extension changes are
+    // build artefacts.
+    let fa = FileActivity {
+        window_ms: 10_000,
+        files_touched: 120,
+        dirs: 8,
+        renames: 60,
+        ext_changes: 60,
+        new_files: 60,
+        self_created: 60,
+        top_new_ext: Some("rlib".into()),
+        top_ext_pct: 100,
+        sample_paths: vec![r"C:\Users\alice\src\app\target\debug\deps\liba.rlib".into()],
+        ..Default::default()
+    };
+    let out = e.process(&file_activity(10_000, "locker-1", 6000, fa.clone()));
+    assert!(rw06(&out).is_empty(), "{:?}", rw_ids(&out));
+    // Fewer than 50 replaced originals: below the rewrite threshold.
+    let few = FileActivity {
+        files_touched: 80,
+        renames: 40,
+        ext_changes: 0,
+        new_files: 40,
+        self_created: 40,
+        top_new_ext: None,
+        top_ext_pct: 0,
+        sample_paths: vec![],
+        ..fa
+    };
+    let out = e.process(&file_activity(20_000, "locker-1", 6000, few));
+    assert!(rw06(&out).is_empty(), "{:?}", rw_ids(&out));
+}
+
+#[test]
+fn fam2_rw06_rustc_current_and_old_agents_never_fire() {
+    // FP-07: the three current-format summaries from the owner PC (100
+    // files, 50 renames to .rlib, 50 self-created, 50 deleted temp folders)
+    // and an agent before 1.1.6 (500 files, 186 renames to .rlib, no
+    // self_created): no RW alert and no kill in any policy.
+    for name in [
+        "fam2_rw06_rustc_current.jsonl",
+        "fam2_rw06_rustc_old_agent.jsonl",
+    ] {
+        for policy in [
+            Policy::default(),
+            policy_all(RuleMode::Protect),
+            policy_all(RuleMode::Audit),
+        ] {
+            let out = run(policy, name);
+            assert!(rw_ids(&out).is_empty(), "{name}: {:?}", rw_ids(&out));
+        }
+    }
+}
+
+#[test]
+fn fam2_rw06_ransomware_choosing_rlib_still_fires() {
+    // Stacked (`q3.xlsx.rlib`) and replaced (`q3.rlib` in Documents)
+    // extensions: the samples are user documents, not a build tree.
+    let out = run(Policy::default(), "fam2_rw06_rlib_ransomware.jsonl");
+    let hits = rw06(&out);
+    let subjects: Vec<&str> = hits
+        .iter()
+        .map(|d| d.alert.process.guid.0.as_str())
+        .collect();
+    assert_eq!(subjects, vec!["locker-1", "locker-2"], "{:?}", rw_ids(&out));
+    for d in hits {
+        assert_eq!(d.alert.severity, Severity::Critical);
+        assert_eq!(kills(&d.actions), vec![d.alert.process.guid.0.clone()]);
+    }
+}
+
+#[test]
+fn fam2_rw06_compiler_discount_needs_clean_build_samples() {
+    let fa = FileActivity {
+        window_ms: 10_000,
+        files_touched: 100,
+        dirs: 6,
+        renames: 100,
+        ext_changes: 100,
+        top_new_ext: Some("rlib".into()),
+        top_ext_pct: 100,
+        sample_paths: vec![
+            r"C:\Users\alice\src\target\deps\a.rlib".into(),
+            r"C:\Users\alice\src\target\deps\report.docx.rlib".into(),
+        ],
+        ..Default::default()
+    };
+    let variants = [
+        // One renamed document among build-looking samples.
+        fa.clone(),
+        // No samples at all.
+        FileActivity {
+            sample_paths: vec![],
+            ..fa.clone()
+        },
+        // A non-compiler extension (`lock`) in a build tree.
+        FileActivity {
+            top_new_ext: Some("lock".into()),
+            sample_paths: vec![r"C:\Users\alice\src\target\deps\a.lock".into()],
+            ..fa.clone()
+        },
+        // A build-tree sample next to one in Documents.
+        FileActivity {
+            sample_paths: vec![
+                r"C:\Users\alice\src\target\deps\a.rlib".into(),
+                r"C:\Users\alice\Documents\q3.rlib".into(),
+            ],
+            ..fa.clone()
+        },
+        // Mostly other extensions (pct below 80).
+        FileActivity {
+            top_ext_pct: 50,
+            sample_paths: vec![r"C:\Users\alice\src\target\deps\a.rlib".into()],
+            ..fa.clone()
+        },
+    ];
+    for (i, v) in variants.into_iter().enumerate() {
+        let mut e = with_locker(Policy::default());
+        let out = e.process(&file_activity(10_000, "locker-1", 6000, v));
+        assert_eq!(rw06(&out).len(), 1, "variant {i}: {:?}", rw_ids(&out));
+    }
+    // The same shape with clean build samples is a compiler.
+    let mut e = with_locker(Policy::default());
+    let clean = FileActivity {
+        sample_paths: vec![
+            r"C:\Users\alice\src\target\deps\a.rlib".into(),
+            r"C:\Users\alice\src\target\deps\.tmpabc.temp-archive\tmp.a".into(),
+        ],
+        ..fa
+    };
+    let out = e.process(&file_activity(10_000, "locker-1", 6000, clean));
+    assert!(rw06(&out).is_empty(), "{:?}", rw_ids(&out));
+}
+
+#[test]
+fn fam2_rw06_slow_paced_bursts_accumulate() {
+    // Corpus finding 9: 11 files every 30 s; each summary is far below the
+    // per-window threshold, five minutes of them are not.
+    let out = run(Policy::default(), "fam2_rw06_slow_paced.jsonl");
+    let hits = rw06(&out);
+    assert!(!hits.is_empty(), "{:?}", rw_ids(&out));
+    let d = hits[0];
+    assert_eq!(d.alert.severity, Severity::Critical);
+    assert_eq!(kills(&d.actions), vec!["locker-1"]);
+    assert!(d.alert.summary.contains("bursts"), "{}", d.alert.summary);
+    // It fires on the 6th burst (66 files, 66 extension changes).
+    let mut e = engine(policy_all(RuleMode::Audit));
+    let mut fired_at = None;
+    for (i, ev) in fixture("fam2_rw06_slow_paced.jsonl").iter().enumerate() {
+        if !rw06(&e.process(ev)).is_empty() && fired_at.is_none() {
+            fired_at = Some(i);
+        }
+    }
+    assert_eq!(fired_at, Some(2 + 5), "explorer + start + 6 bursts");
+}
+
+#[test]
+fn fam2_rw06_slow_benign_shapes_stay_silent() {
+    // Renames to known extensions, bursts too far apart, and a compiler
+    // re-emitting one overlapping, growing sliding-window summary.
+    for policy in [Policy::default(), policy_all(RuleMode::Protect)] {
+        let out = run(policy, "fam2_rw06_slow_benign.jsonl");
+        assert!(rw06(&out).is_empty(), "{:?}", rw_ids(&out));
+    }
+}
+
+#[test]
+fn fam2_rw06_slow_overlapping_summaries_count_once() {
+    let burst = |window_ms: u64| FileActivity {
+        window_ms,
+        files_touched: 25,
+        dirs: 3,
+        renames: 25,
+        ext_changes: 15,
+        top_new_ext: Some("k3str".into()),
+        top_ext_pct: 100,
+        ..Default::default()
+    };
+    // The same 25-file burst re-emitted 10 times inside one window must not
+    // add up to 250.
+    let mut e = with_locker(Policy::default());
+    let mut out = Vec::new();
+    for i in 0..10 {
+        out.extend(e.process(&file_activity(
+            1_000 + i * 500,
+            "locker-1",
+            6000,
+            burst(9_000),
+        )));
+    }
+    assert!(rw06(&out).is_empty(), "{:?}", rw_ids(&out));
+    // Old bursts expire: 2 bursts, a 6-minute pause, 2 more bursts.
+    let mut e = with_locker(Policy::default());
+    let mut out = Vec::new();
+    for ts in [10_000, 40_000, 400_000, 430_000] {
+        out.extend(e.process(&file_activity(ts, "locker-1", 6000, burst(10_000))));
+    }
+    assert!(rw06(&out).is_empty(), "{:?}", rw_ids(&out));
+    // A third burst within 5 minutes completes it (75 files, 45 changes).
+    let out = e.process(&file_activity(460_000, "locker-1", 6000, burst(10_000)));
+    assert_eq!(rw06(&out).len(), 1, "{:?}", rw_ids(&out));
+    // Same bursts by a validly signed sync client: High, no action.
+    let mut e = engine(policy_all(RuleMode::Protect));
+    e.process(&explorer());
+    e.process(&start(
+        0,
+        "od-1",
+        7300,
+        r"C:\Users\alice\AppData\Local\Microsoft\OneDrive\OneDrive.exe",
+        "OneDrive.exe /background",
+        Some(("explorer-1", 4000)),
+        Some("Microsoft Corporation"),
+    ));
+    let mut out = Vec::new();
+    for ts in [10_000, 40_000, 70_000] {
+        out.extend(e.process(&file_activity(ts, "od-1", 7300, burst(10_000))));
+    }
+    let hits = rw06(&out);
+    assert_eq!(hits.len(), 1, "{:?}", rw_ids(&out));
+    assert_eq!(hits[0].alert.severity, Severity::High);
+    assert!(hits[0].actions.is_empty());
+}
+
+#[test]
+fn fam2_rw06_slow_state_is_bounded_and_odd_input_is_safe() {
+    let mut e = engine(policy_all(RuleMode::Audit));
+    for i in 0..3_000u32 {
+        e.process(&file_activity(
+            i as i64,
+            &format!("g{i}"),
+            10_000 + i,
+            FileActivity {
+                window_ms: 10_000,
+                files_touched: 5,
+                dirs: 1,
+                ext_changes: 5,
+                ..Default::default()
+            },
+        ));
+    }
+    e.process(&file_activity(
+        5_000,
+        "g1",
+        10_001,
+        FileActivity {
+            window_ms: u64::MAX,
+            files_touched: u32::MAX,
+            self_created: u32::MAX,
+            renames: u32::MAX,
+            sample_paths: vec![String::new(), "\\".into(), ".".into()],
+            top_new_ext: Some(String::new()),
+            top_ext_pct: 255,
+            ..Default::default()
+        },
+    ));
+    e.tick(T0 + 3_600_000);
+}

@@ -1,0 +1,21 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "Lumma via CastleLoader (AutoIt)",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "PS-03",
+    "PS-05"
+  ],
+  "sources": [
+    "https://www.bitdefender.com/en-us/blog/labs/lummastealer-second-life-castleloader",
+    "https://www.sophos.com/en-us/blog/lumma-stealer-coming-and-going"
+  ],
+  "notes": "CastleLoader (Bitdefender, Feb 2026): batch via cmd < Sessions.vstm, extrac32 unpacks a CAB, a renamed AutoIt3 interpreter (Rope.pif, validly signed by AutoIt Consulting) runs Lumma in-process from %LOCALAPPDATA%\\CraftStitch Studios Inc; Startup .url and a 3-minute scheduled task; the AutoIt process reads Chrome Login Data / Cookies (Sophos) and uploads."
+}

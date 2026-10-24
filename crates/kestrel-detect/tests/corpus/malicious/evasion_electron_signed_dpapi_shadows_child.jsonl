@@ -1,0 +1,11 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 5000, "guid": "app", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Program Files\\PixelNote\\PixelNote.exe", "cmdline": "\"C:\\Program Files\\PixelNote\\PixelNote.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "PixelNote Labs Inc."}
+{"ts": 1760000001000, "pid": 5200, "guid": "cp", "type": "process_start", "ppid": 5000, "parent_guid": "app", "image": "C:\\Windows\\System32\\cmd.exe", "cmdline": "cmd.exe /c copy /y \"C:\\Users\\alice\\AppData\\Local\\Chromium\\User Data\\Local State\" C:\\Users\\alice\\AppData\\Local\\Temp\\ls.tmp & copy /y \"C:\\Users\\alice\\AppData\\Local\\Chromium\\User Data\\Default\\Login Data\" C:\\Users\\alice\\AppData\\Local\\Temp\\ld.tmp", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000001100, "pid": 5200, "guid": "cp", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Chromium\\User Data\\Local State", "op": "read"}
+{"ts": 1760000001140, "pid": 5200, "guid": "cp", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Chromium\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000001180, "pid": 5200, "guid": "cp", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Chromium\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000001300, "pid": 5200, "guid": "cp", "type": "process_stop", "exit_code": 0}
+{"ts": 1760000001500, "pid": 5000, "guid": "app", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Temp\\ls.tmp", "op": "read"}
+{"ts": 1760000001540, "pid": 5000, "guid": "app", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Temp\\ld.tmp", "op": "read"}
+{"ts": 1760000001700, "pid": 5000, "guid": "app", "type": "dpapi_unprotect", "description": "Chromium"}
+{"ts": 1760000002500, "pid": 5000, "guid": "app", "type": "net_connect", "proto": "tcp", "dst_ip": "198.51.100.23", "dst_port": 443, "src_port": 50101, "bytes_sent": 400000}

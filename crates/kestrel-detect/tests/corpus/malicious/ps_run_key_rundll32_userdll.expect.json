@@ -1,0 +1,16 @@
+{
+  "must_alert": [
+    "PS-02"
+  ],
+  "min_severity": "high",
+  "family": "Run key -> rundll32 on a user DLL",
+  "category": "persistence",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://thedfirreport.com/2025/07/14/kongtuke-filefix-leads-to-new-interlock-rat-variant/",
+    "https://unit42.paloaltonetworks.com/vidar-stealer-xmrig-miner-campaign-analysis/"
+  ],
+  "notes": "Run value named like Windows Security's tray app, starting rundll32 on a DLL in %TEMP%."
+}

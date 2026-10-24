@@ -1,0 +1,21 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "Supply-chain: trojanised update",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "ST-04 relatives (parent sender)",
+    "signed Program Files process trust"
+  ],
+  "sources": [
+    "https://www.securityweek.com/infostealer-malware-delivered-in-emeditor-supply-chain-attack/",
+    "https://www.withsecure.com/en/resources-hub/w-labs/keepass-trojanised-in-advanced-malware-campaign/"
+  ],
+  "notes": "A signed Program Files updater (SYSTEM) drops and starts an unsigned 'patch' that collects; the upload is made by the signed updater itself (the reader's parent)."
+}

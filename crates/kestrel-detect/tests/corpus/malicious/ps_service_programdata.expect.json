@@ -1,0 +1,13 @@
+{
+  "must_alert": [
+    "PS-07"
+  ],
+  "min_severity": "high",
+  "family": "Service wrapping cmd + Public payload",
+  "category": "persistence",
+  "sources": [
+    "https://www.cisa.gov/news-events/cybersecurity-advisories/aa25-071a",
+    "https://thedfirreport.com/2025/06/30/hide-your-rdp-password-spray-leads-to-ransomhub-deployment/"
+  ],
+  "notes": "Auto-start service whose ImagePath runs cmd /c on a payload in C:\\Users\\Public."
+}

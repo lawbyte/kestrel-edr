@@ -1,0 +1,17 @@
+{
+  "must_not_alert": [
+    "ST-01",
+    "ST-02",
+    "ST-03",
+    "ST-04",
+    "ST-07",
+    "ST-14",
+    "ST-16"
+  ],
+  "family": "Discord client",
+  "category": "benign-lookalike",
+  "sources": [
+    "https://github.com/Squirrel/Squirrel.Windows/blob/develop/docs/using/install-process.md"
+  ],
+  "notes": "Review of the 1.1.7 integration (M3): the genuine Discord started through its Squirrel stub (Update.exe --processStart Discord.exe --process-start-args) and its network-service child (same image, --type=utility --user-data-dir=...) read their own stores and talk to discord.com; then the app updates itself: the old version starts the new one, which restarts through Electron's relauncher (--type=relauncher --- \"<same Discord.exe>\"), as on the owner's PC (replay 2026-10). The Electron-owner guard (plain launch, trusted launcher or a plain instance of itself) must keep them owners."
+}

@@ -1,0 +1,11 @@
+{
+  "description": "alert-st-01-docker-scout: slice of the owner-PC telemetry 2026-10 (anonymised)",
+  "known_false_positives": [
+    {
+      "max_severity": "high",
+      "note": "FP-02: Docker CLI plugin reading kubeconfig (signature unknown in telemetry)",
+      "rule": "ST-01"
+    }
+  ],
+  "strict": true
+}

@@ -1,0 +1,27 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-01"
+      ],
+      "min_severity": "medium"
+    },
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic (self-signed 'Microsoft Corporation')",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "legit_apps::microsoft_client_signed",
+    "microsoft_endpoint"
+  ],
+  "sources": [
+    "https://securityaffairs.com/183532/",
+    "https://bleepingcomputer.com/news/security/fake-enterprise-vpn-downloads-used-to-steal-company-credentials",
+    "https://www.securityweek.com/infostealer-malware-delivered-in-emeditor-supply-chain-attack/"
+  ],
+  "notes": "Self-signed 'Microsoft Corporation' Code.exe at the per-user path: first a genuine-looking telemetry send to events.data.microsoft.com, then the real upload to a raw IP."
+}

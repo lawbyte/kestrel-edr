@@ -1,0 +1,11 @@
+{
+  "description": "alert-st-03-discord: slice of the owner-PC telemetry 2026-10 (anonymised)",
+  "strict": true,
+  "allow": [
+    {
+      "rule": "ST-03",
+      "max_severity": "low",
+      "note": "FP-04 fixed 2026-10-25: own safeStorage key of a genuine app is Low / Info Audit by design"
+    }
+  ]
+}

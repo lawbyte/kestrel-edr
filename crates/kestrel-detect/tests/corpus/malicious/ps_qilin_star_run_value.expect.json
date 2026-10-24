@@ -1,0 +1,12 @@
+{
+  "must_alert": [
+    "PS-01"
+  ],
+  "min_severity": "medium",
+  "family": "Qilin Run value with '*' prefix (runs in Safe Mode)",
+  "category": "persistence",
+  "sources": [
+    "https://asec.ahnlab.com/en/90497/"
+  ],
+  "notes": "Qilin (AhnLab Sep 2025): Run value named '*' + 6 random characters so it also runs in Safe Mode, pointing at the encryptor in %TEMP%."
+}

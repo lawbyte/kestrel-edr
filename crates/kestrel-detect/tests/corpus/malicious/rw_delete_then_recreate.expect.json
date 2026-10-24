@@ -1,0 +1,20 @@
+{
+  "must_alert": [
+    "RW-06"
+  ],
+  "min_severity": "critical",
+  "family": "Ransomware (delete-then-recreate, same name)",
+  "category": "ransomware",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "RW-06 extension-change path"
+  ],
+  "sources": [
+    "https://www.sentinelone.com/labs/crimeware-trends-ransomware-developers-turn-to-intermittent-encryption-to-evade-detection/",
+    "https://www.ic3.gov/CSA/2025/250604.pdf",
+    "https://www.trendmicro.com/en/research/25/i/lockbit-5-targets-windows-linux-esxi.html"
+  ],
+  "notes": "Reads each document, deletes it and writes the encrypted content under the same name and extension: no renames, no extension change; since 1.1.6 the sensor counts delete+recreate as overwrites of pre-existing files."
+}

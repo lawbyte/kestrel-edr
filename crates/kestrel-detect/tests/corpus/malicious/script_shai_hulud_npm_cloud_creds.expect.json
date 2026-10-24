@@ -1,0 +1,21 @@
+{
+  "must_alert": [
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "Shai-Hulud / s1ngularity npm supply chain",
+  "category": "script-stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-01"
+  ],
+  "sources": [
+    "https://attack.mitre.org/software/S9008/",
+    "https://expel.com/blog/the-second-coming-of-shai-hulud/",
+    "https://www.wiz.io/blog/s1ngularity-supply-chain-attack",
+    "https://blog.gitguardian.com/the-nx-s1ngularity-attack-inside-the-credential-leak/"
+  ],
+  "notes": "Worm-style npm postinstall (Sept 2025): signed node.exe from Program Files reads GitHub CLI / git / AWS / Azure / gcloud credentials, publishes them to a new GitHub repo and posts to webhook.site."
+}

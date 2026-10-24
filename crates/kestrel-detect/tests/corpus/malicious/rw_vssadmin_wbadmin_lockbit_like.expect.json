@@ -1,0 +1,20 @@
+{
+  "must_alert": [
+    "RW-01",
+    "RW-02",
+    "RW-06",
+    "RW-12"
+  ],
+  "min_severity": "critical",
+  "family": "LockBit 5.0-style ransomware",
+  "category": "ransomware",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://www.trendmicro.com/en/research/25/i/lockbit-5-targets-windows-linux-esxi.html",
+    "https://thedfirreport.com/2025/06/30/hide-your-rdp-password-spray-leads-to-ransomhub-deployment/",
+    "https://www.picussecurity.com/resource/blog/inside-safepay-analyzing-the-new-centralized-ransomware-group"
+  ],
+  "notes": "vssadmin + wbadmin + bcdedit chain, random per-victim extension."
+}

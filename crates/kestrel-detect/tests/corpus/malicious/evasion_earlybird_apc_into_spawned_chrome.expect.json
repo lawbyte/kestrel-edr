@@ -1,0 +1,31 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-04",
+        "ST-02",
+        "ST-05",
+        "ST-07"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "high",
+  "family": "Early-bird APC injection into a genuine chrome.exe the stealer launched itself (ChromElevator / Katz style, without CreateRemoteThread)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "engine.rs on_target (~5010-5050): taint needs a ProcessAccess / RemoteThread / ThreadContext / DebugAttach event; a parent's handle from CreateProcess(CREATE_SUSPENDED) produces no OpenProcess audit event, and WriteProcessMemory + QueueUserAPC + ResumeThread produce none either (no ETW-TI in user mode)",
+    "engine.rs on_target ProcessAccess taint requires untrusted_src: a stolen-certificate actor in AppData\\Local\\Programs is not untrusted_actor, so even an explicit OpenProcess(VM_WRITE) does not taint",
+    "identity.rs genuine_browser: the spawned chrome.exe (Program Files, Google LLC) is the owner of every browser store and its DPAPI is the browser's own; on_net skips ST-04 for browsers",
+    "engine.rs st04: the parent sender has no credential reads; parent_of / descendants only look at non-browser children (genuine_browser children carry no state)"
+  ],
+  "notes": "Red-team round 2. The loader (stolen certificate, per-user Programs folder) starts the real Program Files chrome.exe suspended with an ordinary command line (no headless / debugging switches, no --user-data-dir), writes a payload and queues an APC, then resumes. No sensor event marks the injection. The injected chrome reads Chrome + Edge stores, decrypts the Edge key with DPAPI and writes the loot into the loader's folder; the loader uploads 500 KB. Every read is a genuine browser's own, so nothing is recorded and ST-04 has no reader. Suggested fix: a genuine browser whose parent is not a browser / explorer / a known launcher (i.e. spawned by an unsigned or non-publisher process) should not get owner status for foreign stores (Edge read by chrome) and should be linked as a reader for its parent's sends; also record cross-browser reads by a browser spawned by a non-browser parent, and treat a browser writing a file into a non-browser folder right after store reads as ST-05. Added by the fix-round red team (2026-10-25); the engine detects it after the red-team fixes.",
+  "sources": [
+    "https://www.securityweek.com/infostealer-malware-delivered-in-emeditor-supply-chain-attack/",
+    "https://securityaffairs.com/183532/",
+    "https://bleepingcomputer.com/news/security/fake-enterprise-vpn-downloads-used-to-steal-company-credentials"
+  ]
+}

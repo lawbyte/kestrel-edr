@@ -1,0 +1,21 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 6000, "guid": "boot", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Users\\alice\\Downloads\\RobloxFPSUnlocker.exe", "cmdline": "\"C:\\Users\\alice\\Downloads\\RobloxFPSUnlocker.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "unsigned", "sha256": "e1c05868e258a0a486383511832f2c995499a57067954190444b81452df75a4f", "motw_zone": 3, "file_size": 14000000}
+{"ts": 1760000001500, "pid": 6100, "guid": "stealer", "type": "process_start", "ppid": 6000, "parent_guid": "boot", "image": "C:\\Users\\alice\\Downloads\\RobloxFPSUnlocker.exe", "cmdline": "\"C:\\Users\\alice\\Downloads\\RobloxFPSUnlocker.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "unsigned", "sha256": "5f9f83cc71f6949a40339bab194fc70888b46ecd34738cbd4a82bb1acbcd3b03"}
+{"ts": 1760000001600, "pid": 6100, "guid": "stealer", "type": "image_load", "path": "C:\\Users\\alice\\AppData\\Local\\Temp\\_MEI61002\\python312.dll", "signed": "valid", "signer": "Python Software Foundation"}
+{"ts": 1760000002000, "pid": 6100, "guid": "stealer", "type": "dns_query", "qname": "ipinfo.io", "answers": ["34.117.59.81"]}
+{"ts": 1760000002100, "pid": 6100, "guid": "stealer", "type": "net_connect", "proto": "tcp", "dst_ip": "34.117.59.81", "dst_port": 443, "src_port": 50101, "dst_host": "ipinfo.io"}
+{"ts": 1760000002500, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\discord\\Local State", "op": "read"}
+{"ts": 1760000002540, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\discord\\Local Storage\\leveldb\\000005.ldb", "op": "read"}
+{"ts": 1760000002580, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\discord\\Local Storage\\leveldb\\000004.log", "op": "read"}
+{"ts": 1760000002620, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Local State", "op": "read"}
+{"ts": 1760000002660, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000002700, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000002740, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Web Data", "op": "read"}
+{"ts": 1760000002780, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Local Extension Settings\\nkbihfbeogaeaoehlefnkodbefgpgknn\\000003.log", "op": "read"}
+{"ts": 1760000002820, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Local State", "op": "read"}
+{"ts": 1760000002860, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000002900, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000002940, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Web Data", "op": "read"}
+{"ts": 1760000002980, "pid": 6100, "guid": "stealer", "type": "dpapi_unprotect", "description": "Google Chrome"}
+{"ts": 1760000003480, "pid": 6100, "guid": "stealer", "type": "dns_query", "qname": "discord.com", "answers": ["162.159.135.232"]}
+{"ts": 1760000003580, "pid": 6100, "guid": "stealer", "type": "net_connect", "proto": "tcp", "dst_ip": "162.159.135.232", "dst_port": 443, "src_port": 50102, "dst_host": "discord.com", "bytes_sent": 900000}

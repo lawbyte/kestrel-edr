@@ -1,0 +1,13 @@
+{
+  "must_alert": [
+    "PS-01"
+  ],
+  "min_severity": "medium",
+  "family": "Run key persistence",
+  "category": "persistence",
+  "sources": [
+    "https://thedfirreport.com/2025/07/14/kongtuke-filefix-leads-to-new-interlock-rat-variant/",
+    "https://unit42.paloaltonetworks.com/vidar-stealer-xmrig-miner-campaign-analysis/"
+  ],
+  "notes": "Loader writes a payload into a Microsoft-looking AppData folder and an HKCU Run value."
+}

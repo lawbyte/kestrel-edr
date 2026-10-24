@@ -1,0 +1,25 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-01"
+      ],
+      "min_severity": "medium"
+    },
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "Electron run-as-Node token grabber",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "ST-01 trusted-owner short-circuit for a genuine Electron owner (review of the 1.1.7 integration, M3)"
+  ],
+  "sources": [
+    "https://www.electronjs.org/docs/latest/api/environment-variables#electron_run_as_node",
+    "https://www.electronjs.org/docs/latest/tutorial/fuses#runasnode"
+  ],
+  "notes": "An unsigned dropper writes s.js and starts the genuine, Discord-signed Discord.exe with it as the only argument (ELECTRON_RUN_AS_NODE=1, which the sensor cannot see). The Node-mode Discord reads Discord's own Local State and leveldb token store, unprotects the key and uploads to a raw host. It must not be treated as the owner of its store."
+}

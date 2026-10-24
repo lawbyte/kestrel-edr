@@ -1,0 +1,20 @@
+{
+  "must_alert": [
+    [
+      "PS-01",
+      "PS-02"
+    ]
+  ],
+  "min_severity": "medium",
+  "family": "Interlock RAT (PHP) persistence",
+  "category": "persistence",
+  "should_alert": [
+    "ST-14",
+    "ST-12"
+  ],
+  "sources": [
+    "https://thedfirreport.com/2025/07/14/kongtuke-filefix-leads-to-new-interlock-rat-variant/",
+    "https://www.cisa.gov/sites/default/files/2025-07/aa25-203a-stopransomware-interlock-072225.pdf"
+  ],
+  "notes": "Interlock (DFIR Report Jul 2025; CISA AA25-203A): KongTuke FileFix -> PowerShell from trycloudflare.com -> portable php.exe in %APPDATA%\\php running wefs.cfg, HKCU Run value added with reg.exe."
+}

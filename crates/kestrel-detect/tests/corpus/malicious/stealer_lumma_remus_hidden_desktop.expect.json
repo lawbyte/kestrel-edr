@@ -1,0 +1,23 @@
+{
+  "must_alert": [
+    "ST-07",
+    "ST-02",
+    "ST-04",
+    {
+      "any_of": [
+        "ST-14"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "Remus (64-bit Lumma variant)",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://www.gendigital.com/blog/insights/research/remus-64bit-variant-of-lumma-stealer"
+  ],
+  "notes": "Remus (Gen, Apr 2026): EtherHiding eth_call to a public RPC for the C2, spawns Chrome on a hidden desktop, writes 51-byte shellcode with NtWriteVirtualMemory and runs it with NtCreateThreadEx to call CryptUnprotectMemory on v20_master_key, reads the stores and uploads over plain HTTP to a raw IP."
+}

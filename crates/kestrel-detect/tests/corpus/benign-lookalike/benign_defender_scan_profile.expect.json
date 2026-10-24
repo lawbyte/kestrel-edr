@@ -1,0 +1,17 @@
+{
+  "must_not_alert": [
+    "ST-01",
+    "ST-02",
+    "ST-03",
+    "ST-04",
+    "ST-07",
+    "ST-14",
+    "ST-16"
+  ],
+  "family": "Microsoft Defender scan",
+  "category": "benign-lookalike",
+  "sources": [
+    "https://learn.microsoft.com/en-us/defender-endpoint/microsoft-defender-antivirus-windows"
+  ],
+  "notes": "Defender's engine (ProgramData platform folder, Microsoft-signed) scanning every store during a full scan, then cloud lookups."
+}

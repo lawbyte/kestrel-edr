@@ -1,0 +1,9 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 6100, "guid": "stealer", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Users\\alice\\AppData\\Local\\Temp\\sn.exe", "cmdline": "\"C:\\Users\\alice\\AppData\\Local\\Temp\\sn.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "unsigned", "sha256": "ff696e03aa6be3469e75195e15f5dcf7f6854460e29da279152e3bba952b974f"}
+{"ts": 1760000000500, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\USERDA~1\\LOCALS~1", "op": "read"}
+{"ts": 1760000000540, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\USERDA~1\\Default\\LOGIND~1", "op": "read"}
+{"ts": 1760000000580, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\USERDA~1\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000000620, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\TELEGR~1\\tdata\\key_datas", "op": "read"}
+{"ts": 1760000000660, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\USERDA~1\\Default\\LOCALE~1\\nkbihfbeogaeaoehlefnkodbefgpgknn\\000003.log", "op": "read"}
+{"ts": 1760000000700, "pid": 6100, "guid": "stealer", "type": "dpapi_unprotect", "description": "Google Chrome"}
+{"ts": 1760000000900, "pid": 6100, "guid": "stealer", "type": "net_connect", "proto": "tcp", "dst_ip": "198.51.100.23", "dst_port": 443, "src_port": 50101, "bytes_sent": 2400000}

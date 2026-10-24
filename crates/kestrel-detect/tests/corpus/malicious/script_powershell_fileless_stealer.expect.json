@@ -1,0 +1,24 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04",
+    {
+      "any_of": [
+        "ST-14"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "PowerShell in-memory stealer",
+  "category": "script-stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://www.microsoft.com/en-us/security/blog/2025/08/21/think-before-you-clickfix-analyzing-the-clickfix-social-engineering-technique/",
+    "https://www.sentinelone.com/labs/ghost-in-the-zip-new-pxa-stealer-and-its-telegram-powered-ecosystem/",
+    "https://www.bitsight.com/blog/exfiltration-over-telegram-bots-skidding-infostealer-logs"
+  ],
+  "notes": "Fileless stealer in powershell.exe (Microsoft-signed System32 LOLBin): Local State key via ProtectedData.Unprotect, Telegram tdata, wallet extension, Telegram bot sendDocument."
+}

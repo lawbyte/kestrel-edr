@@ -1,0 +1,22 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "Python stealer under a developer-tool path",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "dev-tool path assumptions",
+    "interpreter with -c (has_eval_switch)"
+  ],
+  "sources": [
+    "https://bleepingcomputer.com/news/security/malicious-pypi-package-steals-discord-auth-tokens-from-devs",
+    "https://osv.dev/vulnerability/MAL-2025-41662",
+    "https://www.sentinelone.com/labs/ghost-in-the-zip-new-pxa-stealer-and-its-telegram-powered-ecosystem/"
+  ],
+  "notes": "Signed pythonw.exe copied into a VS Code extension folder (a developer path) with -c: reads browsers, wallets, Telegram; uploads to a paste site that is not on the dead-drop list."
+}

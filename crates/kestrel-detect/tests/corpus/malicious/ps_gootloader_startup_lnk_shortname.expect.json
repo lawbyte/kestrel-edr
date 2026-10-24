@@ -1,0 +1,12 @@
+{
+  "must_alert": [
+    "PS-03"
+  ],
+  "min_severity": "medium",
+  "family": "Gootloader Startup .lnk",
+  "category": "persistence",
+  "sources": [
+    "https://www.huntress.com/blog/gootloader-threat-detection-woff2-obfuscation"
+  ],
+  "notes": "Gootloader (Huntress, Nov 2025): 15 minutes after the first JS run, a Startup .lnk targets another .lnk in %APPDATA% that launches a .js through its 8.3 short name."
+}

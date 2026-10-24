@@ -1,0 +1,22 @@
+{
+  "must_alert": [
+    "ST-07",
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "EDDIESTEALER (Rust)",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-10",
+    "ST-11",
+    "ST-12"
+  ],
+  "sources": [
+    "https://www.elastic.co/security-labs/eddiestealer"
+  ],
+  "notes": "EDDIESTEALER (Elastic, May 2025): ClickFix -> PowerShell -> cscript gverify.js -> 12-character random EXE in Downloads; when Chrome is not running it starts it off-screen and reads the App-Bound key / cookies from the NetworkService child's memory (VM_READ | QUERY_LIMITED 0x1010); wallets, Bitwarden, KeePass, Telegram; plain HTTP C2; self-delete via ADS rename to :metadata."
+}

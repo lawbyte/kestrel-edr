@@ -1,0 +1,11 @@
+{
+  "allow": [
+    {
+      "max_severity": "low",
+      "note": "FP-04: Copilot app (WebView2) reading its own embedded browser profile",
+      "rule": "ST-01"
+    }
+  ],
+  "description": "alert-st-02-copilotapp: slice of the owner-PC telemetry 2026-10 (anonymised)",
+  "strict": true
+}

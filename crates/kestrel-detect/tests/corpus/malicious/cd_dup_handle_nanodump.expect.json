@@ -1,0 +1,12 @@
+{
+  "must_alert": [
+    "CD-03"
+  ],
+  "min_severity": "high",
+  "family": "nanodump-style handle duplication",
+  "category": "credential-dumping",
+  "sources": [
+    "https://github.com/fortra/nanodump"
+  ],
+  "notes": "Opens LSASS with PROCESS_DUP_HANDLE only (0x40) to duplicate an existing handle; dump written with an innocuous extension (invalid signature in the MDMP header, nanodump --invalid)."
+}

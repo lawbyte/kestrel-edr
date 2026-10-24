@@ -1,0 +1,20 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "PXA Stealer (Python)",
+  "category": "script-stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "PS-01",
+    "PS-02"
+  ],
+  "sources": [
+    "https://www.sentinelone.com/labs/ghost-in-the-zip-new-pxa-stealer-and-its-telegram-powered-ecosystem/"
+  ],
+  "notes": "PXA (SentinelLabs, Aug 2025): signed Word 2013 binary renamed like a document sideloads msvcr100.dll, Evidence.cmd uses certutil, a Python 3.10 interpreter renamed svchost.exe runs from C:\\Users\\Public, Run value 'Windows Update Service'; browsers, wallets, KeePass, VPN; zip relayed to a Telegram bot through a Cloudflare Worker."
+}

@@ -1,0 +1,25 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-01"
+      ],
+      "min_severity": "medium"
+    },
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "Electron run-as-Node wallet stealer",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "ST-01 trusted-owner short-circuit for a genuine Electron owner started by an untrusted launcher (review of the 1.1.7 integration, M3)"
+  ],
+  "sources": [
+    "https://www.electronjs.org/docs/latest/api/environment-variables#electron_run_as_node",
+    "https://www.electronjs.org/docs/latest/tutorial/fuses#runasnode"
+  ],
+  "notes": "An unsigned launcher in Temp starts the genuine Exodus.exe with no argument and pipes its script on stdin (ELECTRON_RUN_AS_NODE=1). The command line is plain, so only the launcher tells: the Exodus wallet files read by an Exodus started from an untrusted process are not owner reads."
+}

@@ -1,0 +1,17 @@
+{
+  "must_alert": [
+    "ST-07",
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "SantaStealer",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://www.rapid7.com/blog/post/tr-santastealer-is-coming-to-town-a-new-ambitious-infostealer-advertised-on-underground-forums"
+  ],
+  "notes": "SantaStealer (Rapid7, Dec 2025): embedded ChromElevator-based module injected into the browser with direct-syscall reflective process hollowing; Log.zip in %TEMP%; plain HTTP POST /upload to IP:6767 in 10 MB chunks with User-Agent 'upload'."
+}

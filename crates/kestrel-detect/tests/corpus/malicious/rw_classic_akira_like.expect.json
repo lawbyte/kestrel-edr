@@ -1,0 +1,24 @@
+{
+  "must_alert": [
+    "RW-01",
+    "RW-06",
+    "RW-08",
+    "RW-12"
+  ],
+  "min_severity": "critical",
+  "family": "Akira-style ransomware",
+  "category": "ransomware",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "RW-02",
+    "RW-04"
+  ],
+  "sources": [
+    "https://www.cisa.gov/news-events/cybersecurity-advisories/aa24-109a",
+    "https://thedfirreport.com/2025/06/30/hide-your-rdp-password-spray-leads-to-ransomhub-deployment/",
+    "https://www.picussecurity.com/resource/blog/inside-safepay-analyzing-the-new-centralized-ransomware-group"
+  ],
+  "notes": "Shadow copies removed through WMI in PowerShell, recovery disabled, logs cleared, then mass rename to .akira with a note in every folder."
+}

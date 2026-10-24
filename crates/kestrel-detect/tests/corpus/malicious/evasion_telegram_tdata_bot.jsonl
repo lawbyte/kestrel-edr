@@ -1,0 +1,8 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 6100, "guid": "stealer", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Users\\alice\\AppData\\Local\\Temp\\tg.exe", "cmdline": "\"C:\\Users\\alice\\AppData\\Local\\Temp\\tg.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "unsigned", "sha256": "84adfe781bf6daa948cc762a436948f05b99417c42f5e5f18325d62261fa001d"}
+{"ts": 1760000000500, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\key_datas", "op": "read"}
+{"ts": 1760000000540, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\D877F783D5D3EF8C\\maps", "op": "read"}
+{"ts": 1760000000580, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\D877F783D5D3EF8Cs", "op": "read"}
+{"ts": 1760000000620, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\A7FDF864FBC10B77\\maps", "op": "read"}
+{"ts": 1760000000760, "pid": 6100, "guid": "stealer", "type": "dns_query", "qname": "api.telegram.org", "answers": ["149.154.167.220"]}
+{"ts": 1760000000860, "pid": 6100, "guid": "stealer", "type": "net_connect", "proto": "tcp", "dst_ip": "149.154.167.220", "dst_port": 443, "src_port": 50101, "dst_host": "api.telegram.org", "bytes_sent": 2500000}

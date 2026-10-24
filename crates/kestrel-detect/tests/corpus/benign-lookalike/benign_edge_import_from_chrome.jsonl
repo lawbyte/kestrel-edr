@@ -1,0 +1,9 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 5000, "guid": "edge", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", "cmdline": "\"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Corporation"}
+{"ts": 1760000001000, "pid": 5000, "guid": "edge", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Local State", "op": "read"}
+{"ts": 1760000001040, "pid": 5000, "guid": "edge", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000001080, "pid": 5000, "guid": "edge", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000001120, "pid": 5000, "guid": "edge", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Web Data", "op": "read"}
+{"ts": 1760000001200, "pid": 5000, "guid": "edge", "type": "dpapi_unprotect", "description": "Google Chrome"}
+{"ts": 1760000001500, "pid": 5000, "guid": "edge", "type": "dns_query", "qname": "www.bing.com", "answers": ["204.79.197.200"]}
+{"ts": 1760000001600, "pid": 5000, "guid": "edge", "type": "net_connect", "proto": "tcp", "dst_ip": "204.79.197.200", "dst_port": 443, "src_port": 50101, "dst_host": "www.bing.com", "bytes_sent": 3000}

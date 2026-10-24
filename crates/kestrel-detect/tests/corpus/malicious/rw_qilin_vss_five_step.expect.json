@@ -1,0 +1,21 @@
+{
+  "must_alert": [
+    "RW-01",
+    "RW-06",
+    "RW-08"
+  ],
+  "min_severity": "critical",
+  "family": "Qilin",
+  "category": "ransomware",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "RW-04",
+    "RW-12"
+  ],
+  "sources": [
+    "https://asec.ahnlab.com/en/90497/"
+  ],
+  "notes": "Qilin (AhnLab Sep 2025): VSS service forced to Manual, started, shadows deleted, stopped and disabled; logs cleared through EventLogSession.ClearLog; per-victim extension and README-RECOVER-<ext>.txt in every folder."
+}

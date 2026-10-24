@@ -93,6 +93,32 @@ impl ProcessTable {
         out
     }
 
+    /// Descendants including exited ones still in the table (ST-04 reader
+    /// search: a child that read the stores and exited before its parent
+    /// sent them), at most `limit`.
+    pub fn descendants_all(&self, guid: &ProcessGuid, limit: usize) -> Vec<ProcessInfo> {
+        let mut out = Vec::new();
+        let mut seen: HashSet<&ProcessGuid> = HashSet::new();
+        seen.insert(guid);
+        let mut stack: Vec<&ProcessGuid> = vec![guid];
+        while let Some(g) = stack.pop() {
+            if let Some(kids) = self.children.get(g) {
+                for k in kids {
+                    if out.len() >= limit {
+                        return out;
+                    }
+                    if seen.insert(k) {
+                        if let Some(p) = self.procs.get(k) {
+                            out.push(p.clone());
+                        }
+                        stack.push(k);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     pub fn len(&self) -> usize {
         self.procs.len()
     }

@@ -1,0 +1,13 @@
+{"ts": 1760000000000, "pid": 3000, "guid": "veeam", "type": "process_start", "ppid": 3900, "image": "C:\\Program Files\\Veeam\\Endpoint Backup\\Veeam.EndPoint.Service.exe", "cmdline": "\"C:\\Program Files\\Veeam\\Endpoint Backup\\Veeam.EndPoint.Service.exe\"", "user": "NT AUTHORITY\\SYSTEM", "integrity": "system", "signed": "valid", "signer": "Veeam Software Group GmbH"}
+{"ts": 1760000001000, "pid": 3000, "guid": "veeam", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Local State", "op": "read"}
+{"ts": 1760000001200, "pid": 3000, "guid": "veeam", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000001400, "pid": 3000, "guid": "veeam", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000001600, "pid": 3000, "guid": "veeam", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Web Data", "op": "read"}
+{"ts": 1760000001800, "pid": 3000, "guid": "veeam", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Local Extension Settings\\nkbihfbeogaeaoehlefnkodbefgpgknn\\000003.log", "op": "read"}
+{"ts": 1760000002000, "pid": 3000, "guid": "veeam", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\key_datas", "op": "read"}
+{"ts": 1760000002200, "pid": 3000, "guid": "veeam", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\discord\\Local Storage\\leveldb\\000005.ldb", "op": "read"}
+{"ts": 1760000002400, "pid": 3000, "guid": "veeam", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Exodus\\exodus.wallet\\seed.seco", "op": "read"}
+{"ts": 1760000002600, "pid": 3000, "guid": "veeam", "type": "file_access", "path": "C:\\Users\\alice\\Documents\\Passwords.kdbx", "op": "read"}
+{"ts": 1760000002800, "pid": 3000, "guid": "veeam", "type": "file_access", "path": "C:\\Users\\alice\\.ssh\\id_ed25519", "op": "read"}
+{"ts": 1760000005000, "pid": 3000, "guid": "veeam", "type": "dns_query", "qname": "backup01.corp.example", "answers": ["10.10.1.20"]}
+{"ts": 1760000005100, "pid": 3000, "guid": "veeam", "type": "net_connect", "proto": "tcp", "dst_ip": "10.10.1.20", "dst_port": 10005, "src_port": 50101, "dst_host": "backup01.corp.example", "bytes_sent": 900000000}

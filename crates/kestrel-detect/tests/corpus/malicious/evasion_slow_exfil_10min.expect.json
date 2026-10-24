@@ -1,0 +1,23 @@
+{
+  "must_alert": [
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic (delayed exfiltration)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-01",
+    "ST-03"
+  ],
+  "evasion_targets": [
+    "ST-04 300 s window"
+  ],
+  "sources": [
+    "https://iimp0ster.github.io/detection-chokepoints/chokepoints/browser-credential-theft/"
+  ],
+  "notes": "Reads Chrome passwords + cookies + key now, stages to a temp file, uploads 10 minutes later (ST-04 window is 300 s).",
+  "known_gap": "ST-04 window is 300 s"
+}

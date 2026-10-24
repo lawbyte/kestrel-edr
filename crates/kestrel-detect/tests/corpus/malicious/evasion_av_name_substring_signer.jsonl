@@ -1,0 +1,19 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 6100, "guid": "stealer", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\ProgramData\\ESET\\ekrn.exe", "cmdline": "\"C:\\ProgramData\\ESET\\ekrn.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Reset Data Systems Ltd", "sha256": "50a34b8a1b6d40ec2ddb329721c7ecde5b1472a0c6746bed1b3ef77902459fca"}
+{"ts": 1760000001000, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Local State", "op": "read"}
+{"ts": 1760000001030, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000001060, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000001090, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Web Data", "op": "read"}
+{"ts": 1760000001120, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Local Extension Settings\\nkbihfbeogaeaoehlefnkodbefgpgknn\\000003.log", "op": "read"}
+{"ts": 1760000001150, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Local State", "op": "read"}
+{"ts": 1760000001180, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000001210, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000001240, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Web Data", "op": "read"}
+{"ts": 1760000001270, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Local Extension Settings\\nkbihfbeogaeaoehlefnkodbefgpgknn\\000003.log", "op": "read"}
+{"ts": 1760000001300, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Exodus\\exodus.wallet\\seed.seco", "op": "read"}
+{"ts": 1760000001330, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Electrum\\wallets\\default_wallet", "op": "read"}
+{"ts": 1760000001360, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\key_datas", "op": "read"}
+{"ts": 1760000001390, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\D877F783D5D3EF8C\\maps", "op": "read"}
+{"ts": 1760000001420, "pid": 6100, "guid": "stealer", "type": "dpapi_unprotect", "description": "Google Chrome"}
+{"ts": 1760000001440, "pid": 6100, "guid": "stealer", "type": "dpapi_unprotect", "description": "Microsoft Edge"}
+{"ts": 1760000001560, "pid": 6100, "guid": "stealer", "type": "net_connect", "proto": "tcp", "dst_ip": "198.51.100.77", "dst_port": 443, "src_port": 50101, "bytes_sent": 2400000}

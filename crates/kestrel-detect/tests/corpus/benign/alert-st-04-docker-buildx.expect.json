@@ -1,0 +1,16 @@
+{
+  "description": "alert-st-04-docker-buildx: slice of the owner-PC telemetry 2026-10 (anonymised)",
+  "strict": true,
+  "allow": [
+    {
+      "rule": "ST-01",
+      "max_severity": "low",
+      "note": "FP-02 fixed 2026-10-25: Docker Inc tool reading a Docker / kube store is Low Audit by design"
+    },
+    {
+      "rule": "ST-04",
+      "max_severity": "low",
+      "note": "FP-02 fixed 2026-10-25: Docker Inc tool reading Docker / kube stores, then Docker endpoints, is Low Audit by design"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic (hollowed System32 host, server-side decryption)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "engine::system_trusted in on_file / ST-04",
+    "no DPAPI fallback signal"
+  ],
+  "sources": [
+    "https://www.proofpoint.com/us/blog/threat-insight/amatera-stealer-rebranded-acr-stealer-improved-evasion-sophistication",
+    "https://research.checkpoint.com/2025/rhadamanthys-0-9-x-walk-through-the-updates/",
+    "https://www.varonis.com/blog/storm-infostealer"
+  ],
+  "notes": "Combination of two documented tricks: the stealer runs inside a hollowed Microsoft-signed System32 binary (Amatera / Rhadamanthys) and, like Storm, ships the encrypted stores for server-side decryption, so no DPAPI call happens. on_file() returns early for system-trusted readers, so nothing records the reads and ST-04 has no credential timestamp.",
+  "known_gap": "system_trusted readers are skipped in on_file and nothing else records the reads"
+}

@@ -1,0 +1,13 @@
+{
+  "must_not_alert": [
+    "ST-01",
+    "ST-02",
+    "ST-04"
+  ],
+  "family": "Git for Windows ssh",
+  "category": "benign-lookalike",
+  "sources": [
+    "https://gitforwindows.org/"
+  ],
+  "notes": "Git for Windows' unsigned ssh.exe in its admin-only install folder reads the user's key and pushes to github.com:22."
+}

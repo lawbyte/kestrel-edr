@@ -1,0 +1,21 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "CD-10",
+        "CD-11"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "Medusa shadow-copy hive / NTDS copy",
+  "category": "credential-dumping",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://www.cisa.gov/news-events/cybersecurity-advisories/aa25-071a"
+  ],
+  "notes": "Verbatim Medusa (CISA AA25-071A): create a shadow copy and copy ntds.dit, SECURITY and SYSTEM out of it."
+}

@@ -1,0 +1,34 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 5000, "guid": "loader", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Users\\alice\\Downloads\\Setup.exe", "cmdline": "\"C:\\Users\\alice\\Downloads\\Setup.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "unsigned", "sha256": "970423091a42446a5a43d17ba88a0ab608e512fdf51e32c3eaad18545aa341f5", "motw_zone": 3}
+{"ts": 1760000000400, "pid": 5000, "guid": "loader", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\GoogleUpdateCache\\chrome.exe", "op": "create"}
+{"ts": 1760000000450, "pid": 5000, "guid": "loader", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\GoogleUpdateCache\\chrome_elf.dll", "op": "create"}
+{"ts": 1760000001000, "pid": 6100, "guid": "stealer", "type": "process_start", "ppid": 5000, "parent_guid": "loader", "image": "C:\\Users\\alice\\AppData\\Roaming\\GoogleUpdateCache\\chrome.exe", "cmdline": "\"C:\\Users\\alice\\AppData\\Roaming\\GoogleUpdateCache\\chrome.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Google LLC", "sha256": "af6b0af530681df7138eb7d190fb11fa3635001d357ba8ff26ea7f6234aafdab"}
+{"ts": 1760000001050, "pid": 6100, "guid": "stealer", "type": "image_load", "path": "C:\\Users\\alice\\AppData\\Roaming\\GoogleUpdateCache\\chrome_elf.dll", "signed": "unsigned"}
+{"ts": 1760000002000, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Local State", "op": "read"}
+{"ts": 1760000002030, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000002060, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000002090, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Web Data", "op": "read"}
+{"ts": 1760000002120, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Local Extension Settings\\nkbihfbeogaeaoehlefnkodbefgpgknn\\000003.log", "op": "read"}
+{"ts": 1760000002150, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Local Extension Settings\\bfnaelmomeimhlpmgjnjophhpkkoljpa\\000003.log", "op": "read"}
+{"ts": 1760000002180, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Local State", "op": "read"}
+{"ts": 1760000002210, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000002240, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000002270, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Web Data", "op": "read"}
+{"ts": 1760000002300, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Local Extension Settings\\nkbihfbeogaeaoehlefnkodbefgpgknn\\000003.log", "op": "read"}
+{"ts": 1760000002330, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Local Extension Settings\\bfnaelmomeimhlpmgjnjophhpkkoljpa\\000003.log", "op": "read"}
+{"ts": 1760000002360, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\BraveSoftware\\Brave-Browser\\User Data\\Local State", "op": "read"}
+{"ts": 1760000002390, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\BraveSoftware\\Brave-Browser\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000002420, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\BraveSoftware\\Brave-Browser\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000002450, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\BraveSoftware\\Brave-Browser\\User Data\\Default\\Web Data", "op": "read"}
+{"ts": 1760000002480, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\BraveSoftware\\Brave-Browser\\User Data\\Default\\Local Extension Settings\\nkbihfbeogaeaoehlefnkodbefgpgknn\\000003.log", "op": "read"}
+{"ts": 1760000002510, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\BraveSoftware\\Brave-Browser\\User Data\\Default\\Local Extension Settings\\bfnaelmomeimhlpmgjnjophhpkkoljpa\\000003.log", "op": "read"}
+{"ts": 1760000002540, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Exodus\\exodus.wallet\\seed.seco", "op": "read"}
+{"ts": 1760000002570, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Electrum\\wallets\\default_wallet", "op": "read"}
+{"ts": 1760000002600, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\key_datas", "op": "read"}
+{"ts": 1760000002630, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\D877F783D5D3EF8C\\maps", "op": "read"}
+{"ts": 1760000002660, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\discord\\Local State", "op": "read"}
+{"ts": 1760000002690, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\discord\\Local Storage\\leveldb\\000005.ldb", "op": "read"}
+{"ts": 1760000002720, "pid": 6100, "guid": "stealer", "type": "dpapi_unprotect", "description": "Google Chrome"}
+{"ts": 1760000002740, "pid": 6100, "guid": "stealer", "type": "dpapi_unprotect", "description": "Microsoft Edge"}
+{"ts": 1760000002760, "pid": 6100, "guid": "stealer", "type": "dpapi_unprotect", "description": "Brave"}
+{"ts": 1760000002980, "pid": 6100, "guid": "stealer", "type": "net_connect", "proto": "tcp", "dst_ip": "192.0.2.45", "dst_port": 443, "src_port": 50101, "bytes_sent": 2400000}

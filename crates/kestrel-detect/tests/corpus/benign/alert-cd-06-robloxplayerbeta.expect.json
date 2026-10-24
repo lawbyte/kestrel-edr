@@ -1,0 +1,11 @@
+{
+  "description": "alert-cd-06-robloxplayerbeta: slice of the owner-PC telemetry 2026-10 (anonymised)",
+  "strict": true,
+  "allow": [
+    {
+      "rule": "CD-06",
+      "max_severity": "low",
+      "note": "FP-11 fixed 2026-10-25: genuine Roblox client refused LSASS probe is Low Audit by design"
+    }
+  ]
+}

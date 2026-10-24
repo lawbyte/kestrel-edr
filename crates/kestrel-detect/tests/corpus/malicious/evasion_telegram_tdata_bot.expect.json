@@ -1,0 +1,30 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-01"
+      ],
+      "min_severity": "medium"
+    },
+    "ST-04",
+    {
+      "any_of": [
+        "ST-14"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "Telegram session theft",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://isc.sans.edu/diary/32888",
+    "https://www.elastic.co/security-labs/eddiestealer",
+    "https://www.sentinelone.com/labs/ghost-in-the-zip-new-pxa-stealer-and-its-telegram-powered-ecosystem/",
+    "https://www.bitsight.com/blog/exfiltration-over-telegram-bots-skidding-infostealer-logs"
+  ],
+  "notes": "Telegram Desktop tdata (key_datas + D877F783D5D3EF8C maps) copied and sent to a Telegram bot."
+}

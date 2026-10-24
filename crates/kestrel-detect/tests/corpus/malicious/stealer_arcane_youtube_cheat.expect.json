@@ -1,0 +1,20 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "Arcane Stealer",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-11",
+    "ST-12"
+  ],
+  "sources": [
+    "https://securelist.com/arcane-stealer/115919/"
+  ],
+  "notes": "Arcane (2025): YouTube game-cheat lure, batch -> PowerShell adds a Defender exclusion and downloads the payload; steals VPN, gaming, messenger and browser data."
+}

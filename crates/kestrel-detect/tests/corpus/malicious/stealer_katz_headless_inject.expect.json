@@ -1,0 +1,27 @@
+{
+  "must_alert": [
+    "ST-07",
+    "ST-02",
+    "ST-04",
+    {
+      "any_of": [
+        "ST-13"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "Katz Stealer",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-05",
+    "ST-14"
+  ],
+  "sources": [
+    "https://www.nextron-systems.com/2025/05/23/katz-stealer-threat-analysis/"
+  ],
+  "notes": "Katz (May 2025): hidden PowerShell pulls the payload from an r2.dev bucket, cmstp UAC bypass, MSBuild hollowing, Chrome/Edge/Brave started headless and injected (katz_ontop.dll / IElevator) writing decrypted_chrome_key.txt; Gecko, wallets, ngrok token, Discord index.js patched; upload to a raw IP."
+}

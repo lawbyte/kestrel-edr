@@ -1,0 +1,24 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04",
+    {
+      "any_of": [
+        "ST-13"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "RedLine / META successors",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://www.microsoft.com/en-us/security/blog/2025/05/21/lumma-stealer-breaking-down-the-delivery-techniques-and-capabilities-of-a-prolific-infostealer/",
+    "https://unit42.paloaltonetworks.com/new-malware-gremlin-stealer-for-sale-on-telegram/",
+    "https://www.nextron-systems.com/2025/05/23/katz-stealer-threat-analysis/"
+  ],
+  "notes": "Commodity .NET stealers (RedLine lineage, Lumma loaders) hollow RegAsm.exe / RegSvcs.exe / MSBuild.exe and exfiltrate over a WCF/HTTP channel to a raw IP and odd port."
+}

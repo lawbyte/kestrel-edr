@@ -1,0 +1,22 @@
+{
+  "must_alert": [
+    [
+      "CD-02",
+      "CD-03",
+      "CD-04"
+    ]
+  ],
+  "min_severity": "high",
+  "family": "rdrleakdiag LSASS dump (LOLBin)",
+  "category": "credential-dumping",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "CD-03 Microsoft-signed System32 opener"
+  ],
+  "sources": [
+    "https://lolbas-project.github.io/lolbas/Binaries/Rdrleakdiag/"
+  ],
+  "notes": "Microsoft-signed System32 rdrleakdiag.exe /fullmemdmp against the LSASS PID: a signed Windows binary as the dumper, writing minidump_<pid>.dmp."
+}

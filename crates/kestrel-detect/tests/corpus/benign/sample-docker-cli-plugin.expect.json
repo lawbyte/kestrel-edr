@@ -1,0 +1,11 @@
+{
+  "allow": [
+    {
+      "max_severity": "low",
+      "note": "FP-02: signed Docker CLI plugin reading kubeconfig (low by design)",
+      "rule": "ST-01"
+    }
+  ],
+  "description": "sample-docker-cli-plugin: slice of the owner-PC telemetry 2026-10 (anonymised)",
+  "strict": true
+}

@@ -1,0 +1,12 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1759999500000, "pid": 7000, "guid": "chrome", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "cmdline": "\"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Google LLC"}
+{"ts": 1760000001000, "pid": 7000, "guid": "chrome", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Local State", "op": "read"}
+{"ts": 1760000001040, "pid": 7000, "guid": "chrome", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000001080, "pid": 7000, "guid": "chrome", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000001120, "pid": 7000, "guid": "chrome", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Web Data", "op": "read"}
+{"ts": 1760000001160, "pid": 7000, "guid": "chrome", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Local Extension Settings\\nkbihfbeogaeaoehlefnkodbefgpgknn\\000003.log", "op": "read"}
+{"ts": 1760000001300, "pid": 7000, "guid": "chrome", "type": "dpapi_unprotect", "description": "Google Chrome"}
+{"ts": 1760000001500, "pid": 7000, "guid": "chrome", "type": "dns_query", "qname": "accounts.google.com", "answers": ["142.250.4.84"]}
+{"ts": 1760000001600, "pid": 7000, "guid": "chrome", "type": "net_connect", "proto": "tcp", "dst_ip": "142.250.4.84", "dst_port": 443, "src_port": 50101, "dst_host": "accounts.google.com", "bytes_sent": 4000}
+{"ts": 1760000001700, "pid": 7000, "guid": "chrome", "type": "dns_query", "qname": "api.telegram.org", "answers": ["149.154.167.220"]}
+{"ts": 1760000001800, "pid": 7000, "guid": "chrome", "type": "net_connect", "proto": "tcp", "dst_ip": "149.154.167.220", "dst_port": 443, "src_port": 50102, "dst_host": "api.telegram.org", "bytes_sent": 2000}

@@ -1,0 +1,21 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "Rhadamanthys 0.9.x",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "engine::system_trusted (System32 + Microsoft signature + not a LOLBin)"
+  ],
+  "sources": [
+    "https://research.checkpoint.com/2025/rhadamanthys-0-9-x-walk-through-the-updates/",
+    "https://www.huntress.com/blog/clickfix-malware-buried-in-images"
+  ],
+  "notes": "Rhadamanthys' Netclient module starts a Microsoft-signed System32 binary suspended (dllhost / credwiz / OOBE-Maintenance / openwith / rundll32) and implants the stealer; reads and the WebSocket upload to a raw IP:8888 come from a valid Microsoft-signed System32 image. Only the cross-process write / thread-context from the loader betrays it. Targets the engine's `system_trusted` shortcut (on_file returns early; ST-04 relatives skip system-trusted senders).",
+  "known_gap": "reads by system-trusted credwiz.exe are skipped (ST-02 missing); ST-03 / ST-04 still fire through the DPAPI call"
+}

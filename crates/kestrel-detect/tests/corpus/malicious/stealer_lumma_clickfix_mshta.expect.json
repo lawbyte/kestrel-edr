@@ -1,0 +1,32 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04",
+    {
+      "any_of": [
+        "ST-10",
+        "ST-11"
+      ],
+      "min_severity": "high"
+    },
+    {
+      "any_of": [
+        "ST-12"
+      ],
+      "min_severity": "low"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "Lumma (LummaC2)",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://www.microsoft.com/en-us/security/blog/2025/05/21/lumma-stealer-breaking-down-the-delivery-techniques-and-capabilities-of-a-prolific-infostealer/",
+    "https://isc.sans.edu/diary/32904",
+    "https://www.huntress.com/blog/clickfix-malware-buried-in-images",
+    "https://www.microsoft.com/en-us/security/blog/2025/08/21/think-before-you-clickfix-analyzing-the-clickfix-social-engineering-technique/"
+  ],
+  "notes": "ClickFix fake CAPTCHA: Run dialog paste (RunMRU) -> hidden PowerShell cradle -> mshta -> null-padded unsigned payload in %TEMP% (600 MB) -> browsers, wallet extensions, desktop wallets, Telegram -> POST to C2 within seconds."
+}

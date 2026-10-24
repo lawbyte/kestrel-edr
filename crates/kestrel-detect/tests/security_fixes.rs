@@ -177,11 +177,13 @@ fn unknown_signature_is_never_trusted_as_owner() {
     ));
     let out = e.process(&read(1, "fake", 40, CHROME_LOGIN));
     assert_eq!(rule_ids(&out), ["ST-01"], "{}", dump(&out));
-    // … while the same image with a valid signature is the owner.
+    // Fix round 2026-10-25 (identity, not name): a validly signed
+    // `chrome.exe` is the Chrome owner only with Google's signer at a Chrome
+    // install location; another signer is not, wherever it runs.
     let mut e = engine(Policy::default());
     e.process(&start(
         0,
-        "real",
+        "other",
         41,
         r"C:\Users\alice\AppData\Local\Chromium\chrome.exe",
         "chrome.exe",
@@ -189,7 +191,23 @@ fn unknown_signature_is_never_trusted_as_owner() {
         SignatureState::Valid,
         Some("The Chromium Authors"),
     ));
-    assert!(e.process(&read(1, "real", 41, CHROME_LOGIN)).is_empty());
+    assert_eq!(
+        rule_ids(&e.process(&read(1, "other", 41, CHROME_LOGIN))),
+        ["ST-01"]
+    );
+    // … while the genuine per-user Chrome is the owner.
+    let mut e = engine(Policy::default());
+    e.process(&start(
+        0,
+        "real",
+        42,
+        r"C:\Users\alice\AppData\Local\Google\Chrome\Application\chrome.exe",
+        "chrome.exe",
+        None,
+        SignatureState::Valid,
+        Some("Google LLC"),
+    ));
+    assert!(e.process(&read(1, "real", 42, CHROME_LOGIN)).is_empty());
 }
 
 #[test]

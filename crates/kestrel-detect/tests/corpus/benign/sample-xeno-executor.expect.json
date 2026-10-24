@@ -1,0 +1,11 @@
+{
+  "description": "sample-xeno-executor: slice of the owner-PC telemetry 2026-10 (anonymised)",
+  "known_false_positives": [
+    {
+      "max_severity": "medium",
+      "note": "X-01: Xeno Roblox executor (Electron, unpacked to Temp): own safeStorage key, pastebin config, QUIC handshake; not a stealer, a game-cheat injector (unclear / PUA); ST-12 medium: unsigned 155 MB image from Temp (rule intent met)",
+      "rule": "ST-12"
+    }
+  ],
+  "strict": true
+}

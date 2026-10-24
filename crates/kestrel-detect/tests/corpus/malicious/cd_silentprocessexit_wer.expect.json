@@ -1,0 +1,17 @@
+{
+  "must_alert": [
+    "CD-07"
+  ],
+  "min_severity": "critical",
+  "family": "LSASS dump via SilentProcessExit",
+  "category": "credential-dumping",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/registry-entries-for-silent-process-exit",
+    "https://thedfirreport.com/2025/06/30/hide-your-rdp-password-spray-leads-to-ransomhub-deployment/",
+    "https://www.elastic.co/guide/en/security/current/lsass-memory-dump-handle-access.html"
+  ],
+  "notes": "SilentProcessExit + IFEO GlobalFlag 0x200 on lsass.exe, then RtlReportSilentProcessExit produces a WER dump."
+}

@@ -1,0 +1,20 @@
+{
+  "must_alert": [
+    "ST-08",
+    "ST-04"
+  ],
+  "min_severity": "high",
+  "family": "IElevator COM abuse (ABE)",
+  "category": "abe",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-02"
+  ],
+  "sources": [
+    "https://www.elastic.co/security-labs/katz-and-mouse-game",
+    "https://github.com/xaitax/Chrome-App-Bound-Encryption-Decryption"
+  ],
+  "notes": "Kills Chrome (TerminateProcess on two Chrome processes within a second), then calls the IElevator COM interface (elevation_service.exe is started by the SCM) to decrypt app_bound_encrypted_key from a process outside Chrome's directory."
+}

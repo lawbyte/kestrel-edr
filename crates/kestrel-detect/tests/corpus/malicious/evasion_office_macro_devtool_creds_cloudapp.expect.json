@@ -1,0 +1,24 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-04"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "high",
+  "family": "VBA macro cloud-credential theft (Azure CLI MSAL cache, kubeconfig, Docker registry auth) exfiltrated to an attacker VM under cloudapp.azure.com",
+  "category": "evasion",
+  "evasion_targets": [
+    "legit_apps.rs:514-547 dev_tool_reader: DEV_TOOL_PUBLISHERS 'microsoft corporation' covers Azure CLI / Kubernetes / Docker stores, and signed_program_files_native (legit_apps.rs:1409) accepts WINWORD.EXE / EXCEL.EXE (any non-interpreter Microsoft Program Files image)",
+    "legit_apps.rs:550-575 Microsoft dev-tool endpoints 'azure.com' / 'azure.net' / 'azurecr.io' are customer-controlled namespaces (cloudapp.azure.com VMs, vault.azure.net, *.azurecr.io registries)",
+    "engine.rs st04 benign_verdict s.dev_tool_cred && own_ep => Low Audit"
+  ],
+  "notes": "Red-team round 2. A Word macro (in-process VBA, no injection, no DLL) reads ~/.azure/msal_token_cache.json, ~/.kube/config and ~/.docker/config.json. Because WINWORD.EXE is a Microsoft-signed native Program Files image, every read is a 'developer tool' read (ST-01 Low Audit), and the 140 KB send to aks-diag-collector.eastus.cloudapp.azure.com (an attacker's Azure VM DNS label) is the publisher's 'own endpoint' (host_matches(.., 'azure.com')) => ST-04 Low Audit, no containment. Fix: only real developer-tool images (az / kubectl / docker / code / devenv / msbuild ...) per publisher, exclude Office (and any MACRO host: winword/excel/powerpnt/outlook/msaccess/visio/mspub), and subtract MICROSOFT_CUSTOMER_NAMESPACES from dev_tool_endpoint / provider_endpoint. Added by the fix-round red team (2026-10-25); the engine detects it after the red-team fixes.",
+  "sources": [
+    "https://www.securityweek.com/infostealer-malware-delivered-in-emeditor-supply-chain-attack/",
+    "https://securityaffairs.com/183532/",
+    "https://bleepingcomputer.com/news/security/fake-enterprise-vpn-downloads-used-to-steal-company-credentials"
+  ]
+}

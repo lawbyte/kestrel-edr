@@ -1,0 +1,21 @@
+{
+  "must_alert": [
+    "ST-04"
+  ],
+  "min_severity": "high",
+  "family": "Office add-in (XLL) token theft",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "legit_apps::wam_client_reader (Program Files, not destination-bound)"
+  ],
+  "sources": [
+    "https://www.bitdefender.com/en-us/blog/hotforsecurity/hackers-xll-excel-cabinetrat-malware-ukraine",
+    "https://blog.xpnsec.com/wam-bam/",
+    "https://www.bitdefender.com/en-us/blog/labs/fake-xeno-roblox-discord-executor"
+  ],
+  "notes": "Malicious XLL loaded into Microsoft-signed EXCEL.EXE (Program Files) reads the WAM token cache and posts it to a raw IP. wam_client_reader makes the read Low Audit and ST-04 Audit-only for *any* destination (unlike the per-user allowance, which is destination-bound).",
+  "known_gap": "wam_client_reader (Program Files Microsoft-signed app) makes ST-04 Low Audit for any destination; an XLL loaded into Excel is not a tamper signal"
+}

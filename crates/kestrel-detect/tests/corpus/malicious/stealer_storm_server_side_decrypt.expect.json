@@ -1,0 +1,20 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "Storm",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-11",
+    "ST-12"
+  ],
+  "sources": [
+    "https://www.varonis.com/blog/storm-infostealer"
+  ],
+  "notes": "Storm (Varonis, 2026): ships the encrypted browser databases and Local State to the server for decryption; no DPAPI call, no browser injection on the endpoint — only file reads and an upload. Loader is PowerShell -exec bypass."
+}

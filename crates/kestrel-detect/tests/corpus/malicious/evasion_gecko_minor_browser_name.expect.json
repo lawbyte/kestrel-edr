@@ -1,0 +1,22 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "Gecko-profile stealer (renamed to an unpinned Mozilla-family image name, any valid signer, in AppData)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "identity::genuine_browser / is_trusted_owner browser branch for Firefox stores (paths.rs:1497-1504)",
+    "MOZILLA_IMAGES unpinned names: waterfox, librewolf, palemoon, basilisk, seamonkey, floorp, zen, k-meleon, icedragon, cyberfox, mercury (paths.rs:237-258)"
+  ],
+  "notes": "REGRESSION FIXTURE (Gecko variant of the minor-browser gap). waterfox.exe signed with any cert under %LOCALAPPDATA%\\Waterfox\\ reads the real Firefox profile (key4.db, logins.json, cookies.sqlite, formhistory.sqlite) and exfiltrates. With the pre-05:06 build this was a full evasion; the concurrent `pinned` fix now detects it (ST-01 medium, ST-02 critical, ST-04 critical; kill+quarantine+block in Protect). NB: loading an unsigned nss3.dll from the stealer's own folder would additionally taint the process (on_image_load side-load taint, engine.rs:5210-5216), so this fixture reads the Gecko files directly (as many Gecko stealers do) to isolate the identity path. Added by the fix-round red team (2026-10-25); the engine detects it after the red-team fixes.",
+  "sources": [
+    "https://www.securityweek.com/infostealer-malware-delivered-in-emeditor-supply-chain-attack/",
+    "https://securityaffairs.com/183532/",
+    "https://bleepingcomputer.com/news/security/fake-enterprise-vpn-downloads-used-to-steal-company-credentials"
+  ]
+}

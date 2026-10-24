@@ -1,0 +1,30 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-10"
+      ],
+      "min_severity": "high"
+    },
+    {
+      "any_of": [
+        "ST-11"
+      ],
+      "min_severity": "high"
+    },
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "ClickFix (conhost --headless)",
+  "category": "script-stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://www.microsoft.com/en-us/security/blog/2025/08/21/think-before-you-clickfix-analyzing-the-clickfix-social-engineering-technique/",
+    "https://isc.sans.edu/diary/32904",
+    "https://www.huntress.com/blog/clickfix-malware-buried-in-images"
+  ],
+  "notes": "ClickFix variant pasting `conhost.exe --headless powershell ...` to hide the console; second stage downloads the stealer."
+}

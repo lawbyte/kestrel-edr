@@ -1,0 +1,11 @@
+{
+  "allow": [
+    {
+      "max_severity": "low",
+      "note": "FP-03: VS Code reading the WAM token-broker cache (low by design)",
+      "rule": "ST-01"
+    }
+  ],
+  "description": "sample-vscode: slice of the owner-PC telemetry 2026-10 (anonymised)",
+  "strict": true
+}

@@ -1,0 +1,7 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 5000, "guid": "bw", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Users\\alice\\AppData\\Local\\Programs\\Bitwarden\\Bitwarden.exe", "cmdline": "\"C:\\Users\\alice\\AppData\\Local\\Programs\\Bitwarden\\Bitwarden.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Bitwarden Inc."}
+{"ts": 1760000000500, "pid": 5000, "guid": "bw", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Local State", "op": "read"}
+{"ts": 1760000000540, "pid": 5000, "guid": "bw", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000000700, "pid": 5000, "guid": "bw", "type": "dpapi_unprotect", "description": "Google Chrome"}
+{"ts": 1760000000900, "pid": 5000, "guid": "bw", "type": "dns_query", "qname": "api.bitwarden.com", "answers": ["104.18.12.33"]}
+{"ts": 1760000001000, "pid": 5000, "guid": "bw", "type": "net_connect", "proto": "tcp", "dst_ip": "104.18.12.33", "dst_port": 443, "src_port": 50101, "dst_host": "api.bitwarden.com", "bytes_sent": 20000}

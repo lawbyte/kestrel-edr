@@ -1,0 +1,25 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic (mock 'Program Files ' directory)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "paths::is_trusted_owner",
+    "engine::on_net browser shortcut",
+    "PathClass::Other"
+  ],
+  "sources": [
+    "https://www.bleepingcomputer.com/news/security/old-windows-mock-folders-uac-bypass-used-to-drop-malware/",
+    "https://securityaffairs.com/183532/",
+    "https://bleepingcomputer.com/news/security/fake-enterprise-vpn-downloads-used-to-steal-company-credentials",
+    "https://www.securityweek.com/infostealer-malware-delivered-in-emeditor-supply-chain-attack/"
+  ],
+  "notes": "Mock directory 'C:\\Program Files \\' (trailing space, creatable with \\\\?\\ paths by an admin-level loader) holding a validly-signed (stolen certificate) stealer named brave.exe. PathClass is Other (not user-writable, not untrusted), the name is a browser, so the owner-by-name and browser-network shortcuts apply.",
+  "known_gap": "browser name + valid (stolen) signature + PathClass::Other = trusted owner of browser stores and a 'browser' for on_net"
+}

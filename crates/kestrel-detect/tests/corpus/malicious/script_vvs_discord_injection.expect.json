@@ -1,0 +1,27 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04",
+    {
+      "any_of": [
+        "ST-14"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "VVS Stealer (Python, Pyarmor)",
+  "category": "script-stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-01",
+    "PS-03",
+    "ST-12"
+  ],
+  "sources": [
+    "https://unit42.paloaltonetworks.com/?p=169710"
+  ],
+  "notes": "VVS (Unit 42, Jan 2026): PyInstaller + Pyarmor; Discord Local State key + leveldb tokens (dQw4w9WgXcQ: prefix), Chrome data, kills Discord, rewrites discord_desktop_core\\index.js, restarts it via Update.exe --processStart, copy in Startup, webhook upload to ptb.discord.com."
+}

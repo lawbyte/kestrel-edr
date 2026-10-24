@@ -1,0 +1,17 @@
+{
+  "must_not_alert": [
+    "ST-01",
+    "ST-02",
+    "ST-03",
+    "ST-04",
+    "ST-07",
+    "ST-14",
+    "ST-16"
+  ],
+  "family": "Google Chrome",
+  "category": "benign-lookalike",
+  "sources": [
+    "https://security.googleblog.com/2024/07/improving-security-of-chrome-cookies-on.html"
+  ],
+  "notes": "Chrome (Program Files, Google LLC) reading its own Login Data / Cookies / Local State / MetaMask extension storage, unprotecting its key and browsing (including web Telegram)."
+}

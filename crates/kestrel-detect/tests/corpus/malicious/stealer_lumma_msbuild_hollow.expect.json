@@ -1,0 +1,24 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04",
+    {
+      "any_of": [
+        "ST-13"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "Lumma (LummaC2)",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://www.microsoft.com/en-us/security/blog/2025/05/21/lumma-stealer-breaking-down-the-delivery-techniques-and-capabilities-of-a-prolific-infostealer/",
+    "https://www.nextron-systems.com/2025/05/23/katz-stealer-threat-analysis/",
+    "https://www.helpnetsecurity.com/2026/05/19/purelogs-infostealer-delivery-steganography/"
+  ],
+  "notes": "Loader from Downloads (fake cracked software, padded to 850 MB) starts MSBuild.exe with no project and hollows it; the hollowed Microsoft-signed .NET binary reads the stores and talks to C2."
+}

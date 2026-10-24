@@ -1,0 +1,14 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 6100, "guid": "stealer", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Users\\alice\\AppData\\Local\\Program Files\\Microsoft VS Code\\Code.exe", "cmdline": "\"C:\\Users\\alice\\AppData\\Local\\Program Files\\Microsoft VS Code\\Code.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "unsigned", "sha256": "7f2cad60933eae201ea55c27480f3d8d6f794cc931c5e83b88e87d8fadcc4fd9"}
+{"ts": 1760000001000, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\TokenBroker\\Cache\\04a7c1b9e2d3f5a6b8c0d1e2f3a4b5c6d7e8f9a0.tbres", "op": "read"}
+{"ts": 1760000001040, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\TokenBroker\\Cache\\9f8e7d6c5b4a39281706f5e4d3c2b1a098f7e6d5.tbres", "op": "read"}
+{"ts": 1760000001080, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\.kube\\config", "op": "read"}
+{"ts": 1760000001120, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\.docker\\config.json", "op": "read"}
+{"ts": 1760000001160, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\.aws\\credentials", "op": "read"}
+{"ts": 1760000001200, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Local State", "op": "read"}
+{"ts": 1760000001240, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000001280, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000001320, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Web Data", "op": "read"}
+{"ts": 1760000001360, "pid": 6100, "guid": "stealer", "type": "dpapi_unprotect", "description": "Google Chrome"}
+{"ts": 1760000001460, "pid": 6100, "guid": "stealer", "type": "dns_query", "qname": "vscode-update.example", "answers": ["192.0.2.45"]}
+{"ts": 1760000001520, "pid": 6100, "guid": "stealer", "type": "net_connect", "proto": "tcp", "dst_ip": "192.0.2.45", "dst_port": 443, "src_port": 50101, "dst_host": "vscode-update.example", "bytes_sent": 2400000}

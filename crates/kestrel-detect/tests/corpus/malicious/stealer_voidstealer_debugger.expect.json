@@ -1,0 +1,16 @@
+{
+  "must_alert": [
+    "ST-07",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "VoidStealer",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://www.gendigital.com/blog/insights/research/voidstealer-abe-bypass"
+  ],
+  "notes": "VoidStealer: starts Chrome itself, attaches as a debugger and sets hardware breakpoints to capture the App-Bound master key when Chrome decrypts it (no injection, no elevation)."
+}

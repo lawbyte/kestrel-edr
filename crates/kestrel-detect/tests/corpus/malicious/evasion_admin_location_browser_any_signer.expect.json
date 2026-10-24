@@ -1,0 +1,25 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic Chromium stealer (browser-named, any valid signer, dropped into Program Files)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-03",
+    "ST-14"
+  ],
+  "evasion_targets": [
+    "identity::admin_location (identity.rs:511-515) + identity::genuine_browser (identity.rs:~520) \u2014 any valid signer + Program Files location = genuine browser, no signer pinning",
+    "paths::is_trusted_owner browser branch returns `pinned` where pinned = listed || admin_location (paths.rs:1497-1504)",
+    "engine::on_net / on_dpapi browser short-circuit"
+  ],
+  "notes": "LIVE EVASION against the 2026-10-25 'pinned' fix. The fix makes an unlisted minor-browser name trusted when EITHER it is in PUBLISHERS (exact signer) OR it sits in an admin-only folder (identity::admin_location: Program Files / WindowsApps / Windows). The admin_location branch applies NO signer check \u2014 ANY valid Authenticode signature works. So a binary named thorium.exe (or any of the 47 unpinned BROWSER_IMAGES names), signed with any purchased/stolen OV cert, written to C:\\Program Files\\Thorium\\Application\\ is a 'genuine browser': it owns every Chromium and Gecko store, on_dpapi() returns at the genuine_browser guard, and on_net() returns before ST-04/ST-14. Full browser credential theft + DPAPI decrypt + 1.6 MB exfil to a raw IP and api.telegram.org raises only a medium ST-12. Prerequisite: write access to Program Files (admin), e.g. a trojanised/elevated installer (modelled here as a MOTW'd high-integrity setup.exe parent) \u2014 a real delivery vector for signed stealer payloads. Root cause: admin_location is treated as a substitute for signer pinning, but a browser *name* in Program Files should still require the real browser's signer. Added by the fix-round red team (2026-10-25); the engine detects it after the red-team fixes.",
+  "sources": [
+    "https://www.bleepingcomputer.com/news/security/the-growing-abuse-of-code-signing-certificates-by-malware/"
+  ]
+}

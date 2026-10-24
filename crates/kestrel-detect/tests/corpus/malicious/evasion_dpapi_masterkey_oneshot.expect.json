@@ -1,0 +1,22 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-01"
+      ],
+      "min_severity": "medium"
+    },
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic (DPAPI master key theft)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://docs.specterops.io/ghostpack-docs/SharpDPAPI-mdx/commands/machinemasterkeys",
+    "https://attack.mitre.org/techniques/T1555/004/"
+  ],
+  "notes": "One-shot theft of the user's DPAPI master key files (Protect\\<SID>\\<GUID>, Preferred) plus Chrome Local State: offline decryption later, so no DPAPI call happens on the host."
+}

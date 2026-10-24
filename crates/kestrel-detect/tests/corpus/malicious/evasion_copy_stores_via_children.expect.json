@@ -1,0 +1,27 @@
+{
+  "must_alert": [
+    "ST-04",
+    "ST-02"
+  ],
+  "min_severity": "critical",
+  "family": "generic (copy-then-read via LOLBin children)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-01"
+  ],
+  "evasion_targets": [
+    "ST-02 per-process categories",
+    "store_location_real (Temp copies)"
+  ],
+  "sources": [
+    "https://lolbas-project.github.io/lolbas/Binaries/Esentutl/",
+    "https://www.huntress.com/blog/exploitation-of-sonicwall-vpn",
+    "https://www.cisa.gov/news-events/cybersecurity-advisories/aa24-109a",
+    "https://iimp0ster.github.io/detection-chokepoints/chokepoints/browser-credential-theft/"
+  ],
+  "notes": "Each store is copied into %TEMP% by a separate esentutl /y child (one store per process), and the stealer parses the copies: no single process touches three categories, the copies are not stores.",
+  "known_gap": "ST-02 counts categories per process; one esentutl child per store never reaches three"
+}

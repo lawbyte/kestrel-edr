@@ -1,0 +1,8 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 5000, "guid": "steam", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Program Files (x86)\\Steam\\steam.exe", "cmdline": "\"C:\\Program Files (x86)\\Steam\\steam.exe\" -silent", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Valve Corp."}
+{"ts": 1760000000300, "pid": 5000, "guid": "steam", "type": "file_access", "path": "C:\\Program Files (x86)\\Steam\\ssfn5810391029384756123", "op": "read"}
+{"ts": 1760000000340, "pid": 5000, "guid": "steam", "type": "file_access", "path": "C:\\Program Files (x86)\\Steam\\config\\loginusers.vdf", "op": "read"}
+{"ts": 1760000000380, "pid": 5000, "guid": "steam", "type": "file_access", "path": "C:\\Program Files (x86)\\Steam\\config\\config.vdf", "op": "read"}
+{"ts": 1760000000420, "pid": 5000, "guid": "steam", "type": "file_access", "path": "C:\\Program Files (x86)\\Steam\\local.vdf", "op": "read"}
+{"ts": 1760000000600, "pid": 5000, "guid": "steam", "type": "dns_query", "qname": "steamcommunity.com", "answers": ["23.62.152.80"]}
+{"ts": 1760000000700, "pid": 5000, "guid": "steam", "type": "net_connect", "proto": "tcp", "dst_ip": "23.62.152.80", "dst_port": 443, "src_port": 50101, "dst_host": "steamcommunity.com", "bytes_sent": 10000}

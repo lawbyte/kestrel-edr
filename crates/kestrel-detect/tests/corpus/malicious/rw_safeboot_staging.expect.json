@@ -1,0 +1,19 @@
+{
+  "must_alert": [
+    "RW-03",
+    "RW-01",
+    "RW-12"
+  ],
+  "min_severity": "critical",
+  "family": "Safe-mode boot ransomware (Snatch/Black Basta lineage)",
+  "category": "ransomware",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://thedfirreport.com/2025/06/30/hide-your-rdp-password-spray-leads-to-ransomhub-deployment/",
+    "https://www.picussecurity.com/resource/blog/inside-safepay-analyzing-the-new-centralized-ransomware-group",
+    "https://www.cisa.gov/news-events/cybersecurity-advisories/aa24-109a"
+  ],
+  "notes": "Registers itself for Safe Mode with networking and forces the next boot into it, where most security tools do not run."
+}

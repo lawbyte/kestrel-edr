@@ -1,0 +1,13 @@
+{
+  "must_alert": [
+    "CD-06"
+  ],
+  "min_severity": "high",
+  "family": "Blocked LSASS access (RunAsPPL)",
+  "category": "credential-dumping",
+  "sources": [
+    "https://thedfirreport.com/2025/06/30/hide-your-rdp-password-spray-leads-to-ransomhub-deployment/",
+    "https://www.elastic.co/guide/en/security/current/lsass-memory-dump-handle-access.html"
+  ],
+  "notes": "mimikatz-like tool asks for 0x1010 on LSASS and gets STATUS_ACCESS_DENIED because LSA protection is on."
+}

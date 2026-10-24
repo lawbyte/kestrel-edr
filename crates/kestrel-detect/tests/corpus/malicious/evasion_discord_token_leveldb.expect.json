@@ -1,0 +1,29 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-01"
+      ],
+      "min_severity": "medium"
+    },
+    "ST-04",
+    {
+      "any_of": [
+        "ST-14"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "Discord token grabber",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://unit42.paloaltonetworks.com/?p=169710",
+    "https://research.jfrog.com/post/solara-cipher-npm/",
+    "https://www.sentinelone.com/labs/ghost-in-the-zip-new-pxa-stealer-and-its-telegram-powered-ecosystem/"
+  ],
+  "notes": "Token-only grabber: Discord Local State key + leveldb, DPAPI unprotect (description is not a browser), webhook upload to discord.com."
+}

@@ -1,0 +1,17 @@
+{
+  "must_not_alert": [
+    "ST-01",
+    "ST-02",
+    "ST-03",
+    "ST-04",
+    "ST-07",
+    "ST-14",
+    "ST-16"
+  ],
+  "family": "KeePassXC",
+  "category": "benign-lookalike",
+  "sources": [
+    "https://keepassxc.org/"
+  ],
+  "notes": "KeePassXC opening the user's own database."
+}

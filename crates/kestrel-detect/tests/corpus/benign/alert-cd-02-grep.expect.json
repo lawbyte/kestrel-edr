@@ -1,0 +1,5 @@
+{
+  "description": "alert-cd-02-grep: slice of the owner-PC telemetry 2026-10 (anonymised)",
+  "strict": true,
+  "allow": []
+}

@@ -1,0 +1,9 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 6100, "guid": "stealer", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Users\\alice\\Downloads\\dc.exe", "cmdline": "\"C:\\Users\\alice\\Downloads\\dc.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "unsigned", "sha256": "44da333d5971a81a78e3537ecb255813554d84793ca1137bf9a2929bac92b77c", "motw_zone": 3}
+{"ts": 1760000000500, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\discord\\Local State", "op": "read"}
+{"ts": 1760000000540, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\discord\\Local Storage\\leveldb\\000005.ldb", "op": "read"}
+{"ts": 1760000000580, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\discord\\Local Storage\\leveldb\\000004.log", "op": "read"}
+{"ts": 1760000000620, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\discordptb\\Local Storage\\leveldb\\000003.log", "op": "read"}
+{"ts": 1760000000660, "pid": 6100, "guid": "stealer", "type": "dpapi_unprotect", "description": "Discord"}
+{"ts": 1760000000760, "pid": 6100, "guid": "stealer", "type": "dns_query", "qname": "discord.com", "answers": ["162.159.135.232"]}
+{"ts": 1760000000860, "pid": 6100, "guid": "stealer", "type": "net_connect", "proto": "tcp", "dst_ip": "162.159.135.232", "dst_port": 443, "src_port": 50101, "dst_host": "discord.com", "bytes_sent": 12000}

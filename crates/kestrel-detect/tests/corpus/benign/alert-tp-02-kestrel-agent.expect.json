@@ -1,0 +1,11 @@
+{
+  "description": "alert-tp-02-kestrel-agent: slice of the owner-PC telemetry 2026-10 (anonymised)",
+  "strict": true,
+  "allow": [
+    {
+      "rule": "TP-02",
+      "max_severity": "low",
+      "note": "FP-10 fixed 2026-10-25: Windows Firewall / BFE refresh of its own filters is Low Audit by design"
+    }
+  ]
+}

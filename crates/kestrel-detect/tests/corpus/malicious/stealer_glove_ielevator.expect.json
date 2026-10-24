@@ -1,0 +1,23 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-08"
+      ],
+      "min_severity": "high"
+    },
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "Glove Stealer",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://www.gendigital.com/blog/news/innovation/glove-stealer",
+    "https://www.elastic.co/security-labs/katz-and-mouse-game"
+  ],
+  "notes": "Glove Stealer (.NET): kills browser processes every 55 ms, plants an unsigned zagent.exe in Chrome's Application folder (admin) so the IElevator path check passes, the elevation service starts and the App-Bound key lands in chromekey.txt."
+}

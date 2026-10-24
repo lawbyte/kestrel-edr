@@ -1,0 +1,22 @@
+{
+  "must_alert": [
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic (paced collection)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-02"
+  ],
+  "evasion_targets": [
+    "ST-02 60 s window"
+  ],
+  "sources": [
+    "https://iimp0ster.github.io/detection-chokepoints/chokepoints/browser-credential-theft/",
+    "https://www.elastic.co/security-labs/detect-credential-access"
+  ],
+  "notes": "Collection spread out: one kind of secret every 90 s so no 60 s window holds three categories (ST-02), then one upload within 5 min of the last read."
+}

@@ -1,0 +1,29 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04",
+    {
+      "any_of": [
+        "ST-10",
+        "ST-11"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "Amatera (ACR successor)",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "engine::system_trusted (OpenWith.exe)",
+    "no DNS for the C2 (raw IP)"
+  ],
+  "sources": [
+    "https://www.proofpoint.com/us/blog/threat-insight/amatera-stealer-rebranded-acr-stealer-improved-evasion-sophistication",
+    "https://www.microsoft.com/en-us/security/blog/2025/08/21/think-before-you-clickfix-analyzing-the-clickfix-social-engineering-technique/"
+  ],
+  "notes": "Amatera (2025): ClickFix -> PowerShell fetches a .csproj -> MSBuild runs it -> PowerShell 'Early Bird + context hijack' injector starts OpenWith.exe suspended and hijacks its thread. The stealer runs inside Microsoft-signed System32 OpenWith.exe and talks NTSockets straight to a Cloudflare IP (no DNS lookup, spoofed Host header).",
+  "known_gap": "reads by system-trusted OpenWith.exe are skipped (ST-02 missing); ST-03 / ST-04 still fire through the DPAPI call"
+}

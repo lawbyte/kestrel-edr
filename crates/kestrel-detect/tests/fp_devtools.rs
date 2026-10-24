@@ -132,12 +132,6 @@ fn signed_program_files_dev_tools_reading_dev_stores_are_audit() {
             Some("SUSE LLC"),
             KUBE,
         ),
-        (
-            r"C:\Program Files\WindowsApps\Some.DevTool_1.0.0.0_x64__abc\devtool.exe",
-            "devtool.exe",
-            Some("Some Vendor Inc"),
-            AWS_CREDS,
-        ),
     ] {
         let out = read_then_send(
             (img, cmd, SignatureState::Valid, signer),
@@ -221,6 +215,23 @@ fn signed_python_reading_aws_credentials_then_posting_is_full_response() {
 #[test]
 fn dev_tool_reader_is_narrow() {
     let cases: &[(&str, &str, SignatureState, Option<&str>, &str)] = &[
+        // Fix round 2026-10-25: a validly signed Program Files tool of a
+        // publisher that is not a developer-tool publisher of that store
+        // (corpus `evasion_trojanised_signed_devtool_cloud_creds`).
+        (
+            r"C:\Program Files\WindowsApps\Some.DevTool_1.0.0.0_x64__abc\devtool.exe",
+            "devtool.exe",
+            SignatureState::Valid,
+            Some("Some Vendor Inc"),
+            AWS_CREDS,
+        ),
+        (
+            BUILD,
+            "com.docker.build.exe",
+            SignatureState::Valid,
+            DOCKER,
+            AWS_CREDS,
+        ),
         // per-user install (user-writable)
         (
             r"C:\Users\azka\AppData\Local\Programs\kubetool\kubetool.exe",

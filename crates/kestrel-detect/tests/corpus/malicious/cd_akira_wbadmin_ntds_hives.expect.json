@@ -1,0 +1,19 @@
+{
+  "must_alert": [
+    [
+      "CD-10",
+      "CD-11"
+    ]
+  ],
+  "min_severity": "high",
+  "family": "Akira wbadmin NTDS / hive theft",
+  "category": "credential-dumping",
+  "evasion_targets": [
+    "CD-10 / CD-11 command patterns (reg save, esentutl, ntdsutil, shadow copy) do not cover wbadmin -include"
+  ],
+  "sources": [
+    "https://www.huntress.com/blog/exploitation-of-sonicwall-vpn"
+  ],
+  "notes": "Verbatim Akira (Huntress Aug 2025): wbadmin backs up NTDS.dit, SYSTEM and SECURITY to an admin share on the same host.",
+  "known_gap": "CD-10 / CD-11 do not match `wbadmin start backup -include:...NTDS.dit ...SECURITY`"
+}

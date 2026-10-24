@@ -1,0 +1,27 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04",
+    {
+      "any_of": [
+        "ST-14"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "Trojanised Roblox executor (Electron)",
+  "category": "script-stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-12"
+  ],
+  "sources": [
+    "https://www.bitdefender.com/en-us/blog/labs/fake-xeno-roblox-discord-executor",
+    "https://research.jfrog.com/post/solara-cipher-npm/",
+    "https://www.zscaler.com/blogs/security-research/tweaks-stealer-targets-roblox-users-through-youtube-and-discord"
+  ],
+  "notes": "Xeno/Solara-like Electron executor shipped as a zip, run from %TEMP%, unsigned, with --user-data-dir: steals .ROBLOSECURITY cookies from Chrome/Edge and Discord tokens, posts to a webhook."
+}

@@ -16,3 +16,7 @@ rsigma-eval = { version = "0.25", default-features = false }
 rsigma-parser = "0.25"
 # Case-insensitive multi-substring pre-filter for the file sensor hot path.
 aho-corasick = "1"
+
+[dev-dependencies]
+# Only for `examples/eval.rs` (reads the zstd-compressed telemetry export).
+zstd = { version = "0.13", default-features = false }

@@ -1,0 +1,21 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic (split reader / sender, PID reuse)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "ST-04 relatives (siblings)",
+    "PID reuse"
+  ],
+  "sources": [
+    "https://iimp0ster.github.io/detection-chokepoints/chokepoints/browser-credential-theft/"
+  ],
+  "notes": "Reader collects, writes r.dat and exits; a sibling uploader reuses the same PID. Detection keyed on GUIDs must neither confuse the two nor lose the link: the sender is the reader's sibling.",
+  "known_gap": "reader and uploader are siblings: ST-04 does not look at siblings"
+}

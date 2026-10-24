@@ -1,0 +1,27 @@
+{
+  "must_alert": [
+    "ST-07",
+    "ST-02",
+    "ST-04",
+    {
+      "any_of": [
+        "ST-14"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "Skuld (Go) + ChromeKatz cookie dumper",
+  "category": "script-stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "PS-02",
+    "ST-12"
+  ],
+  "sources": [
+    "https://research.checkpoint.com/2025/from-trust-to-threat-hijacked-discord-invites-used-for-multi-stage-malware-delivery/"
+  ],
+  "notes": "Check Point (Jun 2025, hijacked Discord invites): ServiceHelper dropper, Defender exclusion, 5-minute task 'checker' (wscript runsys.vbs); Skuld swaps Exodus / Atomic app.asar and writes LICENSE files; cks.exe reads the Chrome NetworkService process memory and zips cookies; two Discord webhooks."
+}

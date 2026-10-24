@@ -1,0 +1,22 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-09"
+      ],
+      "min_severity": "medium"
+    },
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "Firefox credential theft via nss3",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://iimp0ster.github.io/detection-chokepoints/chokepoints/browser-credential-theft/"
+  ],
+  "notes": "Loads Mozilla's own nss3.dll to call PK11SDR_Decrypt on logins.json with key4.db; also Thunderbird passwords."
+}

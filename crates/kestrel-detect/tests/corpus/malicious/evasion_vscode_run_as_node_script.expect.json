@@ -1,0 +1,25 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-01"
+      ],
+      "min_severity": "medium"
+    },
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "ELECTRON_RUN_AS_NODE abuse",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "ms_wam_reader_per_user (Electron positional-argument check)",
+    "runs_script"
+  ],
+  "sources": [
+    "https://electronjs.org/blog/statement-run-as-node-cves"
+  ],
+  "notes": "Genuine Microsoft-signed per-user Code.exe started with ELECTRON_RUN_AS_NODE=1 (invisible) and a positional .js script: reads the WAM cache, redeems a token at login.microsoftonline.com, then uploads elsewhere."
+}

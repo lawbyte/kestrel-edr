@@ -1,0 +1,22 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 5000, "guid": "upd", "type": "process_start", "ppid": 3900, "image": "C:\\Program Files (x86)\\ITAssist\\Updater\\ITAssistUpdater.exe", "cmdline": "\"C:\\Program Files (x86)\\ITAssist\\Updater\\ITAssistUpdater.exe\" /silent", "user": "NT AUTHORITY\\SYSTEM", "integrity": "system", "signed": "valid", "signer": "ITAssist Software Pte. Ltd."}
+{"ts": 1760000000500, "pid": 5000, "guid": "upd", "type": "file_access", "path": "C:\\ProgramData\\ITAssist\\cache\\patch_2610.exe", "op": "create"}
+{"ts": 1760000001000, "pid": 6100, "guid": "stealer", "type": "process_start", "ppid": 5000, "parent_guid": "upd", "image": "C:\\ProgramData\\ITAssist\\cache\\patch_2610.exe", "cmdline": "\"C:\\ProgramData\\ITAssist\\cache\\patch_2610.exe\" --apply", "user": "CORP\\alice", "integrity": "medium", "signed": "unsigned", "sha256": "792ad89a3ee2d4d47ded19d4edf337ab6c8888aa87e59798f52ac6fc8ddc73c6"}
+{"ts": 1760000002000, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Local State", "op": "read"}
+{"ts": 1760000002030, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000002060, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000002090, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Web Data", "op": "read"}
+{"ts": 1760000002120, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Local Extension Settings\\nkbihfbeogaeaoehlefnkodbefgpgknn\\000003.log", "op": "read"}
+{"ts": 1760000002150, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Local State", "op": "read"}
+{"ts": 1760000002180, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000002210, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000002240, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Web Data", "op": "read"}
+{"ts": 1760000002270, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Local Extension Settings\\nkbihfbeogaeaoehlefnkodbefgpgknn\\000003.log", "op": "read"}
+{"ts": 1760000002300, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Exodus\\exodus.wallet\\seed.seco", "op": "read"}
+{"ts": 1760000002330, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Electrum\\wallets\\default_wallet", "op": "read"}
+{"ts": 1760000002360, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\key_datas", "op": "read"}
+{"ts": 1760000002390, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\D877F783D5D3EF8C\\maps", "op": "read"}
+{"ts": 1760000002420, "pid": 6100, "guid": "stealer", "type": "dpapi_unprotect", "description": "Google Chrome"}
+{"ts": 1760000002440, "pid": 6100, "guid": "stealer", "type": "dpapi_unprotect", "description": "Microsoft Edge"}
+{"ts": 1760000002560, "pid": 5000, "guid": "upd", "type": "dns_query", "qname": "updates.itassist.example", "answers": ["198.51.100.77"]}
+{"ts": 1760000002620, "pid": 5000, "guid": "upd", "type": "net_connect", "proto": "tcp", "dst_ip": "198.51.100.77", "dst_port": 443, "src_port": 50101, "dst_host": "updates.itassist.example", "bytes_sent": 2400000}

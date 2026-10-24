@@ -1,0 +1,28 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic (owner-name impersonation)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-14"
+  ],
+  "evasion_targets": [
+    "paths::is_trusted_owner (O_DISCORD / O_EXODUS 'update.exe')",
+    "engine DOMAIN_OWNERS"
+  ],
+  "sources": [
+    "https://securityaffairs.com/183532/",
+    "https://bleepingcomputer.com/news/security/fake-enterprise-vpn-downloads-used-to-steal-company-credentials",
+    "https://www.securityweek.com/infostealer-malware-delivered-in-emeditor-supply-chain-attack/",
+    "https://unit42.paloaltonetworks.com/?p=169710",
+    "https://research.jfrog.com/post/solara-cipher-npm/"
+  ],
+  "notes": "Validly signed (unrelated company) stealer named Update.exe at Discord's Squirrel path: Update.exe is listed as an owner of the Discord and Exodus stores and as a discord.com domain owner, by file name only.",
+  "known_gap": "'update.exe' owns the Discord and Exodus stores by name; ST-02 never sees three categories (ST-04 still fires via Telegram)"
+}

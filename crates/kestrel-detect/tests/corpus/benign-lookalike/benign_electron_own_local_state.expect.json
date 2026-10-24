@@ -1,0 +1,23 @@
+{
+  "must_not_alert": [
+    "ST-01",
+    "ST-02",
+    "ST-16"
+  ],
+  "family": "Slack (Electron)",
+  "category": "benign-lookalike",
+  "allow": [
+    {
+      "rule": "ST-03",
+      "max_severity": "low"
+    },
+    {
+      "rule": "ST-04",
+      "max_severity": "low"
+    }
+  ],
+  "sources": [
+    "https://www.electronjs.org/docs/latest/api/safe-storage"
+  ],
+  "notes": "A signed Program Files Electron app reads only its own Local State / Cookies and unprotects its safeStorage key ('Chromium'); the engine records it as Low Audit (ST-03 / ST-04 Low by design), never more."
+}

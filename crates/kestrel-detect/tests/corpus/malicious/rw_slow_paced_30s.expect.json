@@ -1,0 +1,21 @@
+{
+  "must_alert": [
+    "RW-06"
+  ],
+  "min_severity": "critical",
+  "family": "Ransomware (slow, paced)",
+  "category": "ransomware",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "RW-06 10 s sensor window / 30-file threshold"
+  ],
+  "sources": [
+    "https://www.sentinelone.com/labs/crimeware-trends-ransomware-developers-turn-to-intermittent-encryption-to-evade-detection/",
+    "https://www.ic3.gov/CSA/2025/250604.pdf",
+    "https://www.trendmicro.com/en/research/25/i/lockbit-5-targets-windows-linux-esxi.html"
+  ],
+  "notes": "Encrypts in bursts of 11 files every 30 s (330 files in 15 minutes): every 10 s summary stays under the 30-file threshold.",
+  "known_gap": "RW-06 judges each 10 s sensor window alone; 11 files per window never reaches 30"
+}

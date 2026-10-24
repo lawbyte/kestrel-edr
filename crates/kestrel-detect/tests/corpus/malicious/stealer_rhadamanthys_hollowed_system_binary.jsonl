@@ -1,0 +1,28 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 5000, "guid": "loader", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Users\\alice\\Downloads\\AI_Video_Editor_Setup.exe", "cmdline": "\"C:\\Users\\alice\\Downloads\\AI_Video_Editor_Setup.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "unsigned", "sha256": "c716d3a03db9d691e139cec2689aae1c3f9c0d47ba7c1974233706a90a37438f", "motw_zone": 3, "file_size": 40000000}
+{"ts": 1760000001000, "pid": 5600, "guid": "host", "type": "process_start", "ppid": 5000, "parent_guid": "loader", "image": "C:\\Windows\\System32\\credwiz.exe", "cmdline": "C:\\Windows\\System32\\credwiz.exe", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000001050, "pid": 5000, "guid": "loader", "type": "process_access", "target_pid": 5600, "target_guid": "host", "target_image": "C:\\Windows\\System32\\credwiz.exe", "granted_access": 2097151, "return_code": 0}
+{"ts": 1760000001100, "pid": 5000, "guid": "loader", "type": "thread_context", "target_pid": 5600, "target_guid": "host", "target_image": "C:\\Windows\\System32\\credwiz.exe", "granted_access": 0, "return_code": 0}
+{"ts": 1760000002500, "pid": 5600, "guid": "host", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Local State", "op": "read"}
+{"ts": 1760000002530, "pid": 5600, "guid": "host", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000002560, "pid": 5600, "guid": "host", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000002590, "pid": 5600, "guid": "host", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Web Data", "op": "read"}
+{"ts": 1760000002620, "pid": 5600, "guid": "host", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Local Extension Settings\\nkbihfbeogaeaoehlefnkodbefgpgknn\\000003.log", "op": "read"}
+{"ts": 1760000002650, "pid": 5600, "guid": "host", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Local Extension Settings\\bfnaelmomeimhlpmgjnjophhpkkoljpa\\000003.log", "op": "read"}
+{"ts": 1760000002680, "pid": 5600, "guid": "host", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Local State", "op": "read"}
+{"ts": 1760000002710, "pid": 5600, "guid": "host", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000002740, "pid": 5600, "guid": "host", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000002770, "pid": 5600, "guid": "host", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Web Data", "op": "read"}
+{"ts": 1760000002800, "pid": 5600, "guid": "host", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Local Extension Settings\\nkbihfbeogaeaoehlefnkodbefgpgknn\\000003.log", "op": "read"}
+{"ts": 1760000002830, "pid": 5600, "guid": "host", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Local Extension Settings\\bfnaelmomeimhlpmgjnjophhpkkoljpa\\000003.log", "op": "read"}
+{"ts": 1760000002860, "pid": 5600, "guid": "host", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Exodus\\exodus.wallet\\seed.seco", "op": "read"}
+{"ts": 1760000002890, "pid": 5600, "guid": "host", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Electrum\\wallets\\default_wallet", "op": "read"}
+{"ts": 1760000002920, "pid": 5600, "guid": "host", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\key_datas", "op": "read"}
+{"ts": 1760000002950, "pid": 5600, "guid": "host", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\D877F783D5D3EF8C\\maps", "op": "read"}
+{"ts": 1760000002980, "pid": 5600, "guid": "host", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\FileZilla\\recentservers.xml", "op": "read"}
+{"ts": 1760000003010, "pid": 5600, "guid": "host", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\FileZilla\\sitemanager.xml", "op": "read"}
+{"ts": 1760000003040, "pid": 5600, "guid": "host", "type": "dpapi_unprotect", "description": "Google Chrome"}
+{"ts": 1760000003060, "pid": 5600, "guid": "host", "type": "dpapi_unprotect", "description": "Microsoft Edge"}
+{"ts": 1760000003080, "pid": 5600, "guid": "host", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Ledger Live\\app.json", "op": "read"}
+{"ts": 1760000003120, "pid": 5600, "guid": "host", "type": "file_access", "path": "C:\\Users\\alice\\Documents\\Passwords.kdbx", "op": "read"}
+{"ts": 1760000003380, "pid": 5600, "guid": "host", "type": "net_connect", "proto": "tcp", "dst_ip": "193.84.71.81", "dst_port": 8888, "src_port": 50101, "bytes_sent": 3000000}

@@ -1,0 +1,26 @@
+{
+  "must_alert": [
+    "ST-04"
+  ],
+  "min_severity": "high",
+  "family": "Trojanised signed developer tool (cloud credential theft)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "legit_apps::dev_tool_reader",
+    "ST-04 Audit for dev-tool-only reads"
+  ],
+  "sources": [
+    "https://attack.mitre.org/software/S9008/",
+    "https://expel.com/blog/the-second-coming-of-shai-hulud/",
+    "https://www.wiz.io/blog/s1ngularity-supply-chain-attack",
+    "https://blog.gitguardian.com/the-nx-s1ngularity-attack-inside-the-credential-leak/",
+    "https://securityaffairs.com/183532/",
+    "https://bleepingcomputer.com/news/security/fake-enterprise-vpn-downloads-used-to-steal-company-credentials",
+    "https://www.securityweek.com/infostealer-malware-delivered-in-emeditor-supply-chain-attack/"
+  ],
+  "notes": "Fake/trojanised Kubernetes dashboard installed under Program Files (admin installer, valid certificate) reads kubeconfig, Docker, AWS and Azure CLI credentials and posts them to a raw IP. All reads qualify for dev_tool_reader, so ST-01 is Low Audit and ST-04 is Audit-only (High) with no kill or block.",
+  "known_gap": "dev_tool_reader: any validly signed Program Files non-interpreter reading kubeconfig / Docker / AWS / Azure is Low Audit, and the reader sending itself counts as a vendor send (Low)"
+}

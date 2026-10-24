@@ -1,0 +1,22 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04",
+    {
+      "any_of": [
+        "ST-14"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "Acreed",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://www.intrinsec.com/wp-content/uploads/2025/09/TLP-CLEAR-Sept-2025-Acreed-infostealer-EN.pdf"
+  ],
+  "notes": "Acreed (2025): C2 resolved with an eth_call to a BNB Smart Chain testnet RPC on port 8545 and a Steam profile; small logs (passwords, cookies, autofill, wallet extensions of Chrome / Edge / Brave); HTTPS to a .live-style domain."
+}

@@ -41,6 +41,12 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Detection-quality gate (corpus replay, see docs/DETECTION-QUALITY.md)
+        run: |
+          # Fails when a malicious scenario stops meeting its expect file or a
+          # benign / benign-lookalike slice alerts above Low or would act in Protect.
+          cargo test -p kestrel-detect --test corpus_eval -- --nocapture
+          cargo run -p kestrel-detect --example eval -- corpus
       - uses: actions/setup-node@v5
         with:
           node-version: 22

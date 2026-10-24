@@ -1,0 +1,15 @@
+{
+  "must_alert": [
+    "RW-06"
+  ],
+  "min_severity": "critical",
+  "family": "LockBit 5.0 (-i invisible mode)",
+  "category": "ransomware",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://www.trendmicro.com/en/research/25/i/lockbit-5-targets-windows-linux-esxi.html"
+  ],
+  "notes": "LockBit 5.0 -i: in-place encryption with no extension change, no note, timestamps preserved, logs cleared via EvtClearLog API (no child process), ETW patched in-process. Only the overwrite signal remains."
+}

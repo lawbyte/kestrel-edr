@@ -1,0 +1,11 @@
+{
+  "description": "alert-st-01-rustdoc: slice of the owner-PC telemetry 2026-10 (anonymised)",
+  "known_false_positives": [
+    {
+      "max_severity": "low",
+      "note": "FP-14: unsigned developer tool from the user profile; Protect suspends every run (by design, review M1)",
+      "rule": "ST-12"
+    }
+  ],
+  "strict": true
+}

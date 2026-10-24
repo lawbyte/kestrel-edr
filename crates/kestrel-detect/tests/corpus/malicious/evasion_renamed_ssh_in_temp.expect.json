@@ -1,0 +1,25 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-01"
+      ],
+      "min_severity": "medium"
+    },
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic (renamed / copied ssh.exe)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "legit_apps::ssh_client_owner (location is the identity)"
+  ],
+  "sources": [
+    "https://www.sophos.com/en-us/blog/lumma-stealer-coming-and-going",
+    "https://lolbas-project.github.io/lolbas/Binaries/Ssh/"
+  ],
+  "notes": "Git-for-Windows' unsigned ssh.exe copied into %TEMP% (identical binary, so it is unsigned exactly like the real one) reads the user's private keys and connects to an attacker host on 22."
+}

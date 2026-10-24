@@ -1,0 +1,20 @@
+{
+  "must_alert": [
+    "CD-01"
+  ],
+  "min_severity": "critical",
+  "family": "Medusa comsvcs MiniDump (obfuscated ordinal)",
+  "category": "credential-dumping",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "CD-03",
+    "CD-04"
+  ],
+  "sources": [
+    "https://www.cisa.gov/news-events/cybersecurity-advisories/aa25-071a",
+    "https://detection.fyi/sigmahq/sigma/windows/process_creation/proc_creation_win_rundll32_process_dump_via_comsvcs"
+  ],
+  "notes": "Verbatim Medusa (CISA AA25-071A): PID taken from tasklist, comsvcs #+0000^24 ordinal, dump disguised as .iso in Windows\\Temp."
+}

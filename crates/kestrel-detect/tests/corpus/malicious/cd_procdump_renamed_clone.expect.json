@@ -1,0 +1,22 @@
+{
+  "must_alert": [
+    "CD-02"
+  ],
+  "min_severity": "critical",
+  "family": "ProcDump renamed (clone -r)",
+  "category": "credential-dumping",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "CD-03",
+    "CD-04"
+  ],
+  "sources": [
+    "https://learn.microsoft.com/en-us/sysinternals/downloads/procdump",
+    "https://detection.fyi/sigmahq/sigma/windows/process_creation/proc_creation_win_sysinternals_procdump_lsass",
+    "https://thedfirreport.com/2025/06/30/hide-your-rdp-password-spray-leads-to-ransomhub-deployment/",
+    "https://www.elastic.co/guide/en/security/current/lsass-memory-dump-handle-access.html"
+  ],
+  "notes": "Microsoft-signed ProcDump renamed to dbgview64.exe in Public, -r (reflect/clone) -ma against the LSASS PID."
+}

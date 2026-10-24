@@ -1,16 +1,16 @@
 //! Kestrel detection engine (platform independent).
 //!
-//! CONTRACT — the agent and server compile against the items in this file.
+//! CONTRACT â€” the agent and server compile against the items in this file.
 //! Implementations may change; signatures below must not without updating
 //! `docs/contracts.md` and both callers.
 //!
 //! Flow on the endpoint:
 //! ```text
-//! sensor → Event → Engine::process(&event) → Vec<Output>
-//!                  Engine::tick(now)       → Vec<Output>   (every ~250 ms)
-//! Output::Alert(Detection)  → agent executes detection.actions, records
+//! sensor â†’ Event â†’ Engine::process(&event) â†’ Vec<Output>
+//!                  Engine::tick(now)       â†’ Vec<Output>   (every ~250 ms)
+//! Output::Alert(Detection)  â†’ agent executes detection.actions, records
 //!                             outcomes into alert.actions, uploads alert
-//! Output::Action(action)    → agent executes (e.g. resume after suspend window)
+//! Output::Action(action)    â†’ agent executes (e.g. resume after suspend window)
 //! ```
 
 use kestrel_common::{
@@ -19,6 +19,9 @@ use kestrel_common::{
 };
 
 pub mod catalog;
+pub mod eval;
+pub mod evidence;
+pub mod identity;
 pub mod legit_apps;
 pub mod paths;
 pub mod protect;
@@ -114,7 +117,7 @@ impl Engine {
         })
     }
 
-    /// Replace the active policy (rule modes, exclusions, IOCs, …).
+    /// Replace the active policy (rule modes, exclusions, IOCs, â€¦).
     pub fn update_policy(&mut self, policy: Policy) {
         self.inner.update_policy(policy)
     }

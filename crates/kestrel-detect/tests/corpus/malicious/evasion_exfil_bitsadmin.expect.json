@@ -1,0 +1,21 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic (exfil via BITS)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "ST-04 sender correlation"
+  ],
+  "sources": [
+    "https://attack.mitre.org/techniques/T1197/",
+    "https://www.elastic.co/security-labs/threat-command/bits-and-bytes-analyzing-bitsloth"
+  ],
+  "notes": "Upload job handed to the BITS service: the connection is made by svchost.exe (BITS), a system process unrelated to the reader in the process tree.",
+  "known_gap": "the upload is made by the BITS service (svchost), not a relative of the reader"
+}

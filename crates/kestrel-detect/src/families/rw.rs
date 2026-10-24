@@ -62,6 +62,18 @@ const RW06_DIRS: u64 = 3;
 const RW06_EXT: u64 = 20;
 const RW06_OVERWRITES: u64 = 50;
 const RW06_OVERWRITE_PCT: u64 = 80;
+/// RW-06 accumulation for slow, paced encryption (corpus finding 9,
+/// `rw_slow_paced_30s`, 2026-10-25): per process, the non-overlapping
+/// summaries of the last 5 minutes are added up; at least 3 summaries and
+/// twice the per-window file / extension thresholds (overwrites: 100).
+const RW06_SLOW_WINDOW_MS: i64 = 5 * MIN;
+const RW06_SLOW_MIN_SUMMARIES: usize = 3;
+const RW06_SLOW_TOUCHED: u64 = 2 * RW06_TOUCHED;
+const RW06_SLOW_EXT: u64 = 2 * RW06_EXT;
+const RW06_SLOW_OVERWRITES: u64 = 2 * RW06_OVERWRITES;
+/// FP-07: share of extension changes that must go to one compiler-output
+/// extension before they are read as build artefacts.
+const RW06_COMPILER_EXT_PCT: u8 = 80;
 /// RW-08 thresholds.
 const RW08_NOTE_DIRS: u32 = 5;
 const RW08_FALLBACK_DIRS: u32 = 20;
@@ -194,6 +206,73 @@ const BUILD_ARTEFACT_EXTS: &[&str] = &[
     "json",
 ];
 
+/// FP-07 (DETECTION-QUALITY.md, 2026-10-25): extensions a compiler / linker
+/// gives its own outputs when it renames a temporary file into place
+/// (rustc `.tmpXXXX.temp-archive\tmp.a` → `libfoo-<hash>.rlib`). Narrower
+/// than [`BUILD_ARTEFACT_EXTS`]: `lock`, `json`, `bin`, `manifest` and `map`
+/// are plausible ransomware extensions and never earn the discount.
+const COMPILER_OUTPUT_EXTS: &[&str] = &[
+    "a",
+    "o",
+    "obj",
+    "rlib",
+    "rmeta",
+    "d",
+    "pdb",
+    "lib",
+    "exp",
+    "ilk",
+    "idb",
+    "pch",
+    "tlog",
+    "lastbuildstate",
+    "res",
+    "class",
+    "pyc",
+    "pyo",
+    "dll",
+    "exe",
+    "so",
+    "dylib",
+    "wasm",
+    "node",
+    "fingerprint",
+    "timestamp",
+    "stamp",
+];
+
+/// FP-07: folder names of build trees (cargo `target\…\deps`, MSBuild
+/// `obj` / `bin`, CMake, Gradle, Python caches). A sample path counts as a
+/// build output only when one of its *folders* has one of these names.
+const BUILD_DIR_NAMES: &[&str] = &[
+    "target",
+    "deps",
+    "incremental",
+    "obj",
+    "bin",
+    "build",
+    "out",
+    "debug",
+    "release",
+    "intermediates",
+    "node_modules",
+    "__pycache__",
+    ".gradle",
+    "cmakefiles",
+    "cmake-build-debug",
+    "cmake-build-release",
+];
+
+/// FP-07: user-data extensions. A sample named `report.docx.rlib` is a
+/// document that was renamed, never a compiler output.
+const USER_DATA_EXTS: &[&str] = &[
+    "doc", "docx", "docm", "xls", "xlsx", "xlsm", "xlsb", "ppt", "pptx", "pptm", "odt", "ods",
+    "odp", "rtf", "txt", "csv", "pdf", "md", "xml", "json", "html", "htm", "eml", "msg", "pst",
+    "vsd", "vsdx", "one", "epub", "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "heic", "raw",
+    "psd", "ai", "svg", "mp3", "mp4", "mov", "avi", "mkv", "wav", "zip", "7z", "rar", "tar", "gz",
+    "sql", "db", "sqlite", "mdb", "accdb", "bak", "qbw", "kdbx", "pfx", "key",
+];
+
 #[derive(Default)]
 pub(crate) struct Ransomware {
     /// RW-05 command-line spree: lineage head → (ts, target).
@@ -219,6 +298,48 @@ pub(crate) struct Ransomware {
     last_rw12: Option<TimestampMs>,
     /// Ransomware-alert state (RW-06 thresholds halved) until this time.
     ransom_alert_until: TimestampMs,
+    /// RW-06 slow-pacing accumulation: actor → non-overlapping summaries of
+    /// the last [`RW06_SLOW_WINDOW_MS`] (bounded keys and entries).
+    slow: HashMap<ProcessGuid, VecDeque<SlowEntry>>,
+}
+
+/// One summary in the RW-06 slow-pacing accumulation.
+#[derive(Clone, Copy, Debug)]
+struct SlowEntry {
+    /// Window start (`ts - window_ms`) and end (`ts`).
+    start: TimestampMs,
+    end: TimestampMs,
+    c: Rw06Counts,
+}
+
+/// What RW-06 counts in one `FileActivity` summary (all bounded by the
+/// pre-existing files, [`preexisting_files`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Rw06Counts {
+    /// Files that existed before the process touched them.
+    pre: u64,
+    /// Extension changes of pre-existing files (build artefacts excluded).
+    ext: u64,
+    /// Overwrites plus self-created temp files renamed over originals with
+    /// the same extension.
+    rewrites: u64,
+    /// Touched files on network paths (count double).
+    net: u64,
+    dirs: u64,
+}
+
+impl Rw06Counts {
+    fn add(&mut self, o: &Rw06Counts) {
+        self.pre = self.pre.saturating_add(o.pre);
+        self.ext = self.ext.saturating_add(o.ext);
+        self.rewrites = self.rewrites.saturating_add(o.rewrites);
+        self.net = self.net.saturating_add(o.net);
+        self.dirs = self.dirs.saturating_add(o.dirs);
+    }
+
+    fn touched(&self) -> u64 {
+        self.pre.saturating_add(self.net)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1186,7 +1307,18 @@ impl Ransomware {
         };
         let secs = (fa.window_ms / 1000).max(1);
 
-        let rw06_level = rw06_triggers(fa, ctx.now < self.ransom_alert_until);
+        let halved = ctx.now < self.ransom_alert_until;
+        let counts = rw06_counts(fa);
+        let window_level = rw06_triggers(&counts, halved);
+        // Corpus finding 9 (2026-10-25): bursts below the per-window
+        // threshold add up per process over RW06_SLOW_WINDOW_MS.
+        let slow = if window_level {
+            self.slow.remove(&e.guid);
+            None
+        } else {
+            self.slow_push(&e.guid, e.ts, fa.window_ms, counts, halved)
+        };
+        let rw06_level = window_level || slow.is_some();
         let mut rw07_in_place_only = false;
 
         // RW-07: canary.
@@ -1260,6 +1392,17 @@ impl Ransomware {
             } else {
                 String::new()
             };
+            let summary = match &slow {
+                Some((sum, n, span_ms)) => format!(
+                    "{shown} rewrote or renamed {} existing files in {n} bursts over {} min{ext}{net}, each burst small enough to stay under the per-burst threshold, which looks like paced ransomware encryption; Kestrel works from user mode and cannot guarantee that no files were encrypted before it reacted.",
+                    sum.pre,
+                    (span_ms / MIN).max(1)
+                ),
+                None => format!(
+                    "{shown} rewrote or renamed {} existing files in {} folders within {secs} s{ext}{net}, which looks like ransomware encryption; Kestrel works from user mode and cannot guarantee that no files were encrypted before it reacted.",
+                    counts.pre, fa.dirs
+                ),
+            };
             let mut h = FamilyHit::new(
                 RW06,
                 &e.guid,
@@ -1268,13 +1411,10 @@ impl Ransomware {
                 } else {
                     Severity::Critical
                 },
-                format!(
-                    "{shown} rewrote or renamed {} existing files in {} folders within {secs} s{ext}{net}, which looks like ransomware encryption; Kestrel works from user mode and cannot guarantee that no files were encrypted before it reacted.",
-                    preexisting_files(fa), fa.dirs
-                ),
+                summary,
             );
             if !allowed && !explorer {
-                h.actions = containment(isolate);
+                h.actions = containment(isolate || slow.as_ref().is_some_and(|s| s.0.net > 0));
                 h.strong = true;
             }
             out.push(h);
@@ -1337,17 +1477,96 @@ impl Ransomware {
                 ),
             ));
         }
-        if rw06_triggers(fa, ctx.now < self.ransom_alert_until) {
+        let counts = rw06_counts(fa);
+        if rw06_triggers(&counts, ctx.now < self.ransom_alert_until) {
             out.push(FamilyHit::new(
                 RW06,
                 &e.guid,
                 Severity::Critical,
                 format!(
                     "Process {} rewrote or renamed {} existing files in {} folders, which looks like ransomware encryption; Kestrel cannot guarantee that no files were encrypted.",
-                    e.pid, preexisting_files(fa), fa.dirs
+                    e.pid, counts.pre, fa.dirs
                 ),
             ));
         }
+    }
+
+    /// Corpus finding 9 (`rw_slow_paced_30s`, 2026-10-25): add one summary
+    /// of `guid` to its slow-pacing accumulation and return (sum, number of
+    /// summaries, span in ms) when the sum reaches the slow thresholds (the
+    /// accumulation is then cleared, so one burst series alerts once).
+    ///
+    /// The sensor re-emits a growing summary of one sliding window (10, 20,
+    /// 30, 50 … files), so summaries overlap: a summary whose window starts
+    /// before the end of the last kept one replaces it only when it holds
+    /// more pre-existing files, and is dropped otherwise. That keeps a lower
+    /// bound of the union and never counts one burst twice.
+    fn slow_push(
+        &mut self,
+        guid: &ProcessGuid,
+        ts: TimestampMs,
+        window_ms: u64,
+        c: Rw06Counts,
+        halved: bool,
+    ) -> Option<(Rw06Counts, usize, i64)> {
+        if c.pre == 0 && !self.slow.contains_key(guid) {
+            return None;
+        }
+        if !self.slow.contains_key(guid) && self.slow.len() >= MAX_KEYS {
+            let old = self
+                .slow
+                .iter()
+                .min_by_key(|(_, d)| d.back().map(|x| x.end).unwrap_or(i64::MIN))
+                .map(|(k, _)| k.clone());
+            if let Some(old) = old {
+                self.slow.remove(&old);
+            }
+        }
+        let d = self.slow.entry(guid.clone()).or_default();
+        let w = i64::try_from(window_ms.min(RW06_SLOW_WINDOW_MS as u64)).unwrap_or(0);
+        let entry = SlowEntry {
+            start: ts.saturating_sub(w),
+            end: ts,
+            c,
+        };
+        while d
+            .front()
+            .is_some_and(|x| ts.saturating_sub(x.end) > RW06_SLOW_WINDOW_MS)
+        {
+            d.pop_front();
+        }
+        match d.back_mut() {
+            Some(last) if entry.start < last.end => {
+                if entry.c.pre > last.c.pre {
+                    *last = entry;
+                }
+            }
+            _ if c.pre > 0 => {
+                if d.len() >= MAX_PER_KEY {
+                    d.pop_front();
+                }
+                d.push_back(entry);
+            }
+            _ => {}
+        }
+        let n = d.len();
+        let mut sum = Rw06Counts::default();
+        for x in d.iter() {
+            sum.add(&x.c);
+        }
+        let span = match (d.front(), d.back()) {
+            (Some(f), Some(b)) => b.end.saturating_sub(f.start),
+            _ => 0,
+        };
+        if d.is_empty() {
+            self.slow.remove(guid);
+            return None;
+        }
+        if !rw06_slow_triggers(&sum, n, halved) {
+            return None;
+        }
+        self.slow.remove(guid);
+        Some((sum, n, span))
     }
 
     /// Lineage key set of an alert subject for RW-12 grouping: its lineage
@@ -1500,20 +1719,134 @@ pub(crate) fn preexisting_files(fa: &FileActivity) -> u32 {
         .saturating_sub(fa.new_files.max(fa.self_created))
 }
 
-/// RW-06 thresholds over one `FileActivity` summary, counted over the
-/// pre-existing files only ([`preexisting_files`]): extension changes and
-/// overwrites of files the process created in the window do not count.
-fn rw06_triggers(fa: &FileActivity, halved: bool) -> bool {
+/// What RW-06 counts in one summary, over the pre-existing files only
+/// ([`preexisting_files`]): extension changes and overwrites of files the
+/// process created in the window do not count.
+///
+/// * Corpus finding 9 (`rw_rename_over_original`, 2026-10-25): an encrypted
+///   copy written to a self-created temp file and renamed over the original
+///   with the same extension (`MoveFileEx(tmp, doc, REPLACE_EXISTING)`)
+///   shows up as a rename of a self-created file whose extension did not
+///   change, next to the replaced originals among the pre-existing files.
+///   Those renames, `min(renames, self_created) - ext_changes`, count as
+///   rewrites of pre-existing files (capped by them). A compiler renaming its
+///   own temp outputs changes their extension (`.tmp` / `tmp.a` → `.rlib`),
+///   so it gets no such credit.
+/// * FP-07 (DETECTION-QUALITY.md, 2026-10-25): extension changes whose
+///   dominant new extension is a compiler output ([`compiler_output`]) are
+///   build artefacts, not encryption, for agents before 1.1.6 too (no
+///   `self_created`: rustc's 500-file summary with 186 renames to `.rlib`).
+fn rw06_counts(fa: &FileActivity) -> Rw06Counts {
+    let pre = preexisting_files(fa) as u64;
+    let ext_raw = fa.ext_changes as u64;
+    let ext = if compiler_output(fa) {
+        // Only the share that went to other extensions still counts.
+        ext_raw.saturating_sub(ext_raw * fa.top_ext_pct.min(100) as u64 / 100)
+    } else {
+        ext_raw
+    };
+    let rename_over = (fa.renames.min(fa.self_created) as u64).saturating_sub(ext_raw);
+    // FP-07, old agents (fix round 2026-10-25, owner export: 31 rustc
+    // summaries "rewrote 97 existing files" in `target\...\deps\`): an
+    // incremental build overwrites its own earlier outputs. When every sample
+    // is a build-tree file and none is a user document, overwrites are build
+    // output too. Ransomware's samples are the user's documents.
+    let rewrites = if build_tree_rewrites(fa) {
+        0
+    } else {
+        (fa.overwrites as u64).saturating_add(rename_over).min(pre)
+    };
+    Rw06Counts {
+        pre,
+        ext: ext.min(pre),
+        rewrites,
+        net: (fa.net_paths as u64).min(pre),
+        dirs: fa.dirs as u64,
+    }
+}
+
+/// RW-06 thresholds over one summary ([`rw06_counts`]).
+fn rw06_triggers(c: &Rw06Counts, halved: bool) -> bool {
     let d = if halved { 2 } else { 1 };
-    let pre = preexisting_files(fa);
-    let touched = pre as u64 + (fa.net_paths.min(pre)) as u64;
-    let overwrites = fa.overwrites.min(pre) as u64;
-    let ext = fa.ext_changes.min(pre) as u64;
-    touched >= RW06_TOUCHED / d
-        && fa.dirs as u64 >= (RW06_DIRS / d).max(2)
-        && (ext >= RW06_EXT / d
-            || (overwrites >= RW06_OVERWRITES / d
-                && overwrites * 100 >= RW06_OVERWRITE_PCT * pre as u64))
+    c.touched() >= RW06_TOUCHED / d
+        && c.dirs >= (RW06_DIRS / d).max(2)
+        && (c.ext >= RW06_EXT / d
+            || (c.rewrites >= RW06_OVERWRITES / d
+                && c.rewrites.saturating_mul(100) >= RW06_OVERWRITE_PCT.saturating_mul(c.pre)))
+}
+
+/// RW-06 slow-pacing thresholds over the summed summaries of one process
+/// (corpus finding 9). The folder count is a sum of per-summary counts (the
+/// same folder may be counted twice), so it only rules out single-folder
+/// activity.
+fn rw06_slow_triggers(sum: &Rw06Counts, summaries: usize, halved: bool) -> bool {
+    let d = if halved { 2 } else { 1 };
+    summaries >= RW06_SLOW_MIN_SUMMARIES
+        && sum.touched() >= RW06_SLOW_TOUCHED / d
+        && sum.dirs >= RW06_DIRS
+        && (sum.ext >= RW06_SLOW_EXT / d
+            || (sum.rewrites >= RW06_SLOW_OVERWRITES / d
+                && sum.rewrites.saturating_mul(100) >= RW06_OVERWRITE_PCT.saturating_mul(sum.pre)))
+}
+
+/// FP-07 (DETECTION-QUALITY.md, 2026-10-25): the extension changes of this
+/// summary are a compiler renaming its own outputs. All of:
+/// * at least 80 % of them go to one compiler-output extension
+///   ([`COMPILER_OUTPUT_EXTS`]: `.rlib`, `.rmeta`, `.o`, `.obj`, `.pdb`, …);
+/// * the sensor's sample paths (the last 5 touched) exist and every one lies
+///   in a build tree (a folder named `target`, `deps`, `obj`, `bin`,
+///   `build`, `out`, `debug`, `release`, …);
+/// * no sample is a user file with a stacked extension (`report.docx.rlib`).
+///
+/// Ransomware that picks `.rlib` as its extension renames documents where
+/// they live (Documents, Desktop, shares), so its samples are not in build
+/// trees and it keeps every extension change. *Residual:* a locker that also
+/// keeps touching decoy files in a fake `…\target\deps\` folder so that the
+/// last 5 samples always look like a build; RW-07 decoys, RW-08 notes and the
+/// overwrite path still apply.
+fn compiler_output(fa: &FileActivity) -> bool {
+    let top = fa
+        .top_new_ext
+        .as_deref()
+        .map(|x| x.trim().trim_start_matches('.').to_ascii_lowercase())
+        .unwrap_or_default();
+    !top.is_empty()
+        && COMPILER_OUTPUT_EXTS.contains(&top.as_str())
+        && fa.top_ext_pct >= RW06_COMPILER_EXT_PCT
+        && !fa.sample_paths.is_empty()
+        && fa
+            .sample_paths
+            .iter()
+            .all(|p| in_build_tree(p) && !stacked_user_ext(p))
+}
+
+/// Every sample is a non-document file in a build tree (see [`rw06_counts`]).
+fn build_tree_rewrites(fa: &FileActivity) -> bool {
+    !fa.sample_paths.is_empty()
+        && fa.sample_paths.iter().all(|p| {
+            let name = file_name_lower(p);
+            let ext = name.rsplit_once('.').map(|(_, x)| x).unwrap_or("");
+            in_build_tree(p) && !stacked_user_ext(p) && !USER_DATA_EXTS.contains(&ext)
+        })
+}
+
+/// A folder of `path` (not its file name) is a build-tree folder.
+fn in_build_tree(path: &str) -> bool {
+    let lp = path.to_ascii_lowercase().replace('/', "\\");
+    let mut parts: Vec<&str> = lp.split('\\').filter(|c| !c.is_empty()).collect();
+    parts.pop(); // the file name
+    parts.iter().any(|c| BUILD_DIR_NAMES.contains(c))
+}
+
+/// `name.<user-data ext>.<other ext>` (a renamed document).
+fn stacked_user_ext(path: &str) -> bool {
+    let name = file_name_lower(path);
+    let mut it = name.rsplit('.');
+    let _last = it.next();
+    match (it.next(), it.next()) {
+        (Some(inner), Some(_stem)) => USER_DATA_EXTS.contains(&inner),
+        _ => false,
+    }
 }
 
 impl Family for Ransomware {
@@ -1567,6 +1900,15 @@ impl Family for Ransomware {
         self.inplace_marks
             .retain(|_, t| now - *t <= RW08_COMBINE_MS);
         self.failed.retain(|_, t| now - *t <= RW12_WINDOW_MS);
+        self.slow.retain(|_, d| {
+            while d
+                .front()
+                .is_some_and(|x| now.saturating_sub(x.end) > RW06_SLOW_WINDOW_MS)
+            {
+                d.pop_front();
+            }
+            !d.is_empty()
+        });
         while self
             .host_hits
             .front()
@@ -1628,6 +1970,7 @@ impl Family for Ransomware {
         self.impact_marks.remove(guid);
         self.rw06_marks.remove(guid);
         self.inplace_marks.remove(guid);
+        self.slow.remove(guid);
         // `failed` expires by time only: the exit code must outlive the
         // table entry for the whole RW-12 window.
     }
@@ -1692,11 +2035,11 @@ pub(crate) fn catalog() -> Vec<RuleMeta> {
             &[CISA_MEDUSA, CISA_AKIRA, CISA_PLAY],
             &["Patch tools and installers stopping database or backup services", "Developer scripts restarting local SQL instances", "MDM / RMM maintenance jobs", "Process managers used by administrators"]),
         meta(RW06, "Mass file encryption behaviour",
-            "The ransomware file sensor saw one process touch at least 30 pre-existing user-data files (network paths count double) in at least 3 folders within its window, with at least 20 changes to unknown extensions, or at least 50 overwrites making up 80% or more of those files. Files the same process created in the window (new_files) are not pre-existing and never count: a compiler renaming its own temporary files is not encryption. Thresholds are halved for two hours after RW-12.",
+            "The ransomware file sensor saw one process touch at least 30 pre-existing user-data files (network paths count double) in at least 3 folders within its window, with at least 20 changes to unknown extensions, or at least 50 overwrites making up 80% or more of those files. Files the same process created itself (new_files / self_created) are not pre-existing and never count, except that its temp files renamed over originals with the same extension count as rewrites (write-temp-then-replace encryption). Extension changes to a compiler output (.rlib, .rmeta, .o, .obj, .pdb, …) whose sample paths all lie in build folders (target, deps, obj, bin, build, …) and name no renamed document are build artefacts and do not count. Slow, paced encryption: the non-overlapping summaries of one process over 5 minutes are added up (at least 3 summaries, 60 pre-existing files, 40 extension changes or 100 rewrites). Thresholds are halved for two hours after RW-12.",
             R, Critical, &["T1486"], true,
             "Kill the process lineage (tree), quarantine user-writable images and isolate the host when network paths were touched; validly signed sync, backup and archiver clients (OneDrive, Dropbox, Google Drive, 7-Zip, WinRAR, Veeam, Acronis…) and Explorer alert only. User mode cannot guarantee that no file is encrypted first",
             &[SIGMA_EXT, DEFEAT, SPLUNK_SPEED, S1_INTERMITTENT],
-            &["First sync or restore of OneDrive / Dropbox / Google Drive", "Bulk photo or media conversion to an uncommon format", "File encryption tools (AxCrypt, AESCrypt)", "Large git checkouts or build outputs inside user folders", "Not raised for (owner PC 2026-10-22): compilers renaming or rewriting files they created in the same window (rustc writing .rlib / .rmeta via temporary files: 101 alerts). A build step that renames files it created more than about 10 s earlier can still fire until the sensor reports self-created files across windows"]),
+            &["First sync or restore of OneDrive / Dropbox / Google Drive", "Bulk photo or media conversion to an uncommon format", "File encryption tools (AxCrypt, AESCrypt)", "Large git checkouts or build outputs inside user folders", "Not raised for (owner PC 2026-10-22): compilers renaming or rewriting files they created in the same window (rustc writing .rlib / .rmeta via temporary files: 101 alerts). A build step that renames files it created more than about 10 s earlier can still fire until the sensor reports self-created files across windows", "Not raised for (FP-07, 2026-10-25): compiler outputs renamed into place in build folders, also from agents before 1.1.6 (rustc .rlib: 43 alerts); applications that save many documents by writing a temp file and replacing the original may still fire"]),
         meta(RW07, "Ransomware canary tampered",
             "A process other than the Kestrel agent overwrote, renamed or deleted one of the hidden decoy documents Kestrel planted in the Documents and Pictures folders for ransomware detection.",
             R, Critical, &["T1486", "T1485"], true,
@@ -1786,27 +2129,27 @@ mod tests {
             ext_changes: 20,
             ..Default::default()
         };
-        assert!(rw06_triggers(&fa, false));
+        assert!(rw06_triggers(&rw06_counts(&fa), false));
         fa.ext_changes = 19;
-        assert!(!rw06_triggers(&fa, false));
+        assert!(!rw06_triggers(&rw06_counts(&fa), false));
         fa.files_touched = 70;
         fa.overwrites = 50;
-        assert!(!rw06_triggers(&fa, false), "50/70 < 80%");
+        assert!(!rw06_triggers(&rw06_counts(&fa), false), "50/70 < 80%");
         fa.overwrites = 48;
         fa.files_touched = 15;
         fa.net_paths = 15;
-        assert!(!rw06_triggers(&fa, false));
+        assert!(!rw06_triggers(&rw06_counts(&fa), false));
         fa.overwrites = 50;
         fa.files_touched = 50;
-        assert!(rw06_triggers(&fa, false));
+        assert!(rw06_triggers(&rw06_counts(&fa), false));
         let half = FileActivity {
             files_touched: 15,
             dirs: 2,
             ext_changes: 10,
             ..Default::default()
         };
-        assert!(!rw06_triggers(&half, false));
-        assert!(rw06_triggers(&half, true));
+        assert!(!rw06_triggers(&rw06_counts(&half), false));
+        assert!(rw06_triggers(&rw06_counts(&half), true));
         let huge = FileActivity {
             files_touched: u32::MAX,
             dirs: u32::MAX,
@@ -1814,6 +2157,6 @@ mod tests {
             net_paths: u32::MAX,
             ..Default::default()
         };
-        assert!(rw06_triggers(&huge, false));
+        assert!(rw06_triggers(&rw06_counts(&huge), false));
     }
 }

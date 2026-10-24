@@ -1,0 +1,21 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "Fake Xeno executor -> Java RAT/stealer",
+  "category": "script-stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-01",
+    "PS-02",
+    "ST-12"
+  ],
+  "sources": [
+    "https://www.bitdefender.com/en-us/blog/labs/fake-xeno-roblox-discord-executor"
+  ],
+  "notes": "Bitdefender (Aug 2026): fake Xeno Roblox executor in %LOCALAPPDATA%\\Xeno\\workspace\\cache, hidden PowerShell unpacks a JRE, javaw.exe stages from %LOCALAPPDATA%\\Microsoft\\GameDVR, Run value 'Display Calibration', ipwho.is geolocation, reads TokenBroker .tbres tokens and browser cookies, patches Exodus app.asar."
+}

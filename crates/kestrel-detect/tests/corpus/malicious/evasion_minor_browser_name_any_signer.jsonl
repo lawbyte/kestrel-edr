@@ -1,0 +1,20 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 5000, "guid": "loader", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Users\\alice\\Downloads\\Installer.exe", "cmdline": "\"C:\\Users\\alice\\Downloads\\Installer.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "unsigned", "sha256": "11a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9", "motw_zone": 3}
+{"ts": 1760000001500, "pid": 6100, "guid": "stealer", "type": "process_start", "ppid": 5000, "parent_guid": "loader", "image": "C:\\Users\\alice\\AppData\\Local\\Thorium\\Application\\thorium.exe", "cmdline": "\"C:\\Users\\alice\\AppData\\Local\\Thorium\\Application\\thorium.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Chengdu Nurs Technology Co., Ltd.", "sha256": "22b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9a1"}
+{"ts": 1760000002500, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Local State", "op": "open"}
+{"ts": 1760000002530, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data", "op": "open"}
+{"ts": 1760000002560, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Network\\Cookies", "op": "open"}
+{"ts": 1760000002590, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Web Data", "op": "open"}
+{"ts": 1760000002620, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Local State", "op": "open"}
+{"ts": 1760000002650, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Login Data", "op": "open"}
+{"ts": 1760000002680, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Network\\Cookies", "op": "open"}
+{"ts": 1760000002710, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\BraveSoftware\\Brave-Browser\\User Data\\Local State", "op": "open"}
+{"ts": 1760000002740, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\BraveSoftware\\Brave-Browser\\User Data\\Default\\Login Data", "op": "open"}
+{"ts": 1760000002770, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\BraveSoftware\\Brave-Browser\\User Data\\Default\\Network\\Cookies", "op": "open"}
+{"ts": 1760000002800, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Local Extension Settings\\nkbihfbeogaeaoehlefnkodbefgpgknn\\000003.log", "op": "open"}
+{"ts": 1760000003220, "pid": 6100, "guid": "stealer", "type": "dpapi_unprotect", "description": "Google Chrome"}
+{"ts": 1760000003240, "pid": 6100, "guid": "stealer", "type": "dpapi_unprotect", "description": "Microsoft Edge"}
+{"ts": 1760000003260, "pid": 6100, "guid": "stealer", "type": "dpapi_unprotect", "description": "Brave"}
+{"ts": 1760000003380, "pid": 6100, "guid": "stealer", "type": "net_connect", "proto": "tcp", "dst_ip": "198.51.100.77", "dst_port": 443, "src_port": 50101, "bytes_sent": 2400000}
+{"ts": 1760000003580, "pid": 6100, "guid": "stealer", "type": "dns_query", "qname": "api.telegram.org", "answers": ["149.154.167.220"]}
+{"ts": 1760000003680, "pid": 6100, "guid": "stealer", "type": "net_connect", "proto": "tcp", "dst_ip": "149.154.167.220", "dst_port": 443, "src_port": 50102, "dst_host": "api.telegram.org", "bytes_sent": 2400000}

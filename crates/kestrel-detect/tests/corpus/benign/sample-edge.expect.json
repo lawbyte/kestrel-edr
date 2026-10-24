@@ -1,0 +1,11 @@
+{
+  "description": "sample-edge: slice of the owner-PC telemetry 2026-10 (anonymised)",
+  "strict": true,
+  "allow": [
+    {
+      "rule": "ST-05",
+      "max_severity": "low",
+      "note": "FP-08 fixed 2026-10-25: Playwright temporary profile is Low Audit by design"
+    }
+  ]
+}

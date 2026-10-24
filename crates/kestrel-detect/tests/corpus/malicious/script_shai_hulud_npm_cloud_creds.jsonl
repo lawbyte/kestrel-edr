@@ -1,0 +1,12 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 5000, "guid": "npm", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Program Files\\nodejs\\node.exe", "cmdline": "\"C:\\Program Files\\nodejs\\node.exe\" \"C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js\" install", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "OpenJS Foundation"}
+{"ts": 1760000003000, "pid": 5100, "guid": "post", "type": "process_start", "ppid": 5000, "parent_guid": "npm", "image": "C:\\Program Files\\nodejs\\node.exe", "cmdline": "\"C:\\Program Files\\nodejs\\node.exe\" bundle.js", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "OpenJS Foundation"}
+{"ts": 1760000003500, "pid": 5100, "guid": "post", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\GitHub CLI\\hosts.yml", "op": "read"}
+{"ts": 1760000003540, "pid": 5100, "guid": "post", "type": "file_access", "path": "C:\\Users\\alice\\.git-credentials", "op": "read"}
+{"ts": 1760000003580, "pid": 5100, "guid": "post", "type": "file_access", "path": "C:\\Users\\alice\\.aws\\credentials", "op": "read"}
+{"ts": 1760000003620, "pid": 5100, "guid": "post", "type": "file_access", "path": "C:\\Users\\alice\\.azure\\msal_token_cache.json", "op": "read"}
+{"ts": 1760000003660, "pid": 5100, "guid": "post", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\gcloud\\application_default_credentials.json", "op": "read"}
+{"ts": 1760000003900, "pid": 5100, "guid": "post", "type": "dns_query", "qname": "api.github.com", "answers": ["140.82.112.6"]}
+{"ts": 1760000004000, "pid": 5100, "guid": "post", "type": "net_connect", "proto": "tcp", "dst_ip": "140.82.112.6", "dst_port": 443, "src_port": 50101, "dst_host": "api.github.com", "bytes_sent": 150000}
+{"ts": 1760000004300, "pid": 5100, "guid": "post", "type": "dns_query", "qname": "webhook.site", "answers": ["46.4.105.116"]}
+{"ts": 1760000004400, "pid": 5100, "guid": "post", "type": "net_connect", "proto": "tcp", "dst_ip": "46.4.105.116", "dst_port": 443, "src_port": 50102, "dst_host": "webhook.site", "bytes_sent": 150000}

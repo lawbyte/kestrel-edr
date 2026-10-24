@@ -1,0 +1,26 @@
+{
+  "must_alert": [
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "Trojanised signed Electron app",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-01"
+  ],
+  "evasion_targets": [
+    "ST-03 own_app_dpapi",
+    "ST-04 reader selection order"
+  ],
+  "sources": [
+    "https://research.jfrog.com/post/solara-cipher-npm/",
+    "https://research.checkpoint.com/2025/from-trust-to-threat-hijacked-discord-invites-used-for-multi-stage-malware-delivery/",
+    "https://www.securityweek.com/infostealer-malware-delivered-in-emeditor-supply-chain-attack/",
+    "https://www.withsecure.com/en/resources-hub/w-labs/keepass-trojanised-in-advanced-malware-campaign/"
+  ],
+  "notes": "Validly signed Program Files Electron app (trojanised update) lets a cmd child copy a Chromium-based browser's stores to %TEMP%, reads the copies, decrypts the key with DPAPI description 'Chromium' (= Electron safeStorage allowance) and uploads. ST-04 picks the sender itself as reader (own-app DPAPI only, Audit) before looking at the child.",
+  "known_gap": "ST-04 picks the sender itself as reader (own-app DPAPI only, Audit Low) before the child that read the real stores"
+}

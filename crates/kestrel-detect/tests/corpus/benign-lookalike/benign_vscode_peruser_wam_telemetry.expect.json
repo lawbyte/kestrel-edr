@@ -1,0 +1,22 @@
+{
+  "must_not_alert": [
+    "ST-02",
+    "ST-16"
+  ],
+  "family": "VS Code (per-user install)",
+  "category": "benign-lookalike",
+  "allow": [
+    {
+      "rule": "ST-01",
+      "max_severity": "low"
+    },
+    {
+      "rule": "ST-04",
+      "max_severity": "low"
+    }
+  ],
+  "sources": [
+    "https://blog.xpnsec.com/wam-bam/"
+  ],
+  "notes": "Microsoft-signed per-user VS Code reads the WAM token cache, then talks to Microsoft telemetry and sign-in by DNS name: Low Audit at most (owner's PC triage item 6)."
+}

@@ -1,0 +1,7 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 5000, "guid": "slack", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Program Files\\Slack\\slack.exe", "cmdline": "\"C:\\Program Files\\Slack\\slack.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Slack Technologies, LLC"}
+{"ts": 1760000000500, "pid": 5000, "guid": "slack", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Slack\\Local State", "op": "read"}
+{"ts": 1760000000540, "pid": 5000, "guid": "slack", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Slack\\Network\\Cookies", "op": "read"}
+{"ts": 1760000000700, "pid": 5000, "guid": "slack", "type": "dpapi_unprotect", "description": "Chromium"}
+{"ts": 1760000000900, "pid": 5000, "guid": "slack", "type": "dns_query", "qname": "edgeapi.slack.com", "answers": ["3.165.102.21"]}
+{"ts": 1760000001000, "pid": 5000, "guid": "slack", "type": "net_connect", "proto": "tcp", "dst_ip": "3.165.102.21", "dst_port": 443, "src_port": 50101, "dst_host": "edgeapi.slack.com", "bytes_sent": 12000}

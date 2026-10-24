@@ -1,0 +1,19 @@
+{
+  "must_alert": [
+    "ST-05",
+    "ST-06",
+    "ST-04"
+  ],
+  "min_severity": "high",
+  "family": "CDP cookie dump (ABE bypass)",
+  "category": "abe",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://specterops.io/blog/2025/08/27/dough-no-revisiting-cookie-theft/",
+    "https://specterops.io/blog/2026/08/13/chrome-devtools-protocol-cookie-theft/",
+    "https://developer.chrome.com/blog/remote-debugging-port"
+  ],
+  "notes": "Headless Chrome on a copied profile with --remote-debugging-port, loader connects to 127.0.0.1:9222 and calls Storage.getCookies / Network.getAllCookies (decrypted by Chrome itself), then uploads."
+}

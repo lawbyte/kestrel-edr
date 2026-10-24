@@ -1,0 +1,4 @@
+{
+  "description": "sample-vscode-wam: cut around an alert that does not fire here (known snapshot signature, or state outside the slice); slice of the owner-PC telemetry 2026-10 (anonymised)",
+  "strict": true
+}

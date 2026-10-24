@@ -1,0 +1,14 @@
+{"ts": 1760000000000, "pid": 2800, "guid": "mp", "type": "process_start", "ppid": 3900, "image": "C:\\ProgramData\\Microsoft\\Windows Defender\\Platform\\4.18.25090.3009-0\\MsMpEng.exe", "cmdline": "\"C:\\ProgramData\\Microsoft\\Windows Defender\\Platform\\4.18.25090.3009-0\\MsMpEng.exe\"", "user": "NT AUTHORITY\\SYSTEM", "integrity": "system", "signed": "valid", "signer": "Microsoft Corporation"}
+{"ts": 1760000000500, "pid": 2800, "guid": "mp", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Local State", "op": "read"}
+{"ts": 1760000000520, "pid": 2800, "guid": "mp", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000000540, "pid": 2800, "guid": "mp", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000000560, "pid": 2800, "guid": "mp", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Web Data", "op": "read"}
+{"ts": 1760000000580, "pid": 2800, "guid": "mp", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Local State", "op": "read"}
+{"ts": 1760000000600, "pid": 2800, "guid": "mp", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000000620, "pid": 2800, "guid": "mp", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000000640, "pid": 2800, "guid": "mp", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Web Data", "op": "read"}
+{"ts": 1760000000660, "pid": 2800, "guid": "mp", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\key_datas", "op": "read"}
+{"ts": 1760000000680, "pid": 2800, "guid": "mp", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\discord\\Local Storage\\leveldb\\000005.ldb", "op": "read"}
+{"ts": 1760000000700, "pid": 2800, "guid": "mp", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Exodus\\exodus.wallet\\seed.seco", "op": "read"}
+{"ts": 1760000000720, "pid": 2800, "guid": "mp", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\TokenBroker\\Cache\\04a7c1b9e2d3f5a6b8c0d1e2f3a4b5c6d7e8f9a0.tbres", "op": "read"}
+{"ts": 1760000002000, "pid": 2800, "guid": "mp", "type": "net_connect", "proto": "tcp", "dst_ip": "20.42.65.85", "dst_port": 443, "src_port": 50101, "dst_host": "wdcp.microsoft.com", "bytes_sent": 3000}

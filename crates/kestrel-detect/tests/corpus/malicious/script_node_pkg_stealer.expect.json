@@ -1,0 +1,27 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04",
+    {
+      "any_of": [
+        "ST-14"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "Cipher (fake Solara executor, Node/Electron)",
+  "category": "script-stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-01",
+    "ST-12"
+  ],
+  "sources": [
+    "https://research.jfrog.com/post/solara-cipher-npm/",
+    "https://unit42.paloaltonetworks.com/?p=169710"
+  ],
+  "notes": "Cipher (JFrog, Mar 2026): npm preinstall downloads 'solara-1.0.1.exe' to %TEMP%, stages node_modules under %TEMP%\\MicrosoftServicingDevicingService, decrypts Chrome's key with DPAPI, copies Login Data, takes Discord tokens and wallets (Exodus seed.seco), overwrites Discord's index.js, validates the token on discord.com and uploads to gofile."
+}

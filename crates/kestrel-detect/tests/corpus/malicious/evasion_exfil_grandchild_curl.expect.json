@@ -1,0 +1,21 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic (exfil by grandchild)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "ST-04 relatives (parent / children only)"
+  ],
+  "sources": [
+    "https://www.microsoft.com/en-us/security/blog/2025/08/21/think-before-you-clickfix-analyzing-the-clickfix-social-engineering-technique/",
+    "https://iimp0ster.github.io/detection-chokepoints/chokepoints/browser-credential-theft/"
+  ],
+  "notes": "Stealer zips the loot and uploads through cmd /c curl: the sender is the reader's grandchild (ST-04 only links parent / direct children).",
+  "known_gap": "ST-04 links only the sender's parent and direct children; curl is the reader's grandchild"
+}

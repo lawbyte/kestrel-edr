@@ -1,0 +1,29 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04",
+    {
+      "any_of": [
+        "ST-10",
+        "ST-11"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "Lumma (ClickFix steganography chain)",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "engine::system_trusted (explorer.exe)",
+    "ST-04 relatives skip system-trusted senders"
+  ],
+  "sources": [
+    "https://www.huntress.com/blog/clickfix-malware-buried-in-images",
+    "https://www.microsoft.com/en-us/security/blog/2025/05/21/lumma-stealer-breaking-down-the-delivery-techniques-and-capabilities-of-a-prolific-infostealer/"
+  ],
+  "notes": "Huntress (Nov 2025): ClickFix -> mshta (hex-encoded IP) -> PowerShell .NET loader decodes shellcode from PNG pixels -> VirtualAllocEx / WriteProcessMemory / CreateRemoteThread into explorer.exe -> Donut-packed LummaC2 runs inside Explorer. Every read and the upload come from explorer.exe (System-trusted Windows binary).",
+  "known_gap": "reads by explorer.exe (system-trusted) are skipped (ST-02 missing); ST-03 / ST-04 still fire through the DPAPI call"
+}

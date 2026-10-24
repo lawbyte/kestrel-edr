@@ -1,0 +1,17 @@
+{
+  "must_alert": [
+    "CD-10"
+  ],
+  "min_severity": "critical",
+  "family": "SAM / SECURITY hive save",
+  "category": "credential-dumping",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://detection.fyi/sigmahq/sigma/windows/process_creation/proc_creation_win_reg_dumping_sensitive_hives/",
+    "https://thedfirreport.com/2025/06/30/hide-your-rdp-password-spray-leads-to-ransomhub-deployment/",
+    "https://www.elastic.co/guide/en/security/current/lsass-memory-dump-handle-access.html"
+  ],
+  "notes": "reg save of SAM, SECURITY and SYSTEM to Public."
+}

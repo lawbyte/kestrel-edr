@@ -1,0 +1,22 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic (security-product impersonation)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "paths::benign_reader_for (signer substring, no path check)"
+  ],
+  "sources": [
+    "https://securityaffairs.com/183532/",
+    "https://bleepingcomputer.com/news/security/fake-enterprise-vpn-downloads-used-to-steal-company-credentials",
+    "https://www.securityweek.com/infostealer-malware-delivered-in-emeditor-supply-chain-attack/"
+  ],
+  "notes": "Stealer named ekrn.exe (ESET's service) in ProgramData, validly signed by 'Reset Data Systems Ltd': the BENIGN_READERS signer check is a case-insensitive *substring* ('eset' in 'Reset').",
+  "known_gap": "BENIGN_READERS signer check is a substring ('eset' in 'Reset ...') with no path check: every read is dropped"
+}

@@ -1,0 +1,20 @@
+{
+  "must_not_alert": [
+    "ST-02",
+    "ST-04",
+    "ST-07",
+    "ST-16"
+  ],
+  "family": "Playwright test run",
+  "category": "benign-lookalike",
+  "allow": [
+    {
+      "rule": "ST-05",
+      "max_severity": "high"
+    }
+  ],
+  "sources": [
+    "https://playwright.dev/docs/browsers"
+  ],
+  "notes": "End-to-end tests: Playwright's bundled Chromium launched headless with --remote-debugging-pipe and a temp profile; no credential store is read and nothing leaves the host. ST-05 may fire (documented false positive) but nothing stronger."
+}

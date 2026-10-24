@@ -1,0 +1,25 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-01"
+      ],
+      "min_severity": "medium"
+    },
+    "ST-04"
+  ],
+  "min_severity": "high",
+  "family": "generic (ssh ProxyCommand abuse)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "legit_apps::ssh_client_owner / ssh_suspicious_option"
+  ],
+  "sources": [
+    "https://www.sophos.com/en-us/blog/lumma-stealer-coming-and-going",
+    "https://lolbas-project.github.io/lolbas/Binaries/Ssh/"
+  ],
+  "notes": "Real Git ssh.exe in its install folder, but with -o ProxyCommand running an unsigned Temp binary which carries the traffic: the reader is ssh, the sender its child."
+}

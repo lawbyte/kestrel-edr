@@ -1,0 +1,24 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 5000, "guid": "loader", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Users\\alice\\Downloads\\invoice_0925.exe", "cmdline": "\"C:\\Users\\alice\\Downloads\\invoice_0925.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "unsigned", "sha256": "b4ede2ff6ad57f1e9e5b1c36d9a6edc6ec2a212ed849606ee09a4907b7d1613d", "motw_zone": 3}
+{"ts": 1760000000900, "pid": 5300, "guid": "regasm", "type": "process_start", "ppid": 5000, "parent_guid": "loader", "image": "C:\\Windows\\Microsoft.NET\\Framework\\v4.0.30319\\RegAsm.exe", "cmdline": "C:\\Windows\\Microsoft.NET\\Framework\\v4.0.30319\\RegAsm.exe", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Corporation"}
+{"ts": 1760000002000, "pid": 5300, "guid": "regasm", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Local State", "op": "read"}
+{"ts": 1760000002030, "pid": 5300, "guid": "regasm", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000002060, "pid": 5300, "guid": "regasm", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000002090, "pid": 5300, "guid": "regasm", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Web Data", "op": "read"}
+{"ts": 1760000002120, "pid": 5300, "guid": "regasm", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Local Extension Settings\\nkbihfbeogaeaoehlefnkodbefgpgknn\\000003.log", "op": "read"}
+{"ts": 1760000002150, "pid": 5300, "guid": "regasm", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Local State", "op": "read"}
+{"ts": 1760000002180, "pid": 5300, "guid": "regasm", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000002210, "pid": 5300, "guid": "regasm", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000002240, "pid": 5300, "guid": "regasm", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Web Data", "op": "read"}
+{"ts": 1760000002270, "pid": 5300, "guid": "regasm", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Local Extension Settings\\nkbihfbeogaeaoehlefnkodbefgpgknn\\000003.log", "op": "read"}
+{"ts": 1760000002300, "pid": 5300, "guid": "regasm", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Exodus\\exodus.wallet\\seed.seco", "op": "read"}
+{"ts": 1760000002330, "pid": 5300, "guid": "regasm", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Electrum\\wallets\\default_wallet", "op": "read"}
+{"ts": 1760000002360, "pid": 5300, "guid": "regasm", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\key_datas", "op": "read"}
+{"ts": 1760000002390, "pid": 5300, "guid": "regasm", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\Telegram Desktop\\tdata\\D877F783D5D3EF8C\\maps", "op": "read"}
+{"ts": 1760000002420, "pid": 5300, "guid": "regasm", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\discord\\Local State", "op": "read"}
+{"ts": 1760000002450, "pid": 5300, "guid": "regasm", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\discord\\Local Storage\\leveldb\\000005.ldb", "op": "read"}
+{"ts": 1760000002480, "pid": 5300, "guid": "regasm", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\FileZilla\\recentservers.xml", "op": "read"}
+{"ts": 1760000002510, "pid": 5300, "guid": "regasm", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\FileZilla\\sitemanager.xml", "op": "read"}
+{"ts": 1760000002540, "pid": 5300, "guid": "regasm", "type": "dpapi_unprotect", "description": "Google Chrome"}
+{"ts": 1760000002560, "pid": 5300, "guid": "regasm", "type": "dpapi_unprotect", "description": "Microsoft Edge"}
+{"ts": 1760000002880, "pid": 5300, "guid": "regasm", "type": "net_connect", "proto": "tcp", "dst_ip": "192.0.2.45", "dst_port": 8080, "src_port": 50101, "bytes_sent": 2400000}

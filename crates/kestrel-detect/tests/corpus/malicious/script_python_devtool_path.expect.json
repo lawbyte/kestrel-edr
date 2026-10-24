@@ -1,0 +1,22 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "Malicious PyPI package (Python stealer)",
+  "category": "script-stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "signed interpreter in a developer folder (not Temp/Downloads)"
+  ],
+  "sources": [
+    "https://bleepingcomputer.com/news/security/malicious-pypi-package-steals-discord-auth-tokens-from-devs",
+    "https://osv.dev/vulnerability/MAL-2025-41662",
+    "https://www.sentinelone.com/labs/ghost-in-the-zip-new-pxa-stealer-and-its-telegram-powered-ecosystem/",
+    "https://cofense.com/blog/how-cloudflare-services-are-abused-for-credential-theft-and-malware-distribution"
+  ],
+  "notes": "Malicious PyPI dependency imported by a developer's script: Python Software Foundation-signed python.exe in a per-user dev path reads browsers and wallets and uploads to a Cloudflare Workers endpoint (not on the dead-drop list)."
+}

@@ -1,0 +1,22 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic (Program Files look-alike folder)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "legit_apps::in_program_files / program_files_rest",
+    "dev_tool_reader",
+    "wam_client_reader"
+  ],
+  "sources": [
+    "https://www.microsoft.com/en-us/security/blog/2025/05/21/lumma-stealer-breaking-down-the-delivery-techniques-and-capabilities-of-a-prolific-infostealer/",
+    "https://www.helpnetsecurity.com/2026/05/19/purelogs-infostealer-delivery-steganography/"
+  ],
+  "notes": "Unsigned Code.exe under C:\\Users\\alice\\AppData\\Local\\Program Files\\Microsoft VS Code\\ (a folder *named* Program Files inside the profile): reads WAM, kubeconfig, Docker, AWS and Chrome stores."
+}

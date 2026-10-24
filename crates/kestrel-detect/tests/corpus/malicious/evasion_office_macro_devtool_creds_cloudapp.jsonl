@@ -1,0 +1,8 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 5000, "guid": "word", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE", "cmdline": "\"C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE\" /n \"C:\\Users\\alice\\Documents\\Platform-onboarding-checklist.docm\" /o \"\"", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Corporation"}
+{"ts": 1760000003000, "pid": 5000, "guid": "word", "type": "file_access", "path": "C:\\Users\\alice\\.azure\\msal_token_cache.json", "op": "read"}
+{"ts": 1760000003040, "pid": 5000, "guid": "word", "type": "file_access", "path": "C:\\Users\\alice\\.azure\\azureProfile.json", "op": "read"}
+{"ts": 1760000003080, "pid": 5000, "guid": "word", "type": "file_access", "path": "C:\\Users\\alice\\.kube\\config", "op": "read"}
+{"ts": 1760000003120, "pid": 5000, "guid": "word", "type": "file_access", "path": "C:\\Users\\alice\\.docker\\config.json", "op": "read"}
+{"ts": 1760000003500, "pid": 5000, "guid": "word", "type": "dns_query", "qname": "aks-diag-collector.eastus.cloudapp.azure.com", "answers": ["20.62.10.77"]}
+{"ts": 1760000003600, "pid": 5000, "guid": "word", "type": "net_connect", "proto": "tcp", "dst_ip": "20.62.10.77", "dst_port": 443, "src_port": 50121, "dst_host": "aks-diag-collector.eastus.cloudapp.azure.com", "bytes_sent": 140000}

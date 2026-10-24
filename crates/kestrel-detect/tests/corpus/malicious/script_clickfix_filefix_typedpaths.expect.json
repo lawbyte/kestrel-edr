@@ -1,0 +1,29 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-11"
+      ],
+      "min_severity": "high"
+    },
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "FileFix (ClickFix variant)",
+  "category": "script-stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-10",
+    "ST-12"
+  ],
+  "sources": [
+    "https://intel471.com/blog/threat-hunting-case-study-filefix",
+    "https://www.bleepingcomputer.com/news/security/new-filefix-attack-uses-steganography-to-drop-stealc-malware/",
+    "https://detection.fyi/sigmahq/sigma/windows/process_creation/proc_creation_win_filefix_browsers",
+    "https://www.microsoft.com/en-us/security/blog/2025/08/21/think-before-you-clickfix-analyzing-the-clickfix-social-engineering-technique/"
+  ],
+  "notes": "FileFix (mr.d0x, June 2025; StealC campaign Sept 2025): the command, padded with spaces and a fake file name, is pasted into the browser's file-upload dialog address bar, so the *browser* (chrome.exe) is PowerShell's parent; TypedPaths records it. Padding shortened in the replay (the verbatim shape is an AV signature)."
+}

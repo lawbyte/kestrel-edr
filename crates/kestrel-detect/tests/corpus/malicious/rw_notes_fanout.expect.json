@@ -1,0 +1,15 @@
+{
+  "must_alert": [
+    "RW-08"
+  ],
+  "min_severity": "critical",
+  "family": "Ransom-note fan-out",
+  "category": "ransomware",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://www.cisa.gov/news-events/cybersecurity-advisories/aa25-071a"
+  ],
+  "notes": "Ransom notes dropped into many folders before encryption starts."
+}

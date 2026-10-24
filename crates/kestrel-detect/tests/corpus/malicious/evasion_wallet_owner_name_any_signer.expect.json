@@ -1,0 +1,28 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-01"
+      ],
+      "min_severity": "low"
+    },
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "crypto-wallet drainer (named as an unpinned wallet app, any valid signer, dropped into the app's own folder)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "paths::own_app_folder (paths.rs:1509-1528) \u2014 reader image path contains \\<app>\\ and the store is under AppData\\{Local,Roaming}\\<app>\\",
+    "paths::is_trusted_owner non-browser branch: store.owners glob match && (pinned || own_app_folder) (paths.rs:1505-1506)",
+    "identity::genuine generic fallback: any valid signer below AppData (identity.rs:410-428)",
+    "wallet/FTP owner images not in PUBLISHERS: O_COINOMI/O_ATOMIC/O_GUARDA/O_JAXX/O_MONERO/O_ARMORY/O_BITCOIN/O_WASABI/O_DAEDALUS/O_BINANCE/O_TOTALCMD/O_SMARTFTP (paths.rs:337-368)"
+  ],
+  "notes": "LIVE EVASION against the 2026-10-25 'pinned/own_app_folder' fix. The fix lets a non-browser store owner be trusted when pinned (listed||admin_location) OR via own_app_folder: a genuine image whose path contains \\<app>\\ reading a store under AppData\\...\\<app>\\. The store-owner image names for Coinomi, Atomic Wallet, Guarda, Jaxx, Monero, Armory, Bitcoin Core, Wasabi, Daedalus, Binance and the FTP clients TotalCommander/SmartFTP are NOT in identity::PUBLISHERS, so genuine() needs only ANY valid signature below AppData (not Temp). A crypto-drainer signed with any cert, named coinomi.exe, written to %LOCALAPPDATA%\\Coinomi\\ (user-writable, no admin) reading the real wallet at %LOCALAPPDATA%\\Coinomi\\Coinomi\\wallets\\* is own_app_folder => is_trusted_owner => the read is silently treated as the app's own and never recorded. The subsequent 120 KB exfil to walletbackup-sync.com raises no ST-04 (nothing recorded as a credential read). Only a medium ST-12 fires. Targeted (one app's store per process name) but fully silent with no containment; same pattern applies to Atomic/Guarda/Monero/TotalCommander. Confirmed via probe: is_trusted_owner=true for Coinomi, Atomic Wallet and Guarda with signer 'PremiumDL Software LLC'. Engine after the red-team round: the unpinned owner name in its own application folder is an alert-only own-folder reader (ST-01 Low), and the send to a raw IP gets the full ST-04. Added by the fix-round red team (2026-10-25); the engine detects it after the red-team fixes.",
+  "sources": [
+    "https://www.group-ib.com/blog/crypto-wallet-drainers/",
+    "https://www.sentinelone.com/labs/the-rise-of-infostealers-2025/"
+  ]
+}

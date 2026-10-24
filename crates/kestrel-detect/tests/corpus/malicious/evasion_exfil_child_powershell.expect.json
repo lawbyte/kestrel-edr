@@ -1,0 +1,22 @@
+{
+  "must_alert": [
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic (exfil by child PowerShell)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-01",
+    "ST-03"
+  ],
+  "evasion_targets": [
+    "ST-04 relatives"
+  ],
+  "sources": [
+    "https://iimp0ster.github.io/detection-chokepoints/chokepoints/browser-credential-theft/"
+  ],
+  "notes": "Reader spawns PowerShell (direct child) for the upload."
+}

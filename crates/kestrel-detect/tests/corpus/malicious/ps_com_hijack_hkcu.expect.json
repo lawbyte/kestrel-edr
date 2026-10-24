@@ -1,0 +1,13 @@
+{
+  "must_alert": [
+    "PS-11"
+  ],
+  "min_severity": "medium",
+  "family": "COM hijack (HKCU InprocServer32)",
+  "category": "persistence",
+  "sources": [
+    "https://attack.mitre.org/techniques/T1546/015/",
+    "https://specterops.io/blog/2025/05/28/revisiting-com-hijacking/"
+  ],
+  "notes": "Per-user InprocServer32 override for MMDeviceEnumerator pointing to an unsigned DLL in AppData."
+}

@@ -1,0 +1,27 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "DLL sideloading into a copied signed browser",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-15"
+  ],
+  "evasion_targets": [
+    "paths::is_trusted_owner (browser name)",
+    "engine::on_net browser shortcut",
+    "ST-15 only covers Defender / msedge components"
+  ],
+  "sources": [
+    "https://www.esentire.com/blog/dont-get-caught-in-the-headlights-deerstealer-analysis",
+    "https://unit42.paloaltonetworks.com/vidar-stealer-xmrig-miner-campaign-analysis/",
+    "https://www.sentinelone.com/labs/ghost-in-the-zip-new-pxa-stealer-and-its-telegram-powered-ecosystem/"
+  ],
+  "notes": "Genuine Google-signed chrome.exe copied to %APPDATA% with a malicious unsigned chrome_elf.dll next to it (sideload). The process is a 'trusted browser' by name + valid signature, so its reads and uploads are treated as the browser's own.",
+  "known_gap": "a copied Google-signed chrome.exe is a trusted browser by name + signature: owns browser stores and on_net skips ST-04 / ST-14"
+}

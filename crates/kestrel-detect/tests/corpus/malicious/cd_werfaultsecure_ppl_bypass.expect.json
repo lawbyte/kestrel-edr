@@ -1,0 +1,19 @@
+{
+  "must_alert": [
+    "CD-02"
+  ],
+  "min_severity": "critical",
+  "family": "WSASS / old WerFaultSecure PPL dump",
+  "category": "credential-dumping",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "CD-03",
+    "CD-08"
+  ],
+  "sources": [
+    "https://detection.fyi/sigmahq/sigma/windows/process_creation/proc_creation_win_werfaultsecure_abuse/"
+  ],
+  "notes": "Sept 2025 technique: a Windows 8.1-era WerFaultSecure.exe copied outside System32 dumps PPL LSASS unencrypted; header altered to look like an image file."
+}

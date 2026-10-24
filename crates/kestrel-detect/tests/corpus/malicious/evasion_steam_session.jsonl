@@ -1,0 +1,8 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 6100, "guid": "stealer", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Users\\alice\\Downloads\\st.exe", "cmdline": "\"C:\\Users\\alice\\Downloads\\st.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "unsigned", "sha256": "64c120806398e4681419e0138aa9dd9a8401014dac67073eee1f642d0473c6b7", "motw_zone": 3}
+{"ts": 1760000000500, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Program Files (x86)\\Steam\\config\\config.vdf", "op": "read"}
+{"ts": 1760000000540, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Program Files (x86)\\Steam\\config\\loginusers.vdf", "op": "read"}
+{"ts": 1760000000580, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Program Files (x86)\\Steam\\ssfn5810391029384756123", "op": "read"}
+{"ts": 1760000000620, "pid": 6100, "guid": "stealer", "type": "file_access", "path": "C:\\Program Files (x86)\\Steam\\local.vdf", "op": "read"}
+{"ts": 1760000000760, "pid": 6100, "guid": "stealer", "type": "dns_query", "qname": "api.telegram.org", "answers": ["149.154.167.220"]}
+{"ts": 1760000000860, "pid": 6100, "guid": "stealer", "type": "net_connect", "proto": "tcp", "dst_ip": "149.154.167.220", "dst_port": 443, "src_port": 50101, "dst_host": "api.telegram.org", "bytes_sent": 40000}

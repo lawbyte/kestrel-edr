@@ -1,0 +1,35 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-05"
+      ],
+      "min_severity": "high"
+    },
+    {
+      "any_of": [
+        "ST-06"
+      ],
+      "min_severity": "high"
+    },
+    "ST-02",
+    "ST-04",
+    {
+      "any_of": [
+        "ST-14"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "Phemedrone",
+  "category": "stealer",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://www.elastic.co/security-labs/katz-and-mouse-game",
+    "https://gbhackers.com/youtube-ghost-malware/amp/"
+  ],
+  "notes": "Phemedrone (open source, YouTube 'Ghost Network' 2025): kills Chrome, relaunches it with --remote-debugging-port=9222 off-screen (-2400,-2400) and calls Network.getAllCookies; ip-api.com geolocation; zip to a Telegram bot."
+}

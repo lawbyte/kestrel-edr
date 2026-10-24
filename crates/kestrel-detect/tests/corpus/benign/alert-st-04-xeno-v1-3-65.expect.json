@@ -1,0 +1,26 @@
+{
+  "description": "alert-st-04-xeno-v1-3-65: slice of the owner-PC telemetry 2026-10 (anonymised)",
+  "known_false_positives": [
+    {
+      "max_severity": "high",
+      "note": "X-01: Xeno Roblox executor (Electron, unpacked to Temp): own safeStorage key, pastebin config, QUIC handshake; not a stealer, a game-cheat injector (unclear / PUA)",
+      "rule": "ST-03"
+    },
+    {
+      "max_severity": "critical",
+      "note": "X-01: Xeno Roblox executor (Electron, unpacked to Temp): own safeStorage key, pastebin config, QUIC handshake; not a stealer, a game-cheat injector (unclear / PUA)",
+      "rule": "ST-04"
+    },
+    {
+      "max_severity": "medium",
+      "note": "X-01: Xeno Roblox executor (Electron, unpacked to Temp): own safeStorage key, pastebin config, QUIC handshake; not a stealer, a game-cheat injector (unclear / PUA); ST-12 medium: unsigned 155 MB image from Temp (rule intent met)",
+      "rule": "ST-12"
+    },
+    {
+      "max_severity": "high",
+      "note": "X-01: Xeno Roblox executor (Electron, unpacked to Temp): own safeStorage key, pastebin config, QUIC handshake; not a stealer, a game-cheat injector (unclear / PUA)",
+      "rule": "ST-14"
+    }
+  ],
+  "strict": true
+}

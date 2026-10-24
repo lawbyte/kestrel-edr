@@ -1,0 +1,21 @@
+{
+  "must_alert": [
+    "RW-06"
+  ],
+  "min_severity": "critical",
+  "family": "Ransomware (write temp, rename over original)",
+  "category": "ransomware",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "RW-06 'files the process created itself never count'"
+  ],
+  "sources": [
+    "https://www.sentinelone.com/labs/crimeware-trends-ransomware-developers-turn-to-intermittent-encryption-to-evade-detection/",
+    "https://www.ic3.gov/CSA/2025/250604.pdf",
+    "https://www.trendmicro.com/en/research/25/i/lockbit-5-targets-windows-linux-esxi.html"
+  ],
+  "notes": "Encrypted copy written to a new temp file in the same folder, then MoveFileEx(REPLACE_EXISTING) over the original: the overwritten originals appear as rename targets, the writes land in self-created files (new_files), no extension change.",
+  "known_gap": "self-created temp files renamed over the originals are not counted as pre-existing files"
+}

@@ -22,7 +22,7 @@
 //!
 //! It is **not** a general "never kill" list: every rule still responds to
 //! these processes (a global exemption keyed on signature + path was tried
-//! and withdrawn after hostile review — Electron hosts run arbitrary JS,
+//! and withdrawn after hostile review â€” Electron hosts run arbitrary JS,
 //! per-user folders are writable, injected browsers would survive; see
 //! `docs/DECISIONS.md`).
 //!
@@ -223,12 +223,12 @@ pub const KNOWN_APPS: &[KnownApp] = &[
 /// Soak 2026-10-21 (ST-01/ST-04 on Chrome's `os_update_handler.exe`): the
 /// browser's own **install tree** under Program Files, per [`KNOWN_APPS`]
 /// browser name: (image path patterns relative to `\program files` /
-/// `\program files (x86)`, `**` = any depth; store labels it owns — the
+/// `\program files (x86)`, `**` = any depth; store labels it owns â€” the
 /// `SensitiveStore::app` of [`crate::paths`], exact or followed by a space,
 /// e.g. "Chrome" owns "Chrome Beta" but not "Chromium").
 /// A validly signed image of that vendor anywhere in this tree (the browser
 /// itself, `elevation_service.exe`, `os_update_handler.exe`,
-/// `chrome_proxy.exe`, `identity_helper.exe`, `msedgewebview2.exe`, …) is
+/// `chrome_proxy.exe`, `identity_helper.exe`, `msedgewebview2.exe`, â€¦) is
 /// an owner of that browser's own stores, never of another browser's.
 pub const BROWSER_INSTALL_TREES: &[(&str, &[&str], &[&str])] = &[
     (
@@ -273,7 +273,7 @@ pub const BROWSER_INSTALL_TREES: &[(&str, &[&str], &[&str])] = &[
 
 /// Driveless rest of `image` below `\program files` / `\program files (x86)`
 /// on the system volume (`None` elsewhere, or with a `..` component).
-fn program_files_rest(image: &str, system_drive: char) -> Option<String> {
+pub(crate) fn program_files_rest(image: &str, system_drive: char) -> Option<String> {
     if PathClass::of_with_system_drive(image, system_drive) != PathClass::ProgramFiles {
         return None;
     }
@@ -332,10 +332,20 @@ pub fn browser_store_owner(
 /// **Windows token broker (WAM) SSO cache** is a WAM client, not a thief.
 /// Only that store; never a LOLBin / script host; never an instance that
 /// runs a script (`.js` / `.mjs` / `.cjs` argument, `cli.js`, `--inspect` / `--inspect-brk`
-/// — the `ELECTRON_RUN_AS_NODE` pattern, whose environment variable the
+/// â€” the `ELECTRON_RUN_AS_NODE` pattern, whose environment variable the
 /// sensor cannot see) or carries remote-control switches.
-pub fn wam_client_reader(p: &ProcessInfo, store_app: &str, system_drive: char) -> bool {
-    if store_app != "Windows token broker"
+pub fn wam_client_reader(
+    p: &ProcessInfo,
+    store_app: &str,
+    system_drive: char,
+    tampered: bool,
+) -> bool {
+    // Fix round 2026-10-25 (corpus `evasion_wam_to_attacker_onedrive_graph`,
+    // `evasion_office_xll_wam_raw_ip`): an injected or side-loaded client
+    // (remote thread into ms-teams.exe, an unsigned XLL in EXCEL.EXE) is not
+    // a WAM client any more.
+    if tampered
+        || store_app != "Windows token broker"
         || p.signed != SignatureState::Valid
         || !p.signer.as_deref().is_some_and(|s| {
             WAM_CLIENT_SIGNERS
@@ -400,6 +410,149 @@ const ELECTRON_HOSTS: &[&str] = &[
     "postman.exe",
     "githubdesktop.exe",
 ];
+
+/// Review of the 1.1.7 integration (2026-10-25, M3): Electron applications
+/// that **own** a credential store (messengers, wallets, password managers).
+/// A genuine, signed copy can still run attacker JavaScript as plain Node
+/// (`ELECTRON_RUN_AS_NODE=1 Discord.exe C:\x\s.js`), and the environment
+/// variable never reaches the sensor (a process start carries image,
+/// command line, user, integrity, signature and parent only), so owner
+/// status needs a plain launch ([`electron_runs_foreign_code`]) and a
+/// trusted launcher (the engine's parent check).
+const ELECTRON_OWNERS: &[&str] = &[
+    "discord.exe",
+    "discordptb.exe",
+    "discordcanary.exe",
+    "exodus.exe",
+    "slack.exe",
+    "ledger live.exe",
+    "ledger wallet.exe",
+    "bitwarden.exe",
+    "1password.exe",
+    "signal.exe",
+    "element.exe",
+    "atomic wallet.exe",
+    "guarda.exe",
+    "trezor suite.exe",
+    "keeweb.exe",
+    "teams.exe",
+    "skype.exe",
+    "whatsapp.exe",
+    "mailspring.exe",
+    "jaxx liberty.exe",
+    "binance.exe",
+];
+
+/// Is the (lower-case) image file name an Electron application
+/// ([`ELECTRON_OWNERS`] or the developer / Microsoft Electron hosts)?
+pub fn is_electron_image(name_lower: &str) -> bool {
+    ELECTRON_OWNERS.contains(&name_lower) || ELECTRON_HOSTS.contains(&name_lower)
+}
+
+/// Is the (lower-case) image file name a store-owning Electron application
+/// ([`ELECTRON_OWNERS`]: messengers, wallets, password managers)?
+pub fn is_electron_owner_image(name_lower: &str) -> bool {
+    ELECTRON_OWNERS.contains(&name_lower)
+}
+
+/// A positional argument that is a protocol activation (`discord://…`,
+/// `slack://…`), not a file Node could run. `file:` URLs are files.
+fn is_protocol_activation(arg: &str) -> bool {
+    let a = arg.trim().to_ascii_lowercase();
+    a.contains("://") && !a.starts_with("file:")
+}
+
+/// Squirrel.Windows launcher switches whose value is the next token
+/// (`Discord.exe --processStart Discord.exe --process-start-args
+/// "--start-inactive"`, the stub every Squirrel app is started through).
+const SQUIRREL_VALUE_SWITCHES: &[&str] =
+    &["processstart", "processstartandwait", "process-start-args"];
+
+/// Positional arguments of an Electron owner's command line: like
+/// [`positional_args`], minus the values of [`SQUIRREL_VALUE_SWITCHES`],
+/// protocol activations and the relaunch target of Electron's relauncher
+/// (`Discord.exe --type=relauncher --no-sandbox --- "C:\…\Discord.exe"`,
+/// owner's PC replay 2026-10: the app restarting itself after an update;
+/// only the token right after `---` naming the same image is skipped).
+fn owner_positional_args(name_lower: &str, cmdline: &str) -> Vec<String> {
+    let t = cmdline.trim();
+    let rest = if let Some(r) = t.strip_prefix('"') {
+        r.split_once('"').map(|x| x.1).unwrap_or("")
+    } else {
+        t.split_once(char::is_whitespace).map(|x| x.1).unwrap_or("")
+    };
+    let mut tokens: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut any = false;
+    for ch in rest.chars().chain(std::iter::once(' ')) {
+        match ch {
+            '"' => {
+                quoted = !quoted;
+                any = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if any || !cur.is_empty() {
+                    tokens.push(std::mem::take(&mut cur));
+                }
+                any = false;
+            }
+            c => cur.push(c),
+        }
+    }
+    let mut out = Vec::new();
+    let mut skip_next = false;
+    let mut relaunch_target = false;
+    for tok in tokens {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if std::mem::take(&mut relaunch_target) {
+            let file = tok.rsplit(['\\', '/']).next().unwrap_or("");
+            if file.eq_ignore_ascii_case(name_lower) {
+                continue;
+            }
+        }
+        if tok == "---" {
+            relaunch_target = true;
+            continue;
+        }
+        if tok.starts_with('-') || tok.starts_with('/') {
+            let key = tok.trim_start_matches(['-', '/']).to_ascii_lowercase();
+            skip_next = !key.contains('=') && SQUIRREL_VALUE_SWITCHES.contains(&key.as_str());
+            continue;
+        }
+        if !tok.is_empty() && !is_protocol_activation(&tok) {
+            out.push(tok);
+        }
+    }
+    out
+}
+
+/// Review 1.1.7 M3: does the command line of the Electron image `name_lower`
+/// look like the app running someone else's code rather than itself?
+/// Every Electron image: a script argument ([`runs_script`]), an eval /
+/// print / require switch ([`has_eval_switch`]) or an inspector /
+/// remote-control switch ([`is_remote_controlled`]). Store-owning apps
+/// ([`ELECTRON_OWNERS`]) also: any positional argument other than a
+/// protocol activation or a Squirrel launcher value (Node runs whatever
+/// file it is given, with or without a `.js` extension). Developer hosts
+/// (VS Code and friends) are not held to the positional rule: their own
+/// extension hosts run as Node on bundled files with positional arguments
+/// (`Code.exe "…\serverWorkerMain" --node-ipc`). Chromium child processes
+/// (`--type=renderer --user-data-dir="…"`) and `--start-minimized` style
+/// switches are plain. Non-Electron images: always `false`.
+pub fn electron_runs_foreign_code(name_lower: &str, cmdline: &str) -> bool {
+    if !is_electron_image(name_lower) {
+        return false;
+    }
+    runs_script(cmdline)
+        || has_eval_switch(cmdline)
+        || is_remote_controlled(cmdline)
+        || (is_electron_owner_image(name_lower)
+            && !owner_positional_args(name_lower, cmdline).is_empty())
+}
 
 /// Owner's PC 2026-10-22 (Docker Desktop killed by ST-04): store labels
 /// ([`crate::paths`] `SensitiveStore::app`) of **developer-tool credential
@@ -507,8 +660,309 @@ pub fn dev_tool_reader(
     system_drive: char,
     tampered: bool,
 ) -> bool {
-    DEV_TOOL_STORES.contains(&store_app)
-        && signed_program_files_app(p, system_drive, tampered).is_some()
+    if !DEV_TOOL_STORES.contains(&store_app) {
+        return false;
+    }
+    // Fix round 2026-10-25 (corpus `evasion_trojanised_signed_devtool_cloud_creds`):
+    // only the stores' own tool publishers ([`DEV_TOOL_PUBLISHERS`], exact
+    // signer), not any validly signed Program Files image.
+    let Some(publisher) = dev_tool_publisher(p.signer.as_deref()) else {
+        return false;
+    };
+    if !publisher.stores.contains(&store_app) {
+        return false;
+    }
+    let name = crate::paths::file_name(&p.image).to_ascii_lowercase();
+    // Red-team round 2 (2026-10-25): a publisher that also signs
+    // document / macro hosts (Microsoft: Office) is a developer tool only
+    // for its developer-tool images.
+    if OFFICE_MACRO_HOSTS.contains(&name.as_str())
+        || (!publisher.images.is_empty()
+            && !publisher
+                .images
+                .iter()
+                .any(|i| crate::paths::glob_match(i, &name)))
+    {
+        return false;
+    }
+    // FP-02: native CLI plugins (Go binaries) are judged without the
+    // runtime eval switches (`docker-buildx bake --file -` reads stdin, it
+    // does not evaluate code); Electron hosts keep the strict test.
+    if ELECTRON_HOSTS.contains(&name.as_str()) {
+        signed_program_files_app(p, system_drive, tampered).is_some()
+    } else {
+        signed_program_files_native(p, system_drive, tampered) && !has_inline_code(&p.cmdline)
+    }
+}
+
+/// Developer-tool publishers: exact signer subject, the [`DEV_TOOL_STORES`]
+/// their tools read, and their own service endpoints (DNS suffixes).
+/// Subjects from `docs/research/notes/publisher-signers.md`.
+#[derive(Debug, Clone, Copy)]
+pub struct DevToolPublisher {
+    pub signers: &'static [&'static str],
+    pub stores: &'static [&'static str],
+    pub endpoints: &'static [&'static str],
+    /// Image names (lower-case, `*` glob) of the publisher's developer
+    /// tools; empty = every non-interpreter image of the signer.
+    pub images: &'static [&'static str],
+}
+
+/// Office / document hosts: never developer tools (macros, add-ins).
+pub const OFFICE_MACRO_HOSTS: &[&str] = &[
+    "winword.exe",
+    "excel.exe",
+    "powerpnt.exe",
+    "outlook.exe",
+    "olk.exe",
+    "msaccess.exe",
+    "mspub.exe",
+    "visio.exe",
+    "onenote.exe",
+    "winproj.exe",
+];
+
+pub const DEV_TOOL_PUBLISHERS: &[DevToolPublisher] = &[
+    DevToolPublisher {
+        signers: &["docker inc"],
+        stores: &["Docker", "Kubernetes"],
+        endpoints: &["docker.io", "docker.com"],
+        images: &[],
+    },
+    DevToolPublisher {
+        signers: &["microsoft corporation"],
+        stores: &["Azure CLI", "Kubernetes", "Docker"],
+        endpoints: &[
+            "azure.com",
+            "azure.net",
+            "azurecr.io",
+            "login.microsoftonline.com",
+            "login.windows.net",
+            "management.core.windows.net",
+            "mcr.microsoft.com",
+            "events.data.microsoft.com",
+        ],
+        images: &[
+            "az.exe",
+            "azcopy.exe",
+            "azd.exe",
+            "func.exe",
+            "kubectl.exe",
+            "kubelogin.exe",
+            "devenv.exe",
+            "azuredatastudio.exe",
+            "servicehub.*.exe",
+            "msbuild.exe",
+            "docker*.exe",
+            "bicep.exe",
+        ],
+    },
+    DevToolPublisher {
+        signers: &["amazon.com services llc", "amazon web services, inc."],
+        stores: &["AWS"],
+        endpoints: &["amazonaws.com", "aws.amazon.com", "amazonaws.com.cn"],
+        images: &[],
+    },
+    DevToolPublisher {
+        signers: &["google llc"],
+        stores: &["Google Cloud SDK", "Kubernetes"],
+        endpoints: &["googleapis.com", "accounts.google.com", "gcr.io", "pkg.dev"],
+        images: &[],
+    },
+    DevToolPublisher {
+        signers: &["hashicorp, inc."],
+        stores: &[
+            "AWS",
+            "Azure CLI",
+            "Google Cloud SDK",
+            "Kubernetes",
+            "Docker",
+        ],
+        endpoints: &["hashicorp.com", "terraform.io"],
+        images: &[],
+    },
+    // Rancher Desktop (unverified subject: SUSE's published signing name).
+    DevToolPublisher {
+        signers: &["suse llc"],
+        stores: &["Kubernetes", "Docker"],
+        endpoints: &["rancher.io", "rancherdesktop.io", "suse.com"],
+        images: &[],
+    },
+    DevToolPublisher {
+        signers: &["jetbrains s.r.o."],
+        stores: &[
+            "AWS",
+            "Azure CLI",
+            "Google Cloud SDK",
+            "Kubernetes",
+            "Docker",
+        ],
+        endpoints: &["jetbrains.com"],
+        images: &[],
+    },
+];
+
+/// The developer-tool publisher of `signer` (exact subject), if any.
+pub fn dev_tool_publisher(signer: Option<&str>) -> Option<&'static DevToolPublisher> {
+    DEV_TOOL_PUBLISHERS
+        .iter()
+        .find(|d| crate::identity::signer_in(d.signers, signer))
+}
+
+/// Is `host` one of the developer-tool publisher's own endpoints?
+pub fn dev_tool_endpoint(signer: Option<&str>, host: &str) -> bool {
+    let h = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if h.is_empty() || h.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    // Red-team round 2: customer-named Azure namespaces (VMs, web apps,
+    // vaults, registries, storage) are nobody's developer-tool endpoint.
+    if MICROSOFT_CUSTOMER_NAMESPACES
+        .iter()
+        .chain(MICROSOFT_FIRST_PARTY_EXCLUDED.iter())
+        .any(|s| crate::util::host_matches(&h, s))
+    {
+        return false;
+    }
+    dev_tool_publisher(signer)
+        .is_some_and(|d| d.endpoints.iter().any(|s| crate::util::host_matches(&h, s)))
+}
+
+/// [`has_eval_switch`] without the bare `-` (FP-02: `docker-buildx bake
+/// --file -` reads its bake file from stdin; a native tool does not
+/// evaluate stdin as code), plus the inspector switches.
+fn has_inline_code(cmdline: &str) -> bool {
+    let c = cmdline.to_ascii_lowercase();
+    c.split(|ch: char| ch.is_whitespace() || ch == '"')
+        .any(|t| {
+            matches!(
+                t.split('=').next().unwrap_or(t),
+                "-e" | "--eval"
+                    | "-p"
+                    | "--print"
+                    | "/e"
+                    | "/p"
+                    | "-pe"
+                    | "-r"
+                    | "--require"
+                    | "--inspect"
+                    | "--inspect-brk"
+            )
+        })
+}
+
+/// Fix round 2026-10-25: Microsoft first-party service domains a Program
+/// Files Microsoft WAM client (Office, OneDrive, Teams, Widgets) talks to
+/// after reading its token cache. Broader than [`MICROSOFT_ENDPOINTS`]
+/// (SharePoint, Graph, Outlook are what Office *does*): a raw IP, an
+/// exfiltration service or any other host from such a reader escalates.
+pub const MICROSOFT_FIRST_PARTY: &[&str] = &[
+    "microsoft.com",
+    "microsoftonline.com",
+    "office.com",
+    "office.net",
+    "office365.com",
+    "sharepoint.com",
+    "live.com",
+    "live.net",
+    "outlook.com",
+    "onedrive.com",
+    "1drv.com",
+    "msauth.net",
+    "msftauth.net",
+    "msftidentity.com",
+    "windows.net",
+    "windows.com",
+    "azure.com",
+    "azureedge.net",
+    "msedge.net",
+    "bing.com",
+    "msn.com",
+    "skype.com",
+    "xboxlive.com",
+    "xbox.com",
+    "teams.cloud.microsoft",
+    "cloud.microsoft",
+    "static.microsoft",
+    "microsoftapp.net",
+    "svc.ms",
+    "aka.ms",
+    "visualstudio.com",
+    "vscode-cdn.net",
+    "exp-tas.com",
+];
+
+/// Is `host` a Microsoft first-party domain ([`MICROSOFT_FIRST_PARTY`]),
+/// minus the namespaces where any customer owns the name
+/// ([`MICROSOFT_CUSTOMER_NAMESPACES`] and [`MICROSOFT_FIRST_PARTY_EXCLUDED`];
+/// red-team round 2 2026-10-25: a macro uploading tokens to the attacker's
+/// own `*.blob.core.windows.net` account)?
+pub fn microsoft_first_party(host: &str) -> bool {
+    let h = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if h.is_empty() || h.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    MICROSOFT_FIRST_PARTY
+        .iter()
+        .any(|s| crate::util::host_matches(&h, s))
+        && !MICROSOFT_CUSTOMER_NAMESPACES
+            .iter()
+            .chain(MICROSOFT_FIRST_PARTY_EXCLUDED.iter())
+            .any(|s| crate::util::host_matches(&h, s))
+}
+
+/// Customer-named namespaces under [`MICROSOFT_FIRST_PARTY`] suffixes beyond
+/// [`MICROSOFT_CUSTOMER_NAMESPACES`]: web apps, static sites, CDN endpoints,
+/// Front Door, API management, key vaults, container registries, event hubs.
+pub const MICROSOFT_FIRST_PARTY_EXCLUDED: &[&str] = &[
+    "azurewebsites.net",
+    "azurestaticapps.net",
+    "azureedge.net",
+    "azurefd.net",
+    "azure-api.net",
+    "vault.azure.net",
+    "azurecr.io",
+    "trafficmanager.net",
+    "cloudapp.net",
+    "web.core.windows.net",
+    "blob.core.windows.net",
+    "queue.core.windows.net",
+    "table.core.windows.net",
+    "file.core.windows.net",
+    "dfs.core.windows.net",
+];
+
+/// FP-03 (fix round 2026-10-25): GitHub sign-in from VS Code. Only the web
+/// sign-in host itself (`github.com`, OAuth / device flow pages) is a
+/// sign-in endpoint. `api.github.com` is also called by the sign-in (the
+/// `user` endpoint) but can create gists, so it is never Low;
+/// `gist.github.com`, `uploads.github.com` and `*.githubusercontent.com`
+/// are content channels.
+pub fn github_signin_host(host: &str) -> bool {
+    host.trim()
+        .trim_end_matches('.')
+        .eq_ignore_ascii_case("github.com")
+}
+
+/// Azure Application Insights ingestion hosts used by VS Code extension
+/// telemetry (`*.in.applicationinsights.azure.com`,
+/// `dc.services.visualstudio.com`). Anyone can own an ingestion key, so a
+/// send there after a token read is High Audit, never Low.
+pub fn extension_telemetry_host(host: &str) -> bool {
+    let h = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    crate::util::host_matches(&h, "in.applicationinsights.azure.com")
+        || h == "dc.services.visualstudio.com"
+}
+
+/// GitHub Copilot's own service endpoints used by VS Code after a WAM read
+/// (owner export 2026-10-25): the Copilot API (`*.githubcopilot.com`,
+/// operated by GitHub, no user-hostable content) and its telemetry host
+/// `copilot-telemetry.githubusercontent.com` (exact name; other
+/// `githubusercontent.com` hosts serve user content and stay out).
+pub fn github_copilot_host(host: &str) -> bool {
+    let h = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    crate::util::host_matches(&h, "githubcopilot.com")
+        || h == "copilot-telemetry.githubusercontent.com"
 }
 
 /// Owner's PC 2026-10-22: ST-04 killed Docker Desktop's backend (the
@@ -883,7 +1337,7 @@ pub fn is_remote_controlled(cmdline: &str) -> bool {
 }
 
 /// The table entry whose image name *and* install folder match `image`
-/// (location only — no signature check). Program Files on the system
+/// (location only â€” no signature check). Program Files on the system
 /// volume only.
 pub fn app_at_location(image: &str, system_drive: char) -> Option<&'static KnownApp> {
     if PathClass::of_with_system_drive(image, system_drive) != PathClass::ProgramFiles {
@@ -1362,6 +1816,70 @@ mod tests {
         }
     }
 
+    /// Review of the 1.1.7 integration, M3.
+    #[test]
+    fn electron_foreign_code_m3() {
+        // Store owners: positional arguments count (Node runs any file).
+        assert!(electron_runs_foreign_code(
+            "slack.exe",
+            r#""C:\Program Files\Slack\slack.exe" C:\x\a"#
+        ));
+        assert!(electron_runs_foreign_code(
+            "exodus.exe",
+            r#"Exodus.exe "C:\x y\s.cjs""#
+        ));
+        assert!(electron_runs_foreign_code(
+            "bitwarden.exe",
+            "Bitwarden.exe --require=C:\\x\\a"
+        ));
+        assert!(electron_runs_foreign_code(
+            "1password.exe",
+            "1Password.exe --remote-debugging-port=9222"
+        ));
+        assert!(!electron_runs_foreign_code(
+            "slack.exe",
+            r#""C:\Program Files\Slack\slack.exe" --startup"#
+        ));
+        assert!(!electron_runs_foreign_code(
+            "slack.exe",
+            r#"slack.exe "slack://open?team=T1""#
+        ));
+        assert!(!electron_runs_foreign_code(
+            "discord.exe",
+            r#"Discord.exe --processStart Discord.exe --process-start-args "--start-inactive""#
+        ));
+        // Electron's relauncher (owner's PC replay 2026-10).
+        assert!(!electron_runs_foreign_code(
+            "discord.exe",
+            r#""C:\Users\a\AppData\Local\Discord\app-1.0.9265\Discord.exe" --type=relauncher --no-sandbox --- "C:\Users\a\AppData\Local\Discord\app-1.0.9265\Discord.exe""#
+        ));
+        assert!(electron_runs_foreign_code(
+            "discord.exe",
+            r#"Discord.exe --type=relauncher --- "C:\x\Discord.exe" C:\x\s"#
+        ));
+        assert!(electron_runs_foreign_code(
+            "discord.exe",
+            r#"Discord.exe --type=relauncher --- C:\x\node.exe"#
+        ));
+        // Developer hosts: only script / eval / inspector switches.
+        assert!(!electron_runs_foreign_code(
+            "code.exe",
+            r#""C:\Users\a\AppData\Local\Programs\Microsoft VS Code\Code.exe" "c:\Users\a\AppData\Local\Programs\Microsoft VS Code\1b6a188127\resources\app\extensions\x\dist\serverWorkerMain" --node-ipc"#
+        ));
+        assert!(electron_runs_foreign_code(
+            "code.exe",
+            r#"Code.exe C:\x\s.js"#
+        ));
+        // Not Electron: never.
+        assert!(!electron_runs_foreign_code(
+            "keepass.exe",
+            r#"KeePass.exe C:\db.kdbx"#
+        ));
+        assert!(is_electron_owner_image("discord.exe"));
+        assert!(!is_electron_owner_image("code.exe"));
+        assert!(is_electron_image("code.exe"));
+    }
+
     #[test]
     fn remote_control_switches_with_every_prefix() {
         for c in [
@@ -1483,9 +2001,27 @@ mod tests {
         const BACKEND: &str = r"C:\Program Files\Docker\Docker\resources\com.docker.backend.exe";
         let docker = Some("Docker Inc");
         let build = proc_(BUILD, "com.docker.build.exe --log-no-timestamp", docker);
+        // Fix round 2026-10-25: only the publisher's own stores.
         for store in DEV_TOOL_STORES {
-            assert!(dev_tool_reader(&build, store, 'c', false), "{store}");
+            let own = matches!(*store, "Docker" | "Kubernetes");
+            assert_eq!(dev_tool_reader(&build, store, 'c', false), own, "{store}");
         }
+        let fake = proc_(
+            r"C:\Program Files\KubeDash\kubedash.exe",
+            "kubedash.exe --background",
+            Some("Nimbus Devtools OU"),
+        );
+        assert!(!dev_tool_reader(&fake, "Kubernetes", 'c', false));
+        // FP-02: `docker-buildx bake --file -` (stdin) is not an eval switch.
+        let bx = proc_(
+            r"C:\Program Files\Docker\cli-plugins\docker-buildx.exe",
+            "docker-buildx.exe bake --file - --progress rawjson",
+            docker,
+        );
+        assert!(dev_tool_reader(&bx, "Docker", 'c', false));
+        assert!(dev_tool_endpoint(docker, "auth.docker.io"));
+        assert!(!dev_tool_endpoint(docker, "198.51.100.1"));
+        assert!(!dev_tool_endpoint(docker, "evil.example"));
         assert!(
             !dev_tool_reader(&build, "Kubernetes", 'c', true),
             "tampered"

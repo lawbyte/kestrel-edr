@@ -1,0 +1,16 @@
+{
+  "must_alert": [
+    "PS-08"
+  ],
+  "min_severity": "critical",
+  "family": "WMI permanent event subscription",
+  "category": "persistence",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://attack.mitre.org/techniques/T1546/003/",
+    "https://www.cybertriage.com/blog/how-to-investigate-malware-wmi-event-consumers-2025/"
+  ],
+  "notes": "CommandLineEventConsumer bound to a periodic filter running a PowerShell cradle."
+}

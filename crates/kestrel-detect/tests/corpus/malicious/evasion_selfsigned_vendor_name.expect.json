@@ -1,0 +1,21 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic (self-signed vendor look-alike)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "signer-name allow-lists (signer_ok, BENIGN_READERS signer substring)"
+  ],
+  "sources": [
+    "https://securityaffairs.com/183532/",
+    "https://bleepingcomputer.com/news/security/fake-enterprise-vpn-downloads-used-to-steal-company-credentials",
+    "https://www.securityweek.com/infostealer-malware-delivered-in-emeditor-supply-chain-attack/"
+  ],
+  "notes": "Self-signed certificate whose subject CN is 'Google LLC', binary named and placed like Google Update in %LOCALAPPDATA%. Signature state Invalid must never satisfy a signer allow-list."
+}

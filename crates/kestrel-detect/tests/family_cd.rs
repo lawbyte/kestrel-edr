@@ -1010,3 +1010,382 @@ fn state_is_bounded_and_engine_survives_floods() {
     let out = e.process(&create(400_300, "z", 990, r"C:\Users\Public\z.dmp"));
     alert_for(&out, "CD-04", "z");
 }
+
+// ---------------------------------------------------------------- corpus finding 10, FP-09 / FP-11 / FP-12 (2026-10-25)
+
+/// (rule, severity) of every CD alert on `guid`.
+fn cd_on(out: &[Output], guid: &str) -> Vec<(String, Severity)> {
+    cd_alerts(out)
+        .iter()
+        .filter(|d| d.alert.process.guid.0 == guid)
+        .map(|d| (d.alert.rule_id.clone(), d.alert.severity))
+        .collect()
+}
+
+#[test]
+fn fam2_cd_wbadmin_ntds_and_hives() {
+    // Corpus finding 10 (Akira): wbadmin start backup -include: NTDS.dit and
+    // the SYSTEM / SECURITY hives.
+    for out in [
+        audit("fam2_cd_wbadmin_ntds"),
+        protect("fam2_cd_wbadmin_ntds"),
+        run("fam2_cd_wbadmin_ntds", Policy::default()),
+    ] {
+        let wb1 = cd_on(&out, "wb-1");
+        assert!(
+            wb1.contains(&("CD-11".into(), Severity::High))
+                && wb1.contains(&("CD-10".into(), Severity::High)),
+            "{}",
+            dump(&out)
+        );
+        assert_eq!(
+            cd_on(&out, "wb-2"),
+            vec![("CD-10".to_string(), Severity::High)],
+            "{}",
+            dump(&out)
+        );
+        assert_eq!(
+            cd_on(&out, "wb-3"),
+            vec![("CD-11".to_string(), Severity::High)],
+            "{}",
+            dump(&out)
+        );
+    }
+    // Protect: CD-11 kills wbadmin; the hive variant alerts only.
+    let out = protect("fam2_cd_wbadmin_ntds");
+    assert_eq!(
+        killed(&alert_for(&out, "CD-11", "wb-1").actions),
+        vec!["wb-1"]
+    );
+    assert!(alert_for(&out, "CD-10", "wb-2").actions.is_empty());
+    // Default policy: CD-11 stays Audit.
+    let out = run("fam2_cd_wbadmin_ntds", Policy::default());
+    assert!(alert_for(&out, "CD-11", "wb-1").actions.is_empty());
+}
+
+#[test]
+fn fam2_cd_wbadmin_and_ntdsutil_benign_are_silent() {
+    for out in [
+        audit("fam2_cd_wbadmin_benign"),
+        protect("fam2_cd_wbadmin_benign"),
+    ] {
+        assert!(cd_ids(&out).is_empty(), "{}", dump(&out));
+    }
+}
+
+#[test]
+fn fam2_cd_ntdsutil_ifm_spellings() {
+    for out in [
+        audit("fam2_cd_ntdsutil_ifm"),
+        protect("fam2_cd_ntdsutil_ifm"),
+    ] {
+        for g in ["ifm-1", "ifm-2", "ifm-3"] {
+            assert_eq!(
+                cd_on(&out, g),
+                vec![("CD-11".to_string(), Severity::High)],
+                "{g}: {}",
+                dump(&out)
+            );
+        }
+    }
+}
+
+#[test]
+fn fam2_cd02_text_tools_with_lsass_in_a_pattern_are_silent() {
+    // FP-09: grep / rg / findstr / git grep / a tool whose pattern merely
+    // contains "lsass".
+    for out in [
+        audit("fam2_cd_text_tools_benign"),
+        protect("fam2_cd_text_tools_benign"),
+        run("fam2_cd_text_tools_benign", Policy::default()),
+    ] {
+        assert!(cd_ids(&out).is_empty(), "{}", dump(&out));
+    }
+}
+
+#[test]
+fn fam2_cd02_needs_dump_flag_and_lsass_target_argument() {
+    // A procdump renamed grep.exe (-ma), an unsigned clone (-r, path to
+    // lsass.exe) and a PID target (-mm 624) are still CD-02 and killed.
+    let out = protect("fam2_cd_procdump_target_args");
+    for g in ["fakegrep-1", "clone-1", "pid-1"] {
+        let d = alert_for(&out, "CD-02", g);
+        assert_eq!(d.alert.severity, Severity::Critical, "{g}");
+        assert_eq!(killed(&d.actions), vec![g.to_string()]);
+    }
+    let out = audit("fam2_cd_procdump_target_args");
+    assert_eq!(cd_ids(&out), ids(&["CD-02"]), "{}", dump(&out));
+    // The existing renamed-procdump fixture still fires.
+    assert!(cd_ids(&protect("cd_procdump_renamed")).contains("CD-02"));
+}
+
+/// Roblox-like process start with explicit user, signature and signer.
+fn roblox_start(
+    ts: i64,
+    guid: &str,
+    pid: u32,
+    image: &str,
+    user: &str,
+    signed: SignatureState,
+    signer: Option<&str>,
+) -> Event {
+    ev(
+        ts,
+        guid,
+        pid,
+        EventData::ProcessStart(ProcessStart {
+            ppid: 4000,
+            parent_guid: Some(ProcessGuid("explorer-1".into())),
+            image: image.into(),
+            cmdline: format!("\"{image}\""),
+            user: Some(user.into()),
+            signed,
+            signer: signer.map(Into::into),
+            ..Default::default()
+        }),
+    )
+}
+
+const ROBLOX: &str =
+    r"C:\Users\alice\AppData\Local\Roblox\Versions\version-9ac8595712b447a7\RobloxPlayerBeta.exe";
+const DENIED: u32 = 0xC000_0022;
+
+#[test]
+fn fam2_cd06_genuine_roblox_refused_probe_is_low_audit() {
+    // FP-11: the owner-PC sequence (0x40A on LSASS, refused).
+    for out in [
+        run("fam2_cd_roblox_refused", Policy::default()),
+        protect("fam2_cd_roblox_refused"),
+    ] {
+        assert_eq!(
+            cd_on(&out, "roblox-1"),
+            vec![("CD-06".to_string(), Severity::Low)],
+            "{}",
+            dump(&out)
+        );
+        let d = alert_for(&out, "CD-06", "roblox-1");
+        assert_eq!(d.alert.mode, RuleMode::Audit);
+        assert!(all_actions(&out).is_empty(), "{:?}", all_actions(&out));
+    }
+    // Per-machine install under Program Files (x86): also Low.
+    let mut e = with_lsass(policy_all(RuleMode::Protect));
+    e.process(&roblox_start(
+        1_000,
+        "rb-pf",
+        4800,
+        r"C:\Program Files (x86)\Roblox\Versions\version-0123abcd\RobloxPlayerBeta.exe",
+        r"CORP\alice",
+        SignatureState::Valid,
+        Some("Roblox Corporation"),
+    ));
+    let out = e.process(&open_lsass(1_100, "rb-pf", 4800, 0x40A, DENIED));
+    assert_eq!(
+        cd_on(&out, "rb-pf"),
+        vec![("CD-06".to_string(), Severity::Low)]
+    );
+}
+
+/// (guid, image, user, signature, signer, requested mask).
+type ProbeCase<'a> = (
+    &'a str,
+    &'a str,
+    &'a str,
+    SignatureState,
+    Option<&'a str>,
+    u32,
+);
+
+#[test]
+fn fam2_cd06_roblox_lookalikes_and_dangerous_masks_stay_high() {
+    let cases: &[ProbeCase] = &[
+        // dangerous masks from the genuine client
+        (
+            "m-read",
+            ROBLOX,
+            r"CORP\alice",
+            SignatureState::Valid,
+            Some("Roblox Corporation"),
+            0x1410,
+        ),
+        (
+            "m-write",
+            ROBLOX,
+            r"CORP\alice",
+            SignatureState::Valid,
+            Some("Roblox Corporation"),
+            0x40A | 0x20,
+        ),
+        (
+            "m-dup",
+            ROBLOX,
+            r"CORP\alice",
+            SignatureState::Valid,
+            Some("Roblox Corporation"),
+            0x440,
+        ),
+        (
+            "m-full",
+            ROBLOX,
+            r"CORP\alice",
+            SignatureState::Valid,
+            Some("Roblox Corporation"),
+            0x1F_FFFF,
+        ),
+        (
+            "m-max",
+            ROBLOX,
+            r"CORP\alice",
+            SignatureState::Valid,
+            Some("Roblox Corporation"),
+            0x0200_000A,
+        ),
+        // wrong identity
+        (
+            "unsigned",
+            ROBLOX,
+            r"CORP\alice",
+            SignatureState::Unsigned,
+            None,
+            0x40A,
+        ),
+        (
+            "invalid",
+            ROBLOX,
+            r"CORP\alice",
+            SignatureState::Invalid,
+            Some("Roblox Corporation"),
+            0x40A,
+        ),
+        (
+            "signer-ltd",
+            ROBLOX,
+            r"CORP\alice",
+            SignatureState::Valid,
+            Some("Roblox Corporation Ltd"),
+            0x40A,
+        ),
+        (
+            "signer-sub",
+            ROBLOX,
+            r"CORP\alice",
+            SignatureState::Valid,
+            Some("Not Roblox Corporation"),
+            0x40A,
+        ),
+        (
+            "signer-case",
+            ROBLOX,
+            r"CORP\alice",
+            SignatureState::Valid,
+            Some("roblox corporation"),
+            0x40A,
+        ),
+        // relocated copies
+        (
+            "temp",
+            r"C:\Users\alice\AppData\Local\Temp\RobloxPlayerBeta.exe",
+            r"CORP\alice",
+            SignatureState::Valid,
+            Some("Roblox Corporation"),
+            0x40A,
+        ),
+        (
+            "other-user",
+            r"C:\Users\bob\AppData\Local\Roblox\Versions\version-9ac8595712b447a7\RobloxPlayerBeta.exe",
+            r"CORP\alice",
+            SignatureState::Valid,
+            Some("Roblox Corporation"),
+            0x40A,
+        ),
+        (
+            "bad-version",
+            r"C:\Users\alice\AppData\Local\Roblox\Versions\version-..\RobloxPlayerBeta.exe",
+            r"CORP\alice",
+            SignatureState::Valid,
+            Some("Roblox Corporation"),
+            0x40A,
+        ),
+        (
+            "other-drive",
+            r"D:\Users\alice\AppData\Local\Roblox\Versions\version-9ac8\RobloxPlayerBeta.exe",
+            r"CORP\alice",
+            SignatureState::Valid,
+            Some("Roblox Corporation"),
+            0x40A,
+        ),
+        (
+            "renamed",
+            r"C:\Users\alice\AppData\Local\Roblox\Versions\version-9ac8\RobloxPlayer.exe",
+            r"CORP\alice",
+            SignatureState::Valid,
+            Some("Roblox Corporation"),
+            0x40A,
+        ),
+    ];
+    for (i, (g, image, user, signed, signer, mask)) in cases.iter().enumerate() {
+        let mut e = with_lsass(policy_all(RuleMode::Audit));
+        let pid = 6000 + i as u32;
+        e.process(&roblox_start(1_000, g, pid, image, user, *signed, *signer));
+        let out = e.process(&open_lsass(1_100, g, pid, *mask, DENIED));
+        assert_eq!(
+            cd_on(&out, g),
+            vec![("CD-06".to_string(), Severity::High)],
+            "{g}: {}",
+            dump(&out)
+        );
+    }
+    // A successful open by the genuine client is CD-03, not a Low CD-06.
+    let mut e = with_lsass(policy_all(RuleMode::Audit));
+    e.process(&roblox_start(
+        1_000,
+        "ok-open",
+        7100,
+        ROBLOX,
+        r"CORP\alice",
+        SignatureState::Valid,
+        Some("Roblox Corporation"),
+    ));
+    let out = e.process(&open_lsass(1_100, "ok-open", 7100, 0x40A, 0));
+    let got = cd_on(&out, "ok-open");
+    assert!(
+        got.iter().any(|(r, _)| r == "CD-03") && got.iter().all(|(r, _)| r != "CD-06"),
+        "{}",
+        dump(&out)
+    );
+}
+
+#[test]
+fn fam2_cd13_nordvpn_own_drivers_are_low() {
+    // FP-12: NordVPN (re)installing travis.sys / NDivert.sys from its
+    // versioned Program Files folders (unattributed, no signer).
+    for out in [
+        audit("fam2_cd_nordvpn_drivers"),
+        protect("fam2_cd_nordvpn_drivers"),
+    ] {
+        let alerts = cd_alerts(&out);
+        assert!(!alerts.is_empty(), "{}", dump(&out));
+        for d in alerts {
+            assert_eq!(d.alert.rule_id, "CD-13");
+            assert_eq!(d.alert.severity, Severity::Low, "{}", dump(&out));
+            assert!(d.actions.is_empty());
+        }
+    }
+}
+
+#[test]
+fn fam2_cd13_nordvpn_lookalike_drivers_stay_medium() {
+    // Wrong folder, wrong service name for the path, wrong file for the
+    // service name, `..` traversal, another drive.
+    for out in [
+        audit("fam2_cd_nordvpn_lookalike_drivers"),
+        protect("fam2_cd_nordvpn_lookalike_drivers"),
+    ] {
+        let alerts = cd_alerts(&out);
+        assert_eq!(alerts.len(), 6, "{}", dump(&out));
+        for d in alerts {
+            assert_eq!(d.alert.rule_id, "CD-13");
+            assert_eq!(d.alert.severity, Severity::Medium, "{}", dump(&out));
+            assert!(d.actions.is_empty());
+        }
+    }
+}

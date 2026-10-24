@@ -1,0 +1,21 @@
+{
+  "must_alert": [
+    "RW-01",
+    "RW-06"
+  ],
+  "min_severity": "critical",
+  "family": "Akira (SonicWall wave 2025)",
+  "category": "ransomware",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "RW-04",
+    "RW-12"
+  ],
+  "sources": [
+    "https://www.huntress.com/blog/exploitation-of-sonicwall-vpn",
+    "https://www.cisa.gov/news-events/cybersecurity-advisories/aa24-109a"
+  ],
+  "notes": "Akira (Huntress Aug 2025): w.exe -n=3 (3 % partial encryption) -dellog; shadow copies through WMI in PowerShell; .akira; notes in root and user homes only (few folders)."
+}

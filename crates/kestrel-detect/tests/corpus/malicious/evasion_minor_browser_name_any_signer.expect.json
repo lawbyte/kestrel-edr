@@ -1,0 +1,26 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic Chromium stealer (renamed to an unpinned minor-browser image name, any valid signer, in AppData)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-03",
+    "ST-14"
+  ],
+  "evasion_targets": [
+    "identity::genuine_browser / is_trusted_owner browser branch (paths.rs:1497-1504, identity.rs:~520)",
+    "BROWSER_IMAGES has 47 names with no PUBLISHERS entry (paths.rs:134-190)"
+  ],
+  "notes": "REGRESSION FIXTURE. This WAS a full, uncontained evasion when this session began (verified: with the pre-05:06 build it raised only a medium ST-12; thorium.exe signed with any cert under %LOCALAPPDATA%\\Thorium\\Application\\ was genuine_browser, owned every browser store, and on_net/on_dpapi skipped ST-03/ST-04/ST-14). A concurrent fix landed mid-session (paths.rs/identity.rs, mtime 05:06-05:07) that pins browser trust to `listed || admin_location`: an unlisted browser name in the user profile is no longer a genuine browser. With the current build this scenario is correctly detected (ST-01 medium, ST-02 critical, ST-03 high, ST-04 critical, ST-14 high; kill+quarantine+block in Protect). Kept as a guard so the 47 unpinned BROWSER_IMAGES names can never again be trusted by name+any-signer in AppData. Root list of unpinned names: chromium, yandex, whale, thorium, 360chrome, 360se, qqbrowser, sogouexplorer, ucbrowser, maxthon, slimjet, epic, avastbrowser, avgbrowser, ccleanerbrowser, torch, dragon, iridium, blisk, sidekick, duckduckgo, orbitum, amigo, kometa, sputnik, uran, chedot, nichrome, superbird, liebao, coowon, citrio, 7star, atom, iexplore, waterfox, librewolf, palemoon, basilisk, seamonkey, floorp, zen, k-meleon, icedragon, cyberfox, mercury, falkon. Added by the fix-round red team (2026-10-25); the engine detects it after the red-team fixes.",
+  "sources": [
+    "https://www.securityweek.com/infostealer-malware-delivered-in-emeditor-supply-chain-attack/",
+    "https://securityaffairs.com/183532/",
+    "https://bleepingcomputer.com/news/security/fake-enterprise-vpn-downloads-used-to-steal-company-credentials"
+  ]
+}

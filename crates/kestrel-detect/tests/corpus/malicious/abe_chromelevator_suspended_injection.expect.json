@@ -1,0 +1,20 @@
+{
+  "must_alert": [
+    "ST-07"
+  ],
+  "min_severity": "critical",
+  "family": "ChromElevator-style injection (ABE)",
+  "category": "abe",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-04"
+  ],
+  "sources": [
+    "https://github.com/xaitax/Chrome-App-Bound-Encryption-Decryption",
+    "https://specterops.io/blog/2025/08/27/dough-no-revisiting-cookie-theft/",
+    "https://specterops.io/blog/2026/08/13/chrome-devtools-protocol-cookie-theft/"
+  ],
+  "notes": "Public ABE bypass tooling: start Chrome suspended, reflectively inject a payload that calls IElevator from inside chrome.exe (path validation passes), dump to JSON files, uploader sends them."
+}

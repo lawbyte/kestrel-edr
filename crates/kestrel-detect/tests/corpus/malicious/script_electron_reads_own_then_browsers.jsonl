@@ -1,0 +1,17 @@
+{"ts": 1759999400000, "pid": 4000, "guid": "explorer", "type": "process_start", "ppid": 3900, "image": "C:\\Windows\\explorer.exe", "cmdline": "C:\\Windows\\Explorer.EXE", "user": "CORP\\alice", "integrity": "medium", "signed": "valid", "signer": "Microsoft Windows"}
+{"ts": 1760000000000, "pid": 6100, "guid": "el", "type": "process_start", "ppid": 4000, "parent_guid": "explorer", "image": "C:\\Users\\alice\\AppData\\Local\\Programs\\nebula-launcher\\Nebula Launcher.exe", "cmdline": "\"C:\\Users\\alice\\AppData\\Local\\Programs\\nebula-launcher\\Nebula Launcher.exe\"", "user": "CORP\\alice", "integrity": "medium", "signed": "unsigned", "sha256": "22fd6717eb77aaa1ee86164df31735b4c7bb5cb8114b7931ee449e98d613b407"}
+{"ts": 1760000000500, "pid": 6100, "guid": "el", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\nebula-launcher\\Local State", "op": "read"}
+{"ts": 1760000000540, "pid": 6100, "guid": "el", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Roaming\\nebula-launcher\\Network\\Cookies", "op": "read"}
+{"ts": 1760000000580, "pid": 6100, "guid": "el", "type": "dpapi_unprotect", "description": "Chromium"}
+{"ts": 1760000002580, "pid": 6100, "guid": "el", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Local State", "op": "read"}
+{"ts": 1760000002620, "pid": 6100, "guid": "el", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000002660, "pid": 6100, "guid": "el", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000002700, "pid": 6100, "guid": "el", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Local State", "op": "read"}
+{"ts": 1760000002740, "pid": 6100, "guid": "el", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000002780, "pid": 6100, "guid": "el", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000002820, "pid": 6100, "guid": "el", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\BraveSoftware\\Brave-Browser\\User Data\\Local State", "op": "read"}
+{"ts": 1760000002860, "pid": 6100, "guid": "el", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\BraveSoftware\\Brave-Browser\\User Data\\Default\\Login Data", "op": "read"}
+{"ts": 1760000002900, "pid": 6100, "guid": "el", "type": "file_access", "path": "C:\\Users\\alice\\AppData\\Local\\BraveSoftware\\Brave-Browser\\User Data\\Default\\Network\\Cookies", "op": "read"}
+{"ts": 1760000002940, "pid": 6100, "guid": "el", "type": "dpapi_unprotect", "description": "Google Chrome"}
+{"ts": 1760000003440, "pid": 6100, "guid": "el", "type": "dns_query", "qname": "telemetry.nebula-launcher.example", "answers": ["198.51.100.23"]}
+{"ts": 1760000003500, "pid": 6100, "guid": "el", "type": "net_connect", "proto": "tcp", "dst_ip": "198.51.100.23", "dst_port": 443, "src_port": 50101, "dst_host": "telemetry.nebula-launcher.example", "bytes_sent": 2400000}

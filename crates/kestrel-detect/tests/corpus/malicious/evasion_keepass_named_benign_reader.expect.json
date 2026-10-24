@@ -1,0 +1,21 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "Trojanised KeePass (KeeLoader-style)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "paths::BENIGN_READERS keepass.exe (signer None, AllStores, any path)"
+  ],
+  "sources": [
+    "https://www.withsecure.com/en/resources-hub/w-labs/keepass-trojanised-in-advanced-malware-campaign/",
+    "https://www.bleepingcomputer.com/news/security/fake-keepass-password-manager-leads-to-esxi-ransomware-attack/"
+  ],
+  "notes": "Trojanised KeePass (signed binary + malicious plugin / modified build, KeeLoader 2025) in a per-user folder reads every browser, wallet, Telegram and Discord store. keepass.exe is a BENIGN_READERS entry with no signer requirement and AllStores scope, so reads are dropped before ST-01/ST-02 and ST-04 never sees a credential read.",
+  "known_gap": "keepass.exe is a BENIGN_READERS entry with signer None and AllStores scope: any validly signed keepass.exe anywhere reads everything silently"
+}

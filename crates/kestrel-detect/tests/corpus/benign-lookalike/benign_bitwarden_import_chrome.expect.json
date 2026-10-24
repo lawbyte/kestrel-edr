@@ -1,0 +1,13 @@
+{
+  "must_not_alert": [
+    "ST-02",
+    "ST-04",
+    "ST-16"
+  ],
+  "family": "Bitwarden desktop import",
+  "category": "benign-lookalike",
+  "sources": [
+    "https://bitwarden.com/help/import-from-chrome/"
+  ],
+  "notes": "Bitwarden desktop's direct import from Chrome (password category only) and vault sync."
+}

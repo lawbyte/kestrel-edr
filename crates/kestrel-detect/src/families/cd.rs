@@ -319,10 +319,69 @@ impl CredDump {
         if is_shadow_create(&name, &lc) {
             self.shadow_created = Some(e.ts);
         }
-        if (name == "ntdsutil.exe" || name == "dsdbutil.exe")
-            && lc.contains("ifm")
-            && lc.contains("create")
-            && lc.contains("full")
+        // ---- CD-10 / CD-11: wbadmin backup of NTDS.dit / hives -----------
+        // Corpus finding 10 (2026-10-25, Akira via SonicWall, Huntress Aug
+        // 2025): `wbadmin start backup -include:…\NTDS.dit …\config\SYSTEM
+        // …\config\SECURITY` copies the AD database and the hives with the
+        // boot key through Windows Backup. Only the `-include:` list of a
+        // `start backup` counts; whole-volume, user-folder and system-state
+        // backups (`start systemstatebackup`) are normal administration.
+        let argv0 = ltokens
+            .first()
+            .map(|t| file_name_lower(t))
+            .unwrap_or_default();
+        let is_wbadmin = name == "wbadmin.exe" || argv0 == "wbadmin.exe" || argv0 == "wbadmin";
+        if is_wbadmin {
+            if let Some(inc) = wbadmin_include(&ltokens) {
+                let ntds = inc.contains("ntds.dit");
+                let hives = refs_config_hive(&inc);
+                if ntds {
+                    let mut h = FamilyHit::new(
+                        CD11,
+                        &p.guid,
+                        Severity::High,
+                        format!(
+                            "{} started a Windows Backup of the Active Directory database (ntds.dit){} — a known way to steal every domain password hash",
+                            who(&p),
+                            if hives {
+                                " together with the registry hives that hold its decryption key"
+                            } else {
+                                ""
+                            }
+                        ),
+                    )
+                    .with_actions(vec![kill(&p)]);
+                    h.dedup_key = Some(format!("{CD11}:wbadmin"));
+                    out.push(h);
+                }
+                if hives {
+                    let mut h = FamilyHit::new(
+                        CD10,
+                        &p.guid,
+                        Severity::High,
+                        format!(
+                            "{} started a Windows Backup that includes credential hives (SAM / SECURITY / SYSTEM) — they can be cracked offline from the backup",
+                            who(&p)
+                        ),
+                    );
+                    h.dedup_key = Some(format!("{CD10}:wbadmin"));
+                    out.push(h);
+                }
+                if ntds || hives {
+                    return;
+                }
+            }
+        }
+        // Corpus finding 10: IFM media in any spelling ntdsutil accepts
+        // (`ifm "create full c:\x"`, `"ac i ntds" ifm "cr fu c:\x"`,
+        // `create sysvol full`, `create rodc`).
+        if (name == "ntdsutil.exe"
+            || name == "dsdbutil.exe"
+            || matches!(
+                argv0.as_str(),
+                "ntdsutil" | "ntdsutil.exe" | "dsdbutil" | "dsdbutil.exe"
+            ))
+            && ifm_create(&lc)
         {
             out.push(
                 FamilyHit::new(
@@ -470,18 +529,27 @@ fn dumper_tool(
     if KNOWN_DUMPERS.iter().any(|k| glob_match(k, name)) {
         return kill_hit(format!("{} is a known LSASS dumping tool", who(p)));
     }
-    let lsass_ref = lc.contains("lsass")
-        || lsass_pid.is_some_and(|l| {
-            let s = l.to_string();
-            ltokens.iter().skip(1).any(|t| *t == s)
-        });
+    // FP-09 (DETECTION-QUALITY.md, 2026-10-25): `grep -n lsass\|0x1410 -r
+    // src/…` matched "lsass anywhere + a procdump flag (-r)". LSASS must now
+    // be a target *argument* of its own (`lsass`, `lsass.exe`, a path to it,
+    // or the LSASS PID as a whole token), never a substring of a pattern.
+    let lsass_ref = lsass_target_arg(ltokens, lsass_pid);
     if !lsass_ref {
         return None;
     }
-    let dump_flag = ltokens
-        .iter()
-        .skip(1)
-        .any(|t| PROCDUMP_FLAGS.contains(&t.as_str()));
+    // Text-search / viewer tools: only flags no such tool has (-ma / -mm /
+    // -mp / -mc) make their command line a dump; `-r` is
+    // "recursive" for them. A renamed procdump called grep.exe still uses
+    // -ma; a text tool that really opens LSASS is judged by CD-03 / CD-04 /
+    // CD-05 on its handle and dump file.
+    let text_tool = TEXT_TOOLS.contains(&name);
+    let dump_flag = ltokens.iter().skip(1).any(|t| {
+        if text_tool {
+            STRONG_DUMP_FLAGS.contains(&t.as_str())
+        } else {
+            PROCDUMP_FLAGS.contains(&t.as_str())
+        }
+    });
     let procdump_name = name.starts_with("procdump");
     // Shells / script hosts merely wrapping the tool (`cmd /c procdump …`) are
     // not the dumper: the tool's own process start is judged instead.
@@ -563,6 +631,31 @@ impl CredDump {
                     Severity::Low,
                     format!(
                         "{} (validly signed {} service installed under Program Files) asked LSASS for {rights} and Windows refused (status 0x{:08X}); signed services and updaters probe every process this way, so this is recorded only. LSA protection held",
+                        who(&p),
+                        p.signer.as_deref().unwrap_or("").trim(),
+                        t.return_code
+                    ),
+                );
+                h.audit_only = true;
+                out.push(h);
+                return;
+            }
+            // FP-11 (DETECTION-QUALITY.md, 2026-10-25): Roblox's anti-cheat
+            // (Hyperion) asks every process, LSASS included, for 0x40A
+            // (query + VM_OPERATION + CREATE_THREAD) and LSA protection
+            // refuses it. A refused open by the genuine client (exact image
+            // name, exact signer, its own per-user or per-machine
+            // `Roblox\Versions\version-<hex>\` folder, not tampered) with a
+            // mask inside that observed set is Low Audit. VM_READ / VM_WRITE
+            // / DUP_HANDLE / CREATE_PROCESS / full / maximum-allowed, a
+            // successful open (CD-03), or any other copy keep High.
+            if let Some(app) = refused_probe_client(ctx, &p, mask) {
+                let mut h = FamilyHit::new(
+                    CD06,
+                    &p.guid,
+                    Severity::Low,
+                    format!(
+                        "{} ({app}, validly signed by {}) asked LSASS for {rights} and Windows refused (status 0x{:08X}); its anti-cheat probes every process this way, so this is recorded only. LSA protection held",
                         who(&p),
                         p.signer.as_deref().unwrap_or("").trim(),
                         t.return_code
@@ -1124,14 +1217,33 @@ impl CredDump {
         if ctx.attribution(e) == Attribution::Exact && ctx.is_agent(&p) {
             return;
         }
+        // FP-12 (DETECTION-QUALITY.md, 2026-10-25): NordVPN (re)installing
+        // its own drivers (`travis.sys`, `NDivert.sys`) from its Program
+        // Files folder on every update. The event carries no signer, so only
+        // the exact (service name, path shape) pairs of VENDOR_DRIVERS on
+        // the system volume drop to Low; any other driver, name or folder
+        // keeps Medium.
+        let vendor = sys_rest(ctx, s.image_path.trim().trim_matches('"'))
+            .is_some_and(|rest| vendor_driver(&rest, &s.name));
         let mut h = FamilyHit::new(
             CD13,
             &p.guid,
-            Severity::Medium,
-            format!(
-                "Kernel driver service \"{}\" was installed from {} (outside System32\\drivers) — vulnerable signed drivers are used to switch off LSA protection and dump LSASS",
-                s.name, s.image_path
-            ),
+            if vendor {
+                Severity::Low
+            } else {
+                Severity::Medium
+            },
+            if vendor {
+                format!(
+                    "Kernel driver service \"{}\" was (re)installed from {} — a known vendor driver in its own Program Files folder (recorded only; a driver planted there by an administrator would look the same)",
+                    s.name, s.image_path
+                )
+            } else {
+                format!(
+                    "Kernel driver service \"{}\" was installed from {} (outside System32\\drivers) — vulnerable signed drivers are used to switch off LSA protection and dump LSASS",
+                    s.name, s.image_path
+                )
+            },
         );
         h.dedup_key = Some(format!("{CD13}:driver:{}", s.name.to_ascii_lowercase()));
         out.push(h);
@@ -1208,7 +1320,7 @@ fn benign_opener(ctx: &Ctx, p: &ProcessInfo, mask: u32) -> bool {
     // Third-party AV / EDR from the shared benign-reader list (signer required).
     if BENIGN_READERS.iter().any(|r| {
         r.kind == BenignKind::Security
-            && r.signer.is_some_and(|s| signer.contains(s))
+            && crate::identity::signer_in(r.signers, Some(signer.as_str()))
             && glob_match(r.image, &name)
     }) {
         return true;
@@ -1230,6 +1342,135 @@ fn suspicious_source(ctx: &Ctx, p: &ProcessInfo, mask: u32) -> bool {
             PathClass::System | PathClass::Windows | PathClass::ProgramFiles
         )
         || (file_name_lower(&p.image) == "taskmgr.exe" && full_or_max(mask))
+}
+
+/// FP-11 (DETECTION-QUALITY.md, 2026-10-25): a client whose anti-cheat asks
+/// every process (LSASS included) for a fixed, non-reading mask that LSA
+/// protection refuses. Identity is pinned by exact image name, exact signer
+/// subject (no substring) and install folder; `mask` lists the only bits the
+/// client was seen asking for plus the query / synchronize rights.
+struct ProbeClient {
+    image: &'static str,
+    signer: &'static str,
+    /// Bits a refused request may carry (anything else keeps High).
+    mask: u32,
+    app: &'static str,
+}
+
+const PROBE_CLIENTS: &[ProbeClient] = &[ProbeClient {
+    image: "robloxplayerbeta.exe",
+    signer: "Roblox Corporation",
+    // Owner PC 2026-10-23: 0x40A (QUERY_INFORMATION | VM_OPERATION |
+    // CREATE_THREAD) on lsass, taskhostw and svchost alike.
+    mask: 0x400 | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD | 0x1000 | 0x10_0000,
+    app: "Roblox game client",
+}];
+
+/// FP-11: the refused LSASS open of `p` with `mask` comes from a genuine
+/// [`PROBE_CLIENTS`] entry: valid signature with the exact signer, exact
+/// image name, not tampered with (injection / memory-write signals), mask
+/// inside the client's set and never full / maximum-allowed, and the image
+/// in the client's own `Roblox\Versions\version-<hex>\` folder on the system
+/// volume (per-user `%LOCALAPPDATA%` of the process's own user, or Program
+/// Files). Returns the client's label.
+fn refused_probe_client(ctx: &Ctx, p: &ProcessInfo, mask: u32) -> Option<&'static str> {
+    if p.signed != SignatureState::Valid || ctx.tampered(&p.guid) || full_or_max(mask) {
+        return None;
+    }
+    let name = file_name_lower(&p.image);
+    let signer = p.signer.as_deref().map(str::trim)?;
+    let c = PROBE_CLIENTS
+        .iter()
+        .find(|c| c.image == name && c.signer == signer)?;
+    if mask == 0 || mask & !c.mask != 0 {
+        return None;
+    }
+    let rest = sys_rest(ctx, &p.image)?;
+    roblox_install(&rest, &name, p.user.as_deref()).then_some(c.app)
+}
+
+/// `\users\<own profile>\appdata\local\roblox\versions\version-<hex>\<name>`
+/// or `\program files[ (x86)]\roblox\versions\version-<hex>\<name>`
+/// (`rest`: normalised, driveless, lower-case).
+fn roblox_install(rest: &str, name: &str, user: Option<&str>) -> bool {
+    let Some(dir) = rest.strip_suffix(name).and_then(|d| d.strip_suffix('\\')) else {
+        return false;
+    };
+    let Some((base, version)) = dir.rsplit_once('\\') else {
+        return false;
+    };
+    let hex = version.strip_prefix("version-").unwrap_or("");
+    if hex.is_empty() || hex.len() > 32 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return false;
+    }
+    if [
+        r"\program files\roblox\versions",
+        r"\program files (x86)\roblox\versions",
+    ]
+    .contains(&base)
+    {
+        return true;
+    }
+    let Some(profile) = base
+        .strip_prefix(r"\users\")
+        .and_then(|r| r.strip_suffix(r"\appdata\local\roblox\versions"))
+    else {
+        return false;
+    };
+    if profile.is_empty() || profile.contains('\\') {
+        return false;
+    }
+    // The process's own profile (`name`, or `name.DOMAIN…`) when its user is
+    // known.
+    match user.map(|u| u.trim().to_ascii_lowercase()) {
+        Some(u) if !u.is_empty() => {
+            let n = u.rsplit('\\').next().unwrap_or(&u);
+            let n = n.split('@').next().unwrap_or(n);
+            !n.is_empty() && (profile == n || profile.starts_with(&format!("{n}.")))
+        }
+        _ => true,
+    }
+}
+
+/// FP-12 (DETECTION-QUALITY.md, 2026-10-25): kernel drivers a known vendor
+/// (re)installs from its own Program Files folder: (service name, path under
+/// `\program files\` with `*` standing for one version folder of digits and
+/// dots). The ServiceInstalled event carries no signer, so the exact service
+/// name + exact path shape on the system volume is the identity (writing
+/// under Program Files and creating a kernel service both need an
+/// administrator already).
+const VENDOR_DRIVERS: &[(&str, &str)] = &[
+    (
+        "travis",
+        r"\program files\nordvpn\nordsec threatprotection\*\travis.sys",
+    ),
+    (
+        "nordvpn divert driver",
+        r"\program files\nordvpn\*\drivers\ndivert.sys",
+    ),
+];
+
+/// FP-12: `image_path` (normalised, driveless) and `service` match a
+/// [`VENDOR_DRIVERS`] entry.
+fn vendor_driver(rest: &str, service: &str) -> bool {
+    let service = service.trim().to_ascii_lowercase();
+    VENDOR_DRIVERS.iter().any(|(svc, pat)| {
+        *svc == service && {
+            let (pre, post) = pat.split_once('*').unwrap_or((pat, ""));
+            rest.len() > pre.len() + post.len()
+                && rest.starts_with(pre)
+                && rest.ends_with(post)
+                && version_folder(&rest[pre.len()..rest.len() - post.len()])
+        }
+    })
+}
+
+/// `8.14.12.0`: digits separated by single dots (never `.` / `..`).
+fn version_folder(v: &str) -> bool {
+    !v.is_empty()
+        && v.len() <= 32
+        && v.split('.')
+            .all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Backup / VSS components and known backup vendors (CD-10 / CD-11 shadow access).
@@ -1408,6 +1649,46 @@ const PROCDUMP_FLAGS: &[&str] = &[
     "-ma", "/ma", "-mm", "/mm", "-mp", "/mp", "-mc", "/mc", "-r", "/r",
 ];
 
+/// FP-09: procdump dump-type flags that no text tool uses (`-r` is
+/// "recursive" for grep / rg / findstr-style tools).
+const STRONG_DUMP_FLAGS: &[&str] = &["-ma", "/ma", "-mm", "/mm", "-mp", "/mp", "-mc", "/mc"];
+
+/// FP-09 (DETECTION-QUALITY.md, 2026-10-25): text-search, viewer and editor
+/// tools whose arguments are search patterns or file names, not dump
+/// targets. Matched by image name; they only lose the weak `-r` flag.
+const TEXT_TOOLS: &[&str] = &[
+    "grep.exe",
+    "egrep.exe",
+    "fgrep.exe",
+    "rg.exe",
+    "ag.exe",
+    "ack.exe",
+    "findstr.exe",
+    "find.exe",
+    "sed.exe",
+    "awk.exe",
+    "gawk.exe",
+    "less.exe",
+    "more.com",
+    "cat.exe",
+    "head.exe",
+    "tail.exe",
+    "code.exe",
+    "git.exe",
+];
+
+/// FP-09: LSASS named as a target argument of its own: `lsass` /
+/// `lsass.exe` / a path ending in `\lsass.exe` (quotes and a trailing comma
+/// stripped), or the live LSASS PID as a whole token.
+fn lsass_target_arg(ltokens: &[String], lsass_pid: Option<u32>) -> bool {
+    let pid = lsass_pid.map(|l| l.to_string());
+    ltokens.iter().skip(1).any(|t| {
+        let t = t.trim_matches(|c: char| c == '"' || c == '\'' || c == ',');
+        let leaf = t.rsplit(['\\', '/']).next().unwrap_or(t);
+        leaf == "lsass" || leaf == "lsass.exe" || pid.as_deref() == Some(t)
+    })
+}
+
 // ---------------------------------------------------------------------------
 // parsing helpers
 // ---------------------------------------------------------------------------
@@ -1529,6 +1810,53 @@ fn refs_config_hive(lc: &str) -> bool {
                     .is_none_or(|c| !c.is_ascii_alphanumeric())
             })
         })
+}
+
+/// Corpus finding 10: the `-include:` list of `wbadmin start backup`
+/// (lower-case tokens): the rest of the `-include:` / `/include:` token plus
+/// the following tokens up to the next option, joined by spaces. `None` for
+/// any other wbadmin verb or without `-include:`.
+fn wbadmin_include(ltokens: &[String]) -> Option<String> {
+    let start = ltokens.iter().position(|t| t == "start")?;
+    if ltokens.get(start + 1).map(String::as_str) != Some("backup") {
+        return None;
+    }
+    let i = ltokens
+        .iter()
+        .position(|t| t.starts_with("-include:") || t.starts_with("/include:"))?;
+    let mut inc = ltokens[i]["-include:".len()..].to_string();
+    for t in ltokens.iter().skip(i + 1) {
+        if t.starts_with('-') || t.starts_with('/') {
+            break;
+        }
+        inc.push(' ');
+        inc.push_str(t);
+    }
+    Some(inc.replace('/', "\\"))
+}
+
+/// Corpus finding 10: ntdsutil / dsdbutil IFM media with secrets: an `ifm`
+/// word followed by `create` (any abbreviation from `cr`) and then `full`
+/// (any abbreviation from `fu`). `create rodc` media hold no secrets.
+fn ifm_create(lc: &str) -> bool {
+    let words: Vec<&str> = lc
+        .split(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+        .filter(|w| !w.is_empty())
+        .take(64)
+        .collect();
+    let Some(i) = words.iter().position(|w| *w == "ifm") else {
+        return false;
+    };
+    let rest = &words[i + 1..];
+    let Some(c) = rest
+        .iter()
+        .position(|w| w.starts_with("cr") && "create".starts_with(*w))
+    else {
+        return false;
+    };
+    rest[c + 1..]
+        .iter()
+        .any(|w| w.len() >= 2 && "full".starts_with(*w))
 }
 
 fn is_shadow_create(name: &str, lc: &str) -> bool {
@@ -1731,11 +2059,11 @@ pub(crate) fn catalog() -> Vec<RuleMeta> {
             &[SIGMA_COMSVCS, SIGMA_COMSVCS_ACCESS, REDCANARY_LSASS],
             &["None known: no legitimate software dumps LSASS through comsvcs.dll (SigmaHQ: 'Unlikely')"]),
         meta(CD02, "Known LSASS dumping tool",
-            "A known dumper ran against LSASS: procdump-style arguments (-ma/-mm/-mp/-mc/-r) with lsass or the LSASS PID (also renamed copies), createdump.exe with the LSASS PID, WerFault.exe / WerFaultSecure.exe started from outside System32/SysWOW64 (the 2025 old-WerFaultSecure technique), mimikatz command syntax (sekurlsa::, lsadump::, misc::memssp) or a known dumper image name (nanodump, PPLBlade, PPLdump, Dumpert, …). Hash/YARA hits arrive as IOC-HASH / YARA alerts.",
+            "A known dumper ran against LSASS: procdump-style arguments (-ma/-mm/-mp/-mc/-r) with lsass / lsass.exe or the LSASS PID as a target argument of its own (also renamed copies; text-search tools such as grep, rg or findstr need -ma/-mm/-mp/-mc, since -r is their 'recursive'), createdump.exe with the LSASS PID, WerFault.exe / WerFaultSecure.exe started from outside System32/SysWOW64 (the 2025 old-WerFaultSecure technique), mimikatz command syntax (sekurlsa::, lsadump::, misc::memssp) or a known dumper image name (nanodump, PPLBlade, PPLdump, Dumpert, …). Hash/YARA hits arrive as IOC-HASH / YARA alerts.",
             C, Critical, &["T1003.001"], true,
             "Kill the tool (process tree) and quarantine its image when it runs from a user-writable folder. Microsoft-signed procdump / createdump under their own name only alert (support cases)",
             &[CHOKEPOINTS, WERFAULTSECURE, REDCANARY_LSASS],
-            &["Administrators taking an LSASS dump with Microsoft-signed procdump for a Microsoft support case (alert only; add a time-boxed exclusion)"]),
+            &["Administrators taking an LSASS dump with Microsoft-signed procdump for a Microsoft support case (alert only; add a time-boxed exclusion)", "Not raised for (FP-09, 2026-10-25): text tools searching source code for the word lsass (grep -n lsass\\|0x1410 -r src)"]),
         meta(CD03, "Suspicious LSASS handle request",
             "A process asked for a handle to LSASS with rights that allow reading, writing, cloning or duplicating it (VM_READ/VM_WRITE/VM_OPERATION/CREATE_THREAD/DUP_HANDLE/CREATE_PROCESS, PROCESS_ALL_ACCESS or MAXIMUM_ALLOWED), and the requester is not on the path + signer allow-list of known openers and is unsigned, not Microsoft-signed, user-writable, a LOLBin, or Task Manager asking for full access. Kernel-Audit-API-Calls reports the desired access, not the granted one.",
             C, High, &["T1003.001"], false,
@@ -1759,7 +2087,7 @@ pub(crate) fn catalog() -> Vec<RuleMeta> {
             C, High, &["T1003.001"], false,
             "Alert; in Protect mode also suspend the requesting process for the suspend window",
             &[MS_LSA_PROTECTION, RUSTINEL_302, FIBRATUS_ACCESS],
-            &["Inventory / monitoring tools that request full access and fall back to query rights", "Low Audit (owner PC 2026-10-22): a validly signed native service or updater installed under Program Files on the system volume (not an interpreter, LOLBin or Electron host) whose refused request carried only read / query rights (VM_READ, QUERY_INFORMATION, QUERY_LIMITED_INFORMATION, SYNCHRONIZE; e.g. NVIDIA nvcontainer.exe and BraveUpdate.exe asking for 0x410). Unsigned or user-path openers, write / thread / dup-handle masks and successful opens (CD-03) keep their severity"]),
+            &["Inventory / monitoring tools that request full access and fall back to query rights", "Low Audit (owner PC 2026-10-22): a validly signed native service or updater installed under Program Files on the system volume (not an interpreter, LOLBin or Electron host) whose refused request carried only read / query rights (VM_READ, QUERY_INFORMATION, QUERY_LIMITED_INFORMATION, SYNCHRONIZE; e.g. NVIDIA nvcontainer.exe and BraveUpdate.exe asking for 0x410). Unsigned or user-path openers, write / thread / dup-handle masks and successful opens (CD-03) keep their severity", "Low Audit (FP-11, 2026-10-25): the genuine Roblox client (RobloxPlayerBeta.exe signed exactly 'Roblox Corporation', in its own Roblox\\Versions\\version-<hex> folder, not tampered) whose refused request carried only query / VM_OPERATION / CREATE_THREAD (its anti-cheat asks every process for 0x40A). Other copies, VM_READ / VM_WRITE / DUP_HANDLE / full masks and successful opens keep High"]),
         meta(CD07, "LSASS dump preparation via SilentProcessExit / IFEO",
             "A value was written under HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\lsass*, or Image File Execution Options\\lsass.exe got GlobalFlag with FLG_MONITOR_SILENT_PROCESS_EXIT (0x200), Debugger or VerifierDlls. AuditLevel=8 (LSA protection audit mode) is legitimate and ignored. Logic follows SigmaHQ 55e29995 (author attribution: SigmaHQ, DRL 1.1).",
             C, Critical, &["T1003.001", "T1112", "T1546.012"], true,
@@ -1779,13 +2107,13 @@ pub(crate) fn catalog() -> Vec<RuleMeta> {
             &[SIGMA_SSP, "https://raw.githubusercontent.com/rabbitstack/fibratus/master/rules/credential_access_suspicious_security_package_loaded_by_lsass.yml"],
             &["Password filters (AD password sync, MFA vendors)", "Smart-card / credential-provider middleware", "Third-party SSO packages"]),
         meta(CD10, "Credential hive save or copy",
-            "reg.exe save/export of HKLM\\SAM or HKLM\\SECURITY (critical) or the whole HKLM\\SYSTEM hive (high); esentutl /vss or /y copying config\\SAM|SECURITY|SYSTEM; command lines referencing shadow-copy or RegBack copies of those hives; or a process other than Windows backup components / known backup vendors opening a hive inside a volume shadow copy. Logic follows SigmaHQ fd877b94 and e7be6119 (author attribution: SigmaHQ, DRL 1.1).",
+            "reg.exe save/export of HKLM\\SAM or HKLM\\SECURITY (critical) or the whole HKLM\\SYSTEM hive (high); esentutl /vss or /y copying config\\SAM|SECURITY|SYSTEM; command lines referencing shadow-copy or RegBack copies of those hives; wbadmin start backup with config\\SAM|SECURITY|SYSTEM in its -include: list (high, alert only); or a process other than Windows backup components / known backup vendors opening a hive inside a volume shadow copy. Logic follows SigmaHQ fd877b94 and e7be6119 (author attribution: SigmaHQ, DRL 1.1).",
             C, Critical, &["T1003.002", "T1003.004", "T1003.005"], true,
             "For reg save/export of SAM or SECURITY: kill reg.exe (process tree) and quarantine the output file. Other sub-cases alert only",
             &[SIGMA_REG_HIVES, SIGMA_ESENTUTL, FIBRATUS_HIVES],
             &["Backup software (wbengine, wbadmin, Veeam, Veritas, Acronis, SCCM)", "Forensic collectors (KAPE, Velociraptor)", "Administrators exporting the SYSTEM hive for troubleshooting"]),
         meta(CD11, "NTDS.dit extraction",
-            "ntdsutil / dsdbutil 'ifm' + 'create full'; a command line copying ntds.dit out of a volume shadow copy, with esentutl, or within 10 minutes of a shadow copy being created; or an ntds.dit file written outside %SystemRoot%\\NTDS. Mainly relevant on domain controllers. DCSync (directory replication from a non-DC) is out of scope: it leaves no credential-access trace on the endpoint and needs DC-side logs.",
+            "ntdsutil / dsdbutil 'ifm' + 'create full' (any abbreviation ntdsutil accepts, e.g. 'cr fu', and 'create sysvol full'); wbadmin start backup with ntds.dit in its -include: list (the Akira technique); a command line copying ntds.dit out of a volume shadow copy, with esentutl, or within 10 minutes of a shadow copy being created; or an ntds.dit file written outside %SystemRoot%\\NTDS. Mainly relevant on domain controllers. DCSync (directory replication from a non-DC) is out of scope: it leaves no credential-access trace on the endpoint and needs DC-side logs.",
             C, High, &["T1003.003"], false,
             "Kill the process tree and quarantine the copied ntds.dit when it is in a user-writable folder",
             &[NTDS_SUSP_LOCATION, SIGMA_ESENTUTL, MITRE_DCSYNC],
@@ -1801,7 +2129,7 @@ pub(crate) fn catalog() -> Vec<RuleMeta> {
             C, High, &["T1562.001", "T1112", "T1068"], false,
             "Alert only (the setting is not reverted automatically, so deliberate administrator changes are not overridden)",
             &[MS_LSA_PROTECTION, MS_CREDGUARD, KSLDUMP],
-            &["IT disabling LSA protection for an unsigned smart-card / password-filter plug-in", "Microsoft Defender platform updates rewriting KslD", "Antivirus, VPN or anti-cheat drivers installed under Program Files"]),
+            &["IT disabling LSA protection for an unsigned smart-card / password-filter plug-in", "Microsoft Defender platform updates rewriting KslD", "Antivirus, VPN or anti-cheat drivers installed under Program Files (Low for the exact NordVPN travis.sys / NDivert.sys services in their versioned Program Files folders, FP-12 2026-10-25)"]),
     ]
 }
 

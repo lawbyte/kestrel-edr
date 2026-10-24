@@ -1,0 +1,17 @@
+{
+  "must_alert": [
+    "RW-06"
+  ],
+  "min_severity": "critical",
+  "family": "Ransomware (intermittent in-place)",
+  "category": "ransomware",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://www.sentinelone.com/labs/crimeware-trends-ransomware-developers-turn-to-intermittent-encryption-to-evade-detection/",
+    "https://www.ic3.gov/CSA/2025/250604.pdf",
+    "https://www.trendmicro.com/en/research/25/i/lockbit-5-targets-windows-linux-esxi.html"
+  ],
+  "notes": "Partial (every Nth MB) in-place encryption with no rename: overwrite-only signal."
+}

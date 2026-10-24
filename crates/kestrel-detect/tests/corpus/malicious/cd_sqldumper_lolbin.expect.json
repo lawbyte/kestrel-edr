@@ -1,0 +1,22 @@
+{
+  "must_alert": [
+    [
+      "CD-02",
+      "CD-03",
+      "CD-04"
+    ]
+  ],
+  "min_severity": "high",
+  "family": "SQLDumper LSASS dump (signed Office binary)",
+  "category": "credential-dumping",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "CD-03 signed Program Files opener"
+  ],
+  "sources": [
+    "https://lolbas-project.github.io/lolbas/OtherMSBinaries/Sqldumper/"
+  ],
+  "notes": "Microsoft-signed SQLDumper.exe shipped with Office dumps LSASS (PID 624, flags 0x01100 = full dump)."
+}

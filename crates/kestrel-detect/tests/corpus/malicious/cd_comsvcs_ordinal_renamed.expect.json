@@ -1,0 +1,20 @@
+{
+  "must_alert": [
+    "CD-01"
+  ],
+  "min_severity": "critical",
+  "family": "LSASS dump via comsvcs MiniDump (ordinal obfuscation)",
+  "category": "credential-dumping",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "CD-03"
+  ],
+  "sources": [
+    "https://detection.fyi/sigmahq/sigma/windows/process_creation/proc_creation_win_rundll32_process_dump_via_comsvcs",
+    "https://thedfirreport.com/2025/06/30/hide-your-rdp-password-spray-leads-to-ransomhub-deployment/",
+    "https://www.elastic.co/guide/en/security/current/lsass-memory-dump-handle-access.html"
+  ],
+  "notes": "rundll32 comsvcs.dll with an obfuscated ordinal (#+0000^24), dump written as .bin under Public."
+}

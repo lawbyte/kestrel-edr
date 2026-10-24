@@ -795,6 +795,8 @@ pub enum BenignKind {
     Cleaner,
     SyncClient,
     Management,
+    /// Apps integrating with the browsers (download managers, assistants).
+    BrowserIntegration,
 }
 
 /// Built-in allow-listed reader of credential stores (known benign false positives).
@@ -803,8 +805,11 @@ pub struct BenignReader {
     /// Image file name, lower-case, `*` glob allowed.
     pub image: &'static str,
     pub kind: BenignKind,
-    /// Required Authenticode signer substring (case-insensitive), when the agent knows the signer.
-    pub signer: Option<&'static str>,
+    /// Authenticode signer subjects (lower-case), matched **exactly**
+    /// (fix round 2026-10-25: a substring let "Reset Data Systems Ltd"
+    /// pass as ESET). [`crate::identity::MICROSOFT`] = any Microsoft signer.
+    /// A valid signature by one of them is always required.
+    pub signers: &'static [&'static str],
     pub scope: BenignScope,
     pub reason: &'static str,
 }
@@ -825,21 +830,21 @@ pub const BENIGN_READERS: &[BenignReader] = &[
     BenignReader {
         kind: BenignKind::Indexer,
         image: "searchprotocolhost.exe",
-        signer: Some("microsoft"),
+        signers: &["@microsoft"],
         scope: BenignScope::AllStores,
         reason: "Windows Search indexer",
     },
     BenignReader {
         kind: BenignKind::Indexer,
         image: "searchindexer.exe",
-        signer: Some("microsoft"),
+        signers: &["@microsoft"],
         scope: BenignScope::AllStores,
         reason: "Windows Search indexer",
     },
     BenignReader {
         kind: BenignKind::Indexer,
         image: "searchfilterhost.exe",
-        signer: Some("microsoft"),
+        signers: &["@microsoft"],
         scope: BenignScope::AllStores,
         reason: "Windows Search indexer",
     },
@@ -847,49 +852,49 @@ pub const BENIGN_READERS: &[BenignReader] = &[
     BenignReader {
         kind: BenignKind::Security,
         image: "msmpeng.exe",
-        signer: Some("microsoft"),
+        signers: &["@microsoft"],
         scope: BenignScope::AllStores,
         reason: "Microsoft Defender Antivirus",
     },
     BenignReader {
         kind: BenignKind::Security,
         image: "mpdefendercoreservice.exe",
-        signer: Some("microsoft"),
+        signers: &["@microsoft"],
         scope: BenignScope::AllStores,
         reason: "Microsoft Defender Antivirus",
     },
     BenignReader {
         kind: BenignKind::Security,
         image: "nissrv.exe",
-        signer: Some("microsoft"),
+        signers: &["@microsoft"],
         scope: BenignScope::AllStores,
         reason: "Microsoft Defender Network Inspection",
     },
     BenignReader {
         kind: BenignKind::Security,
         image: "mpcmdrun.exe",
-        signer: Some("microsoft"),
+        signers: &["@microsoft"],
         scope: BenignScope::AllStores,
         reason: "Microsoft Defender command-line scanner",
     },
     BenignReader {
         kind: BenignKind::Security,
         image: "mssense.exe",
-        signer: Some("microsoft"),
+        signers: &["@microsoft"],
         scope: BenignScope::AllStores,
         reason: "Microsoft Defender for Endpoint sensor",
     },
     BenignReader {
         kind: BenignKind::Security,
         image: "sensendr.exe",
-        signer: Some("microsoft"),
+        signers: &["@microsoft"],
         scope: BenignScope::AllStores,
         reason: "Microsoft Defender for Endpoint sensor",
     },
     BenignReader {
         kind: BenignKind::Security,
         image: "senseir.exe",
-        signer: Some("microsoft"),
+        signers: &["@microsoft"],
         scope: BenignScope::AllStores,
         reason: "Microsoft Defender for Endpoint live response",
     },
@@ -897,77 +902,96 @@ pub const BENIGN_READERS: &[BenignReader] = &[
     BenignReader {
         kind: BenignKind::Security,
         image: "avp.exe",
-        signer: Some("kaspersky"),
+        signers: &["ao kaspersky lab", "kaspersky lab jsc", "kaspersky lab"],
         scope: BenignScope::AllStores,
         reason: "Kaspersky antivirus",
     },
     BenignReader {
         kind: BenignKind::Security,
         image: "ekrn.exe",
-        signer: Some("eset"),
+        signers: &["eset, spol. s r.o."],
         scope: BenignScope::AllStores,
         reason: "ESET antivirus",
     },
     BenignReader {
         kind: BenignKind::Security,
         image: "csfalconservice.exe",
-        signer: Some("crowdstrike"),
+        signers: &["crowdstrike, inc."],
         scope: BenignScope::AllStores,
         reason: "CrowdStrike Falcon",
     },
     BenignReader {
         kind: BenignKind::Security,
         image: "sentinelagent.exe",
-        signer: Some("sentinel"),
+        signers: &[
+            "sentinel labs, inc.",
+            "sentinelone inc.",
+            "sentinelone, inc.",
+        ],
         scope: BenignScope::AllStores,
         reason: "SentinelOne agent",
     },
     BenignReader {
         kind: BenignKind::Security,
         image: "mbamservice.exe",
-        signer: Some("malwarebytes"),
+        signers: &[
+            "malwarebytes inc.",
+            "malwarebytes inc",
+            "malwarebytes corporation",
+        ],
         scope: BenignScope::AllStores,
         reason: "Malwarebytes",
     },
     BenignReader {
         kind: BenignKind::Security,
         image: "avastsvc.exe",
-        signer: Some("avast"),
+        signers: &[
+            "avast software s.r.o.",
+            "gen digital inc.",
+            "avg technologies usa, llc",
+        ],
         scope: BenignScope::AllStores,
         reason: "Avast antivirus",
     },
     BenignReader {
         kind: BenignKind::Security,
         image: "avgsvc.exe",
-        signer: Some("avast"),
+        signers: &[
+            "avast software s.r.o.",
+            "gen digital inc.",
+            "avg technologies usa, llc",
+        ],
         scope: BenignScope::AllStores,
         reason: "AVG antivirus",
     },
     BenignReader {
         kind: BenignKind::Security,
         image: "mcshield.exe",
-        signer: Some("mcafee"),
+        signers: &["mcafee, llc", "mcafee, inc.", "musarubra us llc"],
         scope: BenignScope::AllStores,
         reason: "McAfee antivirus",
     },
     BenignReader {
         kind: BenignKind::Security,
         image: "elastic-endpoint.exe",
-        signer: Some("elastic"),
+        signers: &["elasticsearch, inc.", "elasticsearch b.v."],
         scope: BenignScope::AllStores,
         reason: "Elastic Defend",
     },
     BenignReader {
         kind: BenignKind::Security,
         image: "cyserver.exe",
-        signer: Some("palo alto"),
+        signers: &[
+            "palo alto networks",
+            "palo alto networks (netherlands) b.v.",
+        ],
         scope: BenignScope::AllStores,
         reason: "Cortex XDR",
     },
     BenignReader {
         kind: BenignKind::Security,
         image: "ntrtscan.exe",
-        signer: Some("trend micro"),
+        signers: &["trend micro, inc."],
         scope: BenignScope::AllStores,
         reason: "Trend Micro Apex One",
     },
@@ -975,56 +999,59 @@ pub const BENIGN_READERS: &[BenignReader] = &[
     BenignReader {
         kind: BenignKind::PasswordManager,
         image: "keepass.exe",
-        signer: None,
+        signers: &["open source developer, dominik reichl", "dominik reichl"],
         scope: BenignScope::AllStores,
         reason: "KeePass (vault owner / browser import)",
     },
     BenignReader {
         kind: BenignKind::PasswordManager,
         image: "keepassxc.exe",
-        signer: None,
+        signers: &["droidmonkey apps, llc"],
         scope: BenignScope::AllStores,
         reason: "KeePassXC (vault owner / browser import)",
     },
     BenignReader {
         kind: BenignKind::PasswordManager,
         image: "bitwarden.exe",
-        signer: Some("bitwarden"),
+        signers: &["bitwarden inc.", "bitwarden, inc.", "8bit solutions llc"],
         scope: BenignScope::Categories(BROWSER_CATS),
         reason: "Bitwarden browser import",
     },
     BenignReader {
         kind: BenignKind::PasswordManager,
         image: "1password.exe",
-        signer: Some("agilebits"),
+        signers: &["agilebits", "agilebits inc.", "agilebits, inc."],
         scope: BenignScope::Categories(BROWSER_CATS),
         reason: "1Password browser import",
     },
     BenignReader {
         kind: BenignKind::PasswordManager,
         image: "dashlane.exe",
-        signer: Some("dashlane"),
+        signers: &["dashlane usa, inc.", "dashlane"],
         scope: BenignScope::Categories(BROWSER_CATS),
         reason: "Dashlane browser import",
     },
     BenignReader {
         kind: BenignKind::PasswordManager,
         image: "nordpass.exe",
-        signer: Some("nord"),
+        signers: &["nordvpn s.a.", "nord security inc."],
         scope: BenignScope::Categories(BROWSER_CATS),
         reason: "NordPass browser import",
     },
     BenignReader {
         kind: BenignKind::PasswordManager,
         image: "roboform.exe",
-        signer: Some("siber"),
+        signers: &["siber systems inc", "siber systems"],
         scope: BenignScope::Categories(BROWSER_CATS),
         reason: "RoboForm browser import",
     },
     BenignReader {
         kind: BenignKind::PasswordManager,
         image: "enpass.exe",
-        signer: Some("enpass"),
+        signers: &[
+            "sinew software systems private limited",
+            "enpass technologies inc.",
+        ],
         scope: BenignScope::Categories(BROWSER_CATS),
         reason: "Enpass browser import",
     },
@@ -1032,133 +1059,133 @@ pub const BENIGN_READERS: &[BenignReader] = &[
     BenignReader {
         kind: BenignKind::Backup,
         image: "veeam.endpoint.service.exe",
-        signer: Some("veeam"),
+        signers: &["veeam software group gmbh", "veeam software ag"],
         scope: BenignScope::AllStores,
         reason: "Veeam Agent backup",
     },
     BenignReader {
         kind: BenignKind::Backup,
         image: "veeamagent.exe",
-        signer: Some("veeam"),
+        signers: &["veeam software group gmbh", "veeam software ag"],
         scope: BenignScope::AllStores,
         reason: "Veeam Agent backup",
     },
     BenignReader {
         kind: BenignKind::Backup,
         image: "bztransmit.exe",
-        signer: Some("backblaze"),
+        signers: &["backblaze inc", "backblaze, inc."],
         scope: BenignScope::AllStores,
         reason: "Backblaze backup",
     },
     BenignReader {
         kind: BenignKind::Backup,
         image: "bztransmit64.exe",
-        signer: Some("backblaze"),
+        signers: &["backblaze inc", "backblaze, inc."],
         scope: BenignScope::AllStores,
         reason: "Backblaze backup",
     },
     BenignReader {
         kind: BenignKind::Backup,
         image: "bzfilelist.exe",
-        signer: Some("backblaze"),
+        signers: &["backblaze inc", "backblaze, inc."],
         scope: BenignScope::AllStores,
         reason: "Backblaze backup",
     },
     BenignReader {
         kind: BenignKind::Backup,
         image: "carboniteservice.exe",
-        signer: Some("carbonite"),
+        signers: &["carbonite", "carbonite, inc", "carbonite, inc."],
         scope: BenignScope::AllStores,
         reason: "Carbonite backup",
     },
     BenignReader {
         kind: BenignKind::Backup,
         image: "code42service.exe",
-        signer: Some("code42"),
+        signers: &["code42 software, inc."],
         scope: BenignScope::AllStores,
         reason: "Code42 / CrashPlan backup",
     },
     BenignReader {
         kind: BenignKind::Backup,
         image: "crashplanservice.exe",
-        signer: Some("code42"),
+        signers: &["code42 software, inc."],
         scope: BenignScope::AllStores,
         reason: "Code42 / CrashPlan backup",
     },
     BenignReader {
         kind: BenignKind::Backup,
         image: "reflectbin.exe",
-        signer: Some("paramount"),
+        signers: &["paramount software uk ltd"],
         scope: BenignScope::AllStores,
         reason: "Macrium Reflect backup",
     },
     BenignReader {
         kind: BenignKind::Backup,
         image: "wbengine.exe",
-        signer: Some("microsoft"),
+        signers: &["@microsoft"],
         scope: BenignScope::AllStores,
         reason: "Windows Server Backup",
     },
     BenignReader {
         kind: BenignKind::Backup,
         image: "cbbackupplan.exe",
-        signer: Some("msp360"),
+        signers: &["cloudberry lab inc.", "msp360 inc."],
         scope: BenignScope::AllStores,
         reason: "MSP360 (CloudBerry) backup",
     },
     BenignReader {
         kind: BenignKind::Backup,
         image: "acronis_agent.exe",
-        signer: Some("acronis"),
+        signers: &["acronis international gmbh"],
         scope: BenignScope::AllStores,
         reason: "Acronis backup",
     },
     BenignReader {
         kind: BenignKind::Backup,
         image: "datto*.exe",
-        signer: Some("datto"),
+        signers: &["datto inc", "kaseya us llc", "kaseya holdings inc"],
         scope: BenignScope::AllStores,
         reason: "Datto backup agent",
     },
     BenignReader {
         kind: BenignKind::Backup,
         image: "veeam*.exe",
-        signer: Some("veeam"),
+        signers: &["veeam software group gmbh", "veeam software ag"],
         scope: BenignScope::AllStores,
         reason: "Veeam backup",
     },
     BenignReader {
         kind: BenignKind::Backup,
         image: "scanstate.exe",
-        signer: Some("microsoft"),
+        signers: &["@microsoft"],
         scope: BenignScope::AllStores,
         reason: "USMT user-state migration",
     },
     BenignReader {
         kind: BenignKind::Backup,
         image: "filehistory.exe",
-        signer: Some("microsoft"),
+        signers: &["@microsoft"],
         scope: BenignScope::AllStores,
         reason: "Windows File History",
     },
     BenignReader {
         kind: BenignKind::Security,
         image: "sophos*.exe",
-        signer: Some("sophos"),
+        signers: &["sophos ltd", "sophos limited"],
         scope: BenignScope::AllStores,
         reason: "Sophos endpoint",
     },
     BenignReader {
         kind: BenignKind::Security,
         image: "bdservicehost.exe",
-        signer: Some("bitdefender"),
+        signers: &["bitdefender srl", "bitdefender s.r.l."],
         scope: BenignScope::AllStores,
         reason: "Bitdefender",
     },
     BenignReader {
         kind: BenignKind::Security,
         image: "epsecurityservice.exe",
-        signer: Some("bitdefender"),
+        signers: &["bitdefender srl", "bitdefender s.r.l."],
         scope: BenignScope::AllStores,
         reason: "Bitdefender GravityZone",
     },
@@ -1166,35 +1193,43 @@ pub const BENIGN_READERS: &[BenignReader] = &[
     BenignReader {
         kind: BenignKind::Cleaner,
         image: "ccleaner.exe",
-        signer: Some("piriform"),
+        signers: &[
+            "gen digital inc.",
+            "piriform software limited",
+            "piriform software ltd",
+        ],
         scope: BenignScope::AllStores,
         reason: "CCleaner",
     },
     BenignReader {
         kind: BenignKind::Cleaner,
         image: "ccleaner64.exe",
-        signer: Some("piriform"),
+        signers: &[
+            "gen digital inc.",
+            "piriform software limited",
+            "piriform software ltd",
+        ],
         scope: BenignScope::AllStores,
         reason: "CCleaner",
     },
     BenignReader {
         kind: BenignKind::Cleaner,
         image: "bleachbit.exe",
-        signer: None,
+        signers: &["open source developer, andrew ziem", "andrew ziem"],
         scope: BenignScope::AllStores,
         reason: "BleachBit",
     },
     BenignReader {
         kind: BenignKind::Cleaner,
         image: "bleachbit_console.exe",
-        signer: None,
+        signers: &["open source developer, andrew ziem", "andrew ziem"],
         scope: BenignScope::AllStores,
         reason: "BleachBit",
     },
     BenignReader {
         kind: BenignKind::Cleaner,
         image: "privazer.exe",
-        signer: None,
+        signers: &["goversoft llc", "goversoft"],
         scope: BenignScope::AllStores,
         reason: "PrivaZer",
     },
@@ -1202,50 +1237,71 @@ pub const BENIGN_READERS: &[BenignReader] = &[
     BenignReader {
         kind: BenignKind::SyncClient,
         image: "onedrive.exe",
-        signer: Some("microsoft"),
+        signers: &["@microsoft"],
         scope: BenignScope::PathContains(r"\onedrive"),
         reason: "OneDrive sync of its own folder",
     },
     BenignReader {
         kind: BenignKind::SyncClient,
         image: "dropbox.exe",
-        signer: Some("dropbox"),
+        signers: &["dropbox, inc"],
         scope: BenignScope::PathContains(r"\dropbox"),
         reason: "Dropbox sync of its own folder",
     },
     BenignReader {
         kind: BenignKind::SyncClient,
         image: "googledrivefs.exe",
-        signer: Some("google"),
+        signers: &["google llc"],
         scope: BenignScope::PathContains(r"\my drive\"),
         reason: "Google Drive sync of its own folder",
     },
     BenignReader {
         kind: BenignKind::SyncClient,
         image: "box.exe",
-        signer: Some("box"),
+        signers: &["box, inc."],
         scope: BenignScope::PathContains(r"\box\"),
         reason: "Box Drive sync of its own folder",
     },
     BenignReader {
         kind: BenignKind::SyncClient,
         image: "nextcloud.exe",
-        signer: None,
+        signers: &["nextcloud gmbh"],
         scope: BenignScope::PathContains(r"\nextcloud\"),
         reason: "Nextcloud sync of its own folder",
+    },
+    // FP-15 (fix round 2026-10-25): Internet Download Manager reads the
+    // browsers' cookies and key to download with the user's session
+    // (vendor-intended browser integration). Exact signer, installed
+    // location (identity), browser stores only, never tampered.
+    BenignReader {
+        kind: BenignKind::BrowserIntegration,
+        image: "idman.exe",
+        signers: &["tonec inc."],
+        scope: BenignScope::Categories(BROWSER_CATS),
+        reason: "Internet Download Manager browser integration",
+    },
+    // FP-16 (fix round 2026-10-25): the Claude desktop app (MSIX, signed
+    // "Anthropic, PBC") reads Chrome's `Local State` for its browser
+    // integration: the key container only, never a cookie / password store.
+    BenignReader {
+        kind: BenignKind::BrowserIntegration,
+        image: "claude.exe",
+        signers: &["anthropic, pbc"],
+        scope: BenignScope::PathContains(r"\local state"),
+        reason: "Claude desktop browser integration (Local State only)",
     },
     // Endpoint management.
     BenignReader {
         kind: BenignKind::Management,
         image: "ccmexec.exe",
-        signer: Some("microsoft"),
+        signers: &["@microsoft"],
         scope: BenignScope::AllStores,
         reason: "SCCM / ConfigMgr client inventory",
     },
     BenignReader {
         kind: BenignKind::Management,
         image: "microsoft.management.services.intunewindowsagent.exe",
-        signer: Some("microsoft"),
+        signers: &["@microsoft"],
         scope: BenignScope::AllStores,
         reason: "Intune management extension",
     },
@@ -1357,11 +1413,30 @@ pub fn is_canary_ignored_reader(proc_: &ProcessInfo, parent: Option<&ProcessInfo
                 | BenignKind::Backup
                 | BenignKind::Management
         ) && glob_match(r.image, &name)
-            && match (r.signer, proc_.signer.as_deref()) {
-                (Some(req), Some(have)) => contains_ci(have, req),
-                _ => false,
-            }
+            && crate::identity::signer_in(r.signers, proc_.signer.as_deref())
     })
+}
+
+/// Fix round 2026-10-25 (corpus `evasion_av_name_substring_signer`,
+/// `evasion_keepass_named_benign_reader`): a benign reader is the product
+/// only with a valid signature by one of its exact signer subjects, at its
+/// install location ([`crate::identity::genuine`], or the Defender platform
+/// folder for Microsoft security products), never tampered with.
+pub fn benign_reader_identity(
+    proc_: &ProcessInfo,
+    r: &BenignReader,
+    system_drive: char,
+    tampered: bool,
+) -> bool {
+    if tampered
+        || proc_.signed != SignatureState::Valid
+        || !crate::identity::signer_in(r.signers, proc_.signer.as_deref())
+    {
+        return false;
+    }
+    crate::identity::genuine(proc_, system_drive, false)
+        || (r.kind == BenignKind::Security
+            && crate::protect::security_product_location_ok(&proc_.image, system_drive))
 }
 
 /// Is this process an allow-listed benign reader for this store?
@@ -1369,19 +1444,17 @@ pub fn benign_reader_for(
     proc_: &ProcessInfo,
     store: &SensitiveStore,
     normalized_path: &str,
+    system_drive: char,
+    tampered: bool,
 ) -> Option<&'static BenignReader> {
-    if is_untrusted_location_or_signature(proc_) {
+    if is_untrusted_location_or_signature(proc_) || tampered {
         return None;
     }
     let name = file_name(&proc_.image).to_ascii_lowercase();
     BENIGN_READERS.iter().find(|r| {
-        if !glob_match(r.image, &name) {
+        if !glob_match(r.image, &name) || !benign_reader_identity(proc_, r, system_drive, tampered)
+        {
             return false;
-        }
-        if let (Some(req), Some(have)) = (r.signer, proc_.signer.as_deref()) {
-            if !contains_ci(have, req) {
-                return false;
-            }
         }
         match r.scope {
             BenignScope::AllStores => true,
@@ -1392,14 +1465,33 @@ pub fn benign_reader_for(
 }
 
 /// Is `proc_` the trusted owner of `store`? Browsers own every browser store
-/// (cross-browser import), each store has its own owner list, and an owner only
-/// counts when it is not unsigned / invalidly signed and not running from
-/// Temp / Downloads / removable media (renamed-binary defence).
-pub fn is_trusted_owner(proc_: &ProcessInfo, store: &SensitiveStore) -> bool {
-    if is_untrusted_location_or_signature(proc_) {
+/// (cross-browser import), each store has its own owner list.
+///
+/// Fix round 2026-10-25 (corpus findings 2 / 8): an owner must be the
+/// application its name claims ([`crate::identity::genuine`]: valid
+/// signature by the publisher's exact signer at its install location, never
+/// injected into or side-loaded), not just a name with any valid signature
+/// outside Temp.
+pub fn is_trusted_owner(
+    proc_: &ProcessInfo,
+    store: &SensitiveStore,
+    norm: &str,
+    system_drive: char,
+    tampered: bool,
+) -> bool {
+    if is_untrusted_location_or_signature(proc_)
+        || !crate::identity::genuine(proc_, system_drive, tampered)
+    {
         return false;
     }
     let name = file_name(&proc_.image).to_ascii_lowercase();
+    // Review 1.1.7 M3: a genuine Electron owner running a script / eval /
+    // inspector / positional argument may be plain Node executing attacker
+    // code (`ELECTRON_RUN_AS_NODE`, invisible to the sensor): not the owner.
+    // The launcher check (untrusted parent) is the engine's.
+    if crate::legit_apps::electron_runs_foreign_code(&name, &proc_.cmdline) {
+        return false;
+    }
     let browser_store = matches!(store.owner, OwnerApp::Chromium | OwnerApp::Firefox)
         || matches!(
             store.category,
@@ -1408,10 +1500,342 @@ pub fn is_trusted_owner(proc_: &ProcessInfo, store: &SensitiveStore) -> bool {
                 | DataCategory::BrowserAutofill
                 | DataCategory::BrowserMasterKey
         ) && store.owner != OwnerApp::Other;
+    // Red-team round 2026-10-25: a browser name owns the browser stores only
+    // when it is pinned to its publisher (exact signer + install location);
+    // a folder alone is not an identity (an administrator-written
+    // `Program Files\Thorium\thorium.exe` with any certificate is not a
+    // browser). Other owner names keep their ownership in an admin-only
+    // folder; in the user's profile they are judged by
+    // [`own_folder_reader`] (alert-only, destination-bound) instead.
+    let _ = norm;
     if browser_store && BROWSER_IMAGES.contains(&name.as_str()) {
-        return true;
+        return crate::identity::listed(&proc_.image);
     }
     store.owners.iter().any(|o| glob_match(o, &name))
+        && (crate::identity::listed(&proc_.image)
+            || crate::identity::admin_location(&proc_.image, system_drive))
+}
+
+/// Red-team round 2026-10-25: an owner name that is not pinned by the
+/// publisher table (minor browsers, most wallets, FTP clients) reading the
+/// store in its own application folder ([`own_app_folder`]): genuine
+/// (valid signature, profile `AppData`, untampered) but its signer is not
+/// verified, so the read is recorded as a Low Audit ST-01 and a following
+/// send is judged by destination (never silent, never Low towards a raw IP
+/// or an exfiltration service).
+pub fn own_folder_reader(
+    proc_: &ProcessInfo,
+    store: &SensitiveStore,
+    norm: &str,
+    system_drive: char,
+    tampered: bool,
+) -> bool {
+    if is_untrusted_location_or_signature(proc_)
+        || !crate::identity::genuine(proc_, system_drive, tampered)
+        || crate::identity::listed(&proc_.image)
+        || crate::legit_apps::is_remote_controlled(&proc_.cmdline)
+    {
+        return false;
+    }
+    let name = file_name(&proc_.image).to_ascii_lowercase();
+    let browser_store = matches!(store.owner, OwnerApp::Chromium | OwnerApp::Firefox);
+    let owner_name = (browser_store && BROWSER_IMAGES.contains(&name.as_str()))
+        || store.owners.iter().any(|o| glob_match(o, &name));
+    owner_name && own_app_folder(&proc_.image, norm)
+}
+
+/// Does the store at `norm` live in the reader's own application folder
+/// (`AppData\{Roaming,Local}\<app>\...` with `\<app>\` in the image path)?
+pub fn own_app_folder(image: &str, norm: &str) -> bool {
+    let Some(rel) = profile_relative(norm) else {
+        return false;
+    };
+    let Some(rest) = rel
+        .strip_prefix(r"appdata\roaming\")
+        .or_else(|| rel.strip_prefix(r"appdata\local\programs\"))
+        .or_else(|| rel.strip_prefix(r"appdata\local\"))
+    else {
+        return false;
+    };
+    let Some(app) = rest
+        .split('\\')
+        .next()
+        .filter(|a| a.len() >= 3 && *a != "..")
+    else {
+        return false;
+    };
+    if matches!(
+        app,
+        "microsoft" | "google" | "packages" | "temp" | "programs"
+    ) {
+        return false;
+    }
+    normalize_path(image).contains(&format!(r"\{app}\"))
+}
+
+/// FP-04 (DETECTION-QUALITY.md, fix round 2026-10-25): Chromium shell apps
+/// (Microsoft's Copilot app, other WebView2 / CEF hosts) keep an embedded
+/// browser profile under `AppData\Local\<vendor>\<product>\User Data\`,
+/// which the catalog matches as an unnamed "Chromium-based browser". The
+/// app reading **its own** profile is not theft: a genuine image
+/// ([`crate::identity::genuine`]) whose install path contains the same
+/// `\<vendor>\<product>\` folders as the profile root, not under remote
+/// control. Named browsers' profiles (Chrome, Edge, Brave, ...) never
+/// qualify, nor does any other reader.
+pub fn own_embedded_profile(
+    proc_: &ProcessInfo,
+    store: &SensitiveStore,
+    norm: &str,
+    system_drive: char,
+    tampered: bool,
+) -> bool {
+    if store.app != "Chromium-based browser"
+        || store.owner != OwnerApp::Chromium
+        || crate::legit_apps::is_remote_controlled(&proc_.cmdline)
+        || !crate::identity::genuine(proc_, system_drive, tampered)
+        || crate::legit_apps::electron_runs_foreign_code(
+            &file_name(&proc_.image).to_ascii_lowercase(),
+            &proc_.cmdline,
+        )
+    {
+        return false;
+    }
+    let Some(i) = norm.find(r"\user data\") else {
+        return false;
+    };
+    let Some(rel) = profile_relative(&norm[..i + 1]) else {
+        return false;
+    };
+    let app_dir = rel
+        .strip_prefix(r"appdata\local\")
+        .or_else(|| rel.strip_prefix(r"appdata\roaming\"))
+        .unwrap_or("")
+        .trim_end_matches('\\');
+    let comps: Vec<&str> = app_dir.split('\\').filter(|c| !c.is_empty()).collect();
+    if comps.is_empty() || comps.len() > 3 || comps.contains(&"..") {
+        return false;
+    }
+    let needle = format!(r"\{}\", comps.join("\\"));
+    normalize_path(&proc_.image).contains(&needle)
+}
+
+// ---------------------------------------------------------------------------
+// 8.3 short names (fix round 2026-10-25, corpus `evasion_short_name_paths`)
+// ---------------------------------------------------------------------------
+
+/// Long path components of the store catalog that have an 8.3 alias
+/// (longer than 8 characters, or containing a space / extra dot). A short
+/// component `NAME~N[.EXT]` is expanded to every one of these whose 8.3 stem
+/// starts with `NAME` (and whose extension starts with `EXT`).
+const SHORT_NAME_VOCAB: &[&str] = &[
+    "user data",
+    "login data",
+    "login data for account",
+    "local state",
+    "web data",
+    "local extension settings",
+    "sync extension settings",
+    "local storage",
+    "telegram desktop",
+    "bravesoftware",
+    "brave-browser",
+    "brave-browser-beta",
+    "chrome beta",
+    "chrome sxs",
+    "edge beta",
+    "opera software",
+    "opera stable",
+    "opera gx stable",
+    "yandexbrowser",
+    "microsoft",
+    "credentials",
+    "key_datas",
+    "exodus.wallet",
+    "seed.seco",
+    "passphrase.json",
+    "default_wallet",
+    "tokenbroker",
+    "atomic wallet",
+    "ledger live",
+    "filezilla",
+    "recentservers.xml",
+    "sitemanager.xml",
+    "discordcanary",
+    "discordptb",
+    "logins.json",
+    "cookies.sqlite",
+    "key4.db",
+    "formhistory.sqlite",
+    "application data",
+];
+
+/// 8.3 form of a long name: (stem without spaces / dots, up to the last
+/// dot; extension) in lower case.
+fn short_form(long: &str) -> (String, String) {
+    let (stem, ext) = match long.rfind('.') {
+        Some(i) if i > 0 => (&long[..i], &long[i + 1..]),
+        _ => (long, ""),
+    };
+    let clean: String = stem.chars().filter(|c| *c != ' ' && *c != '.').collect();
+    let ext: String = ext.chars().filter(|c| *c != ' ').take(3).collect();
+    (clean, ext)
+}
+
+/// Long names a short component (`userda~1`, `logind~1`, `exodus~1.wal`)
+/// may stand for, from [`SHORT_NAME_VOCAB`] and the wallet / password-manager
+/// extension ids.
+fn short_name_candidates(comp: &str) -> Vec<&'static str> {
+    let (stem_part, ext_part) = match comp.rfind('.') {
+        Some(i) => (&comp[..i], &comp[i + 1..]),
+        None => (comp, ""),
+    };
+    let Some((prefix, n)) = stem_part.rsplit_once('~') else {
+        return vec![];
+    };
+    if prefix.len() < 2 || n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return vec![];
+    }
+    let mut out = Vec::new();
+    let ids = WALLET_EXTENSIONS
+        .iter()
+        .chain(PASSWORD_MANAGER_EXTENSIONS.iter())
+        .map(|(id, _)| *id);
+    for long in SHORT_NAME_VOCAB.iter().copied().chain(ids) {
+        let (stem, ext) = short_form(long);
+        if stem.starts_with(prefix)
+            && ext.starts_with(ext_part)
+            && (ext_part.is_empty() == ext.is_empty())
+        {
+            out.push(long);
+        }
+    }
+    out
+}
+
+/// Does `path` contain an 8.3 component that may stand for a store
+/// component? (Pre-filter companion of [`may_be_sensitive`] for short
+/// paths; cheap and false for ordinary `PROGRA~1` paths.)
+pub fn may_be_sensitive_short(path: &str) -> bool {
+    if !path.contains('~') {
+        return false;
+    }
+    path.to_ascii_lowercase()
+        .split(['\\', '/'])
+        .any(|c| !short_name_candidates(c).is_empty())
+}
+
+/// Match a normalised path whose 8.3 components hide a store: every
+/// combination of candidate long names is tried (bounded), the first match
+/// wins. Returns the store and the expanded path.
+pub fn match_short_names(norm: &str) -> Option<(SensitiveStore, String)> {
+    if !norm.contains('~') {
+        return None;
+    }
+    let comps: Vec<&str> = norm.split('\\').collect();
+    let mut options: Vec<Vec<String>> = Vec::with_capacity(comps.len());
+    let mut combos = 1usize;
+    for c in &comps {
+        let mut v = vec![c.to_string()];
+        v.extend(short_name_candidates(c).into_iter().map(str::to_string));
+        combos = combos.saturating_mul(v.len());
+        options.push(v);
+    }
+    if combos <= 1 || combos > 256 {
+        return None;
+    }
+    let mut idx = vec![0usize; options.len()];
+    loop {
+        let p: Vec<&str> = idx
+            .iter()
+            .zip(&options)
+            .map(|(i, o)| o[*i].as_str())
+            .collect();
+        let cand = p.join("\\");
+        if cand != norm {
+            if let Some(s) = match_normalized(&cand) {
+                return Some((s, cand));
+            }
+        }
+        // next combination
+        let mut k = 0;
+        loop {
+            if k == idx.len() {
+                return None;
+            }
+            idx[k] += 1;
+            if idx[k] < options[k].len() {
+                break;
+            }
+            idx[k] = 0;
+            k += 1;
+        }
+    }
+}
+
+/// FP-13 (fix round 2026-10-25): `DllHost.exe` (a shell / indexer COM
+/// server) opened store **folders** (`ProgramData\Microsoft\Vault`,
+/// `.aws\cli\cache`, a wallet extension's folder): enumeration, not a read.
+/// File events carry no directory flag, so this recognises the container
+/// folders of the catalog by their last component. Only `open` events;
+/// every file inside them is still a read.
+pub fn store_container_path(norm: &str) -> bool {
+    // An open of a path ending in a separator is a folder.
+    if norm.ends_with('\\') {
+        return true;
+    }
+    let comps: Vec<&str> = norm
+        .trim_end_matches('\\')
+        .split('\\')
+        .filter(|c| !c.is_empty())
+        .collect();
+    let Some(last) = comps.last().copied() else {
+        return false;
+    };
+    let parent = comps.len().checked_sub(2).map(|i| comps[i]).unwrap_or("");
+    const CONTAINERS: &[&str] = &[
+        "vault",
+        "cache",
+        "leveldb",
+        "local storage",
+        "tdata",
+        "local extension settings",
+        "sync extension settings",
+        "indexeddb",
+        "user data",
+        "default",
+        "network",
+        "wallets",
+        ".aws",
+        ".azure",
+        ".kube",
+        ".docker",
+        ".ssh",
+        "sso",
+        "cli",
+    ];
+    if CONTAINERS.contains(&last) {
+        return true;
+    }
+    // `Microsoft\Credentials` / `Microsoft\Protect` folders (`.aws\credentials` is a file).
+    if parent == "microsoft" && matches!(last, "credentials" | "protect") {
+        return true;
+    }
+    // A wallet / password-manager extension's own folder.
+    if matches!(
+        parent,
+        "local extension settings" | "sync extension settings"
+    ) && !last.contains('.')
+    {
+        return true;
+    }
+    // Telegram's account folder (`tdata\<16 hex>`; its data files carry a
+    // trailing `s` or live inside it).
+    if parent == "tdata" && last.len() == 16 && last.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return true;
+    }
+    // Vault GUID folders, Protect SID folders.
+    let guid_like = last.len() == 36 && last.matches('-').count() == 4;
+    (parent == "vault" && guid_like) || (parent == "protect" && last.starts_with("s-1-"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1642,6 +2066,27 @@ pub fn normalize_path(path: &str) -> String {
     if let Some(rest) = s.strip_prefix(r"\\?\unc\") {
         return format!(r"\\{rest}");
     }
+    // Fix round 2026-10-25 (corpus `evasion_shadow_copy_store_read`):
+    // `\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopyN\Users\...` (and the
+    // `\\.\` / `\??\` forms) are the NT device namespace: drop the prefix and
+    // continue with the `\device\` rule below, so a store read from a volume
+    // shadow copy is the store.
+    for p in [
+        r"\\?\globalroot\",
+        r"\\.\globalroot\",
+        r"\??\globalroot\",
+        r"\globalroot\",
+    ] {
+        if let Some(rest) = s.strip_prefix(p) {
+            s = format!(r"\{rest}");
+            break;
+        }
+    }
+    if let Some(rest) = s.strip_prefix(r"\\.\") {
+        if rest.len() >= 2 && rest.as_bytes()[1] == b':' {
+            return rest.to_string();
+        }
+    }
     if let Some(rest) = s.strip_prefix(r"\\?\").or_else(|| s.strip_prefix(r"\??\")) {
         return rest.to_string();
     }
@@ -1663,10 +2108,6 @@ pub fn normalize_path(path: &str) -> String {
 /// File name component of a path (either separator). Not lower-cased.
 pub fn file_name(path: &str) -> &str {
     path.rsplit(['\\', '/']).next().unwrap_or(path)
-}
-
-fn contains_ci(hay: &str, needle_lower: &str) -> bool {
-    hay.to_ascii_lowercase().contains(needle_lower)
 }
 
 /// Path glob (callers normalise / lower-case both sides): `*` matches any
@@ -2869,22 +3310,65 @@ mod tests {
         }
     }
 
+    /// Review of the 1.1.7 integration, M3: a genuine Discord running a
+    /// script / eval / inspector / positional argument (the
+    /// `ELECTRON_RUN_AS_NODE` pattern) is not the owner of its store; the
+    /// plain app, its Chromium children and the Squirrel stub are.
+    #[test]
+    fn electron_owner_running_node_code_is_not_owner_m3() {
+        const DC: &str = r"c:\users\a\appdata\roaming\discord\local storage\leveldb\000005.ldb";
+        let st = match_sensitive_path(DC).unwrap();
+        let mut dc = pinfo(
+            r"C:\Users\a\AppData\Local\Discord\app-1.0.9213\Discord.exe",
+            SignatureState::Valid,
+            Some("Discord Inc."),
+        );
+        for plain in [
+            r#""C:\Users\a\AppData\Local\Discord\app-1.0.9213\Discord.exe""#,
+            r#""C:\Users\a\AppData\Local\Discord\app-1.0.9213\Discord.exe" --start-minimized"#,
+            r#""C:\Users\a\AppData\Local\Discord\app-1.0.9213\Discord.exe" --type=renderer --user-data-dir="C:\Users\a\AppData\Roaming\discord" --app-path="C:\Users\a\AppData\Local\Discord\app-1.0.9213\resources\app.asar" /prefetch:1"#,
+            r#""C:\Users\a\AppData\Local\Discord\Discord.exe" --processStart Discord.exe --process-start-args "--start-inactive""#,
+            r#""C:\Users\a\AppData\Local\Discord\app-1.0.9213\Discord.exe" --url -- "discord://-/channels/1/2""#,
+        ] {
+            dc.cmdline = plain.into();
+            assert!(is_trusted_owner(&dc, &st, DC, 'c', false), "{plain}");
+        }
+        for node in [
+            r#""C:\Users\a\AppData\Local\Discord\app-1.0.9213\Discord.exe" C:\Users\a\AppData\Roaming\x\s.js"#,
+            r#""C:\Users\a\AppData\Local\Discord\app-1.0.9213\Discord.exe" C:\Users\a\AppData\Roaming\x\payload"#,
+            r#""C:\Users\a\AppData\Local\Discord\app-1.0.9213\Discord.exe" -e "require('fs')""#,
+            r#""C:\Users\a\AppData\Local\Discord\app-1.0.9213\Discord.exe" --inspect=9229"#,
+            r#""C:\Users\a\AppData\Local\Discord\app-1.0.9213\Discord.exe" file:///C:/x/s"#,
+            r#""C:\Users\a\AppData\Local\Discord\app-1.0.9213\Discord.exe" --processStart x C:\x\payload"#,
+        ] {
+            dc.cmdline = node.into();
+            assert!(!is_trusted_owner(&dc, &st, DC, 'c', false), "{node}");
+        }
+    }
+
     #[test]
     fn owners_and_benign() {
-        let st =
-            match_sensitive_path(r"C:\Users\a\AppData\Roaming\Telegram Desktop\tdata\x").unwrap();
+        const TG: &str = r"c:\users\a\appdata\roaming\telegram desktop\tdata\x";
+        let st = match_sensitive_path(TG).unwrap();
         let tg = pinfo(
             r"C:\Users\a\AppData\Roaming\Telegram Desktop\Telegram.exe",
             SignatureState::Valid,
             Some("Telegram FZ-LLC"),
         );
-        assert!(is_trusted_owner(&tg, &st));
+        assert!(is_trusted_owner(&tg, &st, TG, 'c', false));
+        assert!(!is_trusted_owner(&tg, &st, TG, 'c', true), "tainted");
         let fake = pinfo(
             r"C:\Users\a\AppData\Local\Temp\telegram.exe",
             SignatureState::Unsigned,
             None,
         );
-        assert!(!is_trusted_owner(&fake, &st));
+        assert!(!is_trusted_owner(&fake, &st, TG, 'c', false));
+        let stolen = pinfo(
+            r"C:\Users\a\AppData\Roaming\Telegram Desktop\Telegram.exe",
+            SignatureState::Valid,
+            Some("Some Other Company Ltd"),
+        );
+        assert!(!is_trusted_owner(&stolen, &st, TG, 'c', false));
         let chrome_st = match_sensitive_path(
             r"C:\Users\a\AppData\Local\Google\Chrome\User Data\Default\Login Data",
         )
@@ -2894,24 +3378,48 @@ mod tests {
             SignatureState::Valid,
             Some("Microsoft Corporation"),
         );
-        assert!(is_trusted_owner(&edge, &chrome_st));
+        assert!(is_trusted_owner(&edge, &chrome_st, "", 'c', false));
         let idx = pinfo(
             r"C:\Windows\System32\SearchProtocolHost.exe",
             SignatureState::Valid,
             Some("Microsoft Windows"),
         );
-        assert!(benign_reader_for(&idx, &chrome_st, "").is_some());
+        assert!(benign_reader_for(&idx, &chrome_st, "", 'c', false).is_some());
+        assert!(benign_reader_for(&idx, &chrome_st, "", 'c', true).is_none());
+        // Exact signer, install location (corpus `evasion_av_name_substring_signer`).
+        let fake_eset = pinfo(
+            r"C:\ProgramData\ESET\ekrn.exe",
+            SignatureState::Valid,
+            Some("Reset Data Systems Ltd"),
+        );
+        assert!(benign_reader_for(&fake_eset, &chrome_st, "", 'c', false).is_none());
+        let eset_elsewhere = pinfo(
+            r"C:\ProgramData\ESET\ekrn.exe",
+            SignatureState::Valid,
+            Some("ESET, spol. s r.o."),
+        );
+        assert!(benign_reader_for(&eset_elsewhere, &chrome_st, "", 'c', false).is_none());
+        let eset = pinfo(
+            r"C:\Program Files\ESET\ESET Security\ekrn.exe",
+            SignatureState::Valid,
+            Some("ESET, spol. s r.o."),
+        );
+        assert!(benign_reader_for(&eset, &chrome_st, "", 'c', false).is_some());
         let od = pinfo(
             r"C:\Program Files\Microsoft OneDrive\OneDrive.exe",
             SignatureState::Valid,
             Some("Microsoft Corporation"),
         );
         let kdbx = match_sensitive_path(r"C:\Users\a\OneDrive\vault.kdbx").unwrap();
-        assert!(benign_reader_for(&od, &kdbx, r"c:\users\a\onedrive\vault.kdbx").is_some());
+        assert!(
+            benign_reader_for(&od, &kdbx, r"c:\users\a\onedrive\vault.kdbx", 'c', false).is_some()
+        );
         assert!(benign_reader_for(
             &od,
             &chrome_st,
-            r"c:\users\a\appdata\local\google\chrome\user data\default\login data"
+            r"c:\users\a\appdata\local\google\chrome\user data\default\login data",
+            'c',
+            false
         )
         .is_none());
         assert!(owner_images(OwnerApp::Telegram).contains(&"telegram.exe"));

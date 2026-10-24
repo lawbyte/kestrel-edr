@@ -1,0 +1,30 @@
+{
+  "must_alert": [
+    {
+      "any_of": [
+        "ST-01"
+      ],
+      "min_severity": "medium"
+    },
+    "ST-04",
+    {
+      "any_of": [
+        "ST-14"
+      ],
+      "min_severity": "high"
+    }
+  ],
+  "min_severity": "critical",
+  "family": "Steam session theft",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "evasion_targets": [
+    "legit_apps::vendor_config_reader (config.vdf first)"
+  ],
+  "sources": [
+    "https://www.trendmicro.com/en/research/25/j/how-vidar-stealer-2-upgrades-infostealer-capabilities.html"
+  ],
+  "notes": "Steam config.vdf first (the part GPU/overlay tools read), then loginusers.vdf, ssfn and local.vdf; Telegram bot upload."
+}

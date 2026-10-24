@@ -1,0 +1,18 @@
+{
+  "must_alert": [
+    "ST-05",
+    "ST-04"
+  ],
+  "min_severity": "high",
+  "family": "CDP cookie dump (ABE bypass)",
+  "category": "abe",
+  "must_act": [
+    "kill_process"
+  ],
+  "sources": [
+    "https://specterops.io/blog/2025/08/27/dough-no-revisiting-cookie-theft/",
+    "https://specterops.io/blog/2026/08/13/chrome-devtools-protocol-cookie-theft/",
+    "https://developer.chrome.com/blog/remote-debugging-port"
+  ],
+  "notes": "--remote-debugging-pipe: CDP over inherited pipes (fd 3/4), no TCP port, so no loopback connection exists for ST-06."
+}

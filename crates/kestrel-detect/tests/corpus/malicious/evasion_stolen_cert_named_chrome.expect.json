@@ -1,0 +1,26 @@
+{
+  "must_alert": [
+    "ST-02",
+    "ST-04"
+  ],
+  "min_severity": "critical",
+  "family": "generic (validly signed with a stolen certificate)",
+  "category": "evasion",
+  "must_act": [
+    "kill_process"
+  ],
+  "should_alert": [
+    "ST-14"
+  ],
+  "evasion_targets": [
+    "paths::is_trusted_owner (name-only owner match)",
+    "engine::on_net browser shortcut"
+  ],
+  "sources": [
+    "https://securityaffairs.com/183532/",
+    "https://bleepingcomputer.com/news/security/fake-enterprise-vpn-downloads-used-to-steal-company-credentials",
+    "https://www.securityweek.com/infostealer-malware-delivered-in-emeditor-supply-chain-attack/"
+  ],
+  "notes": "Stealer signed with a valid (stolen / purchased) code-signing certificate of an unrelated company, renamed chrome.exe and placed at the per-user Chrome install path. is_trusted_owner() matches browser stores by image *name* + 'not untrusted' (any valid signer), and on_net() treats any trusted-looking browser image as a browser (no ST-04 / ST-14).",
+  "known_gap": "browser image name + any valid signer = trusted owner of browser stores; on_net treats it as a browser (no ST-04 / ST-14)"
+}
