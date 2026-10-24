@@ -69,6 +69,9 @@ services:
       - ./installers:/app/agent:ro
       # Optional operator TLS cert/key (set TLS_CERT=/app/tls/fullchain.pem, TLS_KEY=/app/tls/privkey.pem)
       - ./tls:/app/tls:ro
+      # Collected evidence bundles (sealed with a key derived from KESTREL_MASTER_KEY,
+      # deleted after Settings > retention_days.evidence). KESTREL_EVIDENCE_DIR.
+      - evidence:/var/lib/kestrel/evidence
     healthcheck:
       test: ["CMD", "curl", "-fsk", "https://127.0.0.1:443/api/healthz"]
       interval: 10s
@@ -79,3 +82,4 @@ services:
 volumes:
   pgdata:
   chdata:
+  evidence:

@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/lawbyte/kestrel-edr/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/lawbyte/kestrel-edr/ci.yml?branch=main&style=flat&label=CI"></a>
   <a href="https://lawbyte.github.io/kestrel-edr/"><img alt="Docs" src="https://img.shields.io/badge/docs-online-4357c9?style=flat"></a>
-  <a href="https://github.com/lawbyte/kestrel-edr/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.1.6-4357c9?style=flat"></a>
+  <a href="https://github.com/lawbyte/kestrel-edr/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.1.7-4357c9?style=flat"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-555c6b?style=flat"></a>
   <img alt="Windows 10 and 11" src="https://img.shields.io/badge/endpoint-Windows%2010%20%7C%2011-555c6b?style=flat&logo=windows&logoColor=white">
   <img alt="Rust" src="https://img.shields.io/badge/agent-Rust-555c6b?style=flat&logo=rust&logoColor=white">
@@ -31,7 +31,7 @@ It has four parts:
 * **Admin console**: a React app served by the server.
 * **Tray app**: a small Tauri app for employees. It shows status, explains blocks in plain language and lets the employee request a review. An IT technician can turn protection off for a limited time from the tray with the device's uninstall token (detection only by default; every turn-off is a `TP-06` alert and an audit entry, and IT can turn it back on from the console).
 
-> **Status: v1.1.6 (release candidate), user-mode only.** Validated on Windows 11 (26100) in a disposable lab VM. Read the limits section before you rely on it.
+> **Status: v1.1.7 (release candidate), user-mode only.** Validated on Windows 11 (26100) in a disposable lab VM. Read the limits section before you rely on it.
 
 ## Screenshots
 
@@ -93,6 +93,8 @@ Console screenshots use the built-in demo data (`npm run dev:mock`). The tray an
   * the process tree and network evidence
   * the categories of data at risk
   * a checklist with three kinds of items: what the agent already did, one-click actions that need approval, and manual steps such as revoking sessions or moving wallet funds
+* **Evidence of what was taken.** When `ST-02` or `ST-04` fires, the agent keeps a sealed evidence bundle on the PC: copies of the files the process staged (for example `Passwords.txt` or a zip), the list of secrets it read, copies of those secrets, and a packet capture (`.pcapng`) of its connections. The incident shows the evidence in plain language (which stores were read, what was decrypted with DPAPI, where data was sent). An admin with `evidence.download` collects the bundle and downloads it as an AES-256 zip whose password is shown once. Every step is audited, the employee sees a tray notice, and bundles expire after 14 days by default. The policy switches each part on or off.
+* **Measured false-positive rate and coverage.** Every build replays 127 malware behaviour scenarios, 16 benign look-alikes and 47 anonymised slices of a real workstation through the engine. The build fails if any malware scenario is missed or any benign case alerts beyond what it allows ([docs/DETECTION-QUALITY.md](docs/DETECTION-QUALITY.md)).
 * **Hunting.** A small filter language over telemetry, for example `event_type = dns_query and dns_qname ~ telegram`. Telemetry is stored in ClickHouse, or in Postgres for small sites.
 * **Custom Sigma rules.** Rules are compiled and validated by the server, then pushed to agents and evaluated there with `rsigma`.
 * **Operations features:**
@@ -120,7 +122,7 @@ Console screenshots use the built-in demo data (`npm run dev:mock`). The tray an
     * session and idle limits;
     * allowed hours;
     * blocked folders.
-  * **The employee always knows.** A banner stays at the top of their screen for the whole desktop session and the tray shows a notification, in every profile. There is no hidden mode.
+  * **The employee always knows.** A banner stays at the top of their screen for the whole remote desktop or file-manager session and the tray shows a notification, in every profile. There is no hidden mode.
   * **Admins only, interactive console session only** (API tokens are refused).
   * **Every session and file operation is in the hash-chained audit log,** with the SHA-256 of each transfer. Frames and file contents never reach telemetry, ClickHouse or logs.
 * **Privacy controls for PDPA (Singapore) and UU PDP (Indonesia).**
@@ -135,6 +137,7 @@ Console screenshots use the built-in demo data (`npm run dev:mock`). The tray an
 * **User mode only. There is no kernel driver.** Telemetry comes from ETW and the event log, so it arrives asynchronously, typically within about 1 s on the core session and up to about 5 s for file and network events. A fast stealer can read and send some data before the agent reacts. Kestrel aims to **detect fast and contain fast**, and it does not guarantee prevention. The incident checklist assumes the data may have left the device, and says so.
 * An attacker with administrator or SYSTEM rights can blind ETW, stop sessions or remove WFP filters. The `TP-*` rules and the agent's watchdog detect and repair much of this, but a user-mode agent cannot fully defend itself against an admin.
 * The Windows sensor layer has been validated on Windows 11 Enterprise 26100 in a disposable QEMU/KVM lab: install, all sensors, a benign emulation per rule, Protect actions, isolation and break-glass, upgrade and uninstall. It has not yet run on a fleet of physical machines or with Office/OneDrive-heavy workloads: see [docs/TESTING-ON-WINDOWS.md](docs/TESTING-ON-WINDOWS.md) and [docs/HANDOFF.md](docs/HANDOFF.md).
+* The 1.1.6 and 1.1.7 changes (sensor attribution, the identity-based trust in the detection engine, evidence capture with PktMon, the lower-footprint uploader and tray) are unit-tested and replayed against recorded data, but not yet validated in the lab VM. The malware scenarios in the corpus are written from public reports, not captured from real samples.
 * Registry writes are attributed to a process by joining ETW with a registry watcher, because Windows 11 omits the key name in the ETW event. When more than one process could have written a value, Kestrel removes the autorun but does not act on any process, and the alert says the writer was inferred.
 * Ransomware encrypting your files from **another** computer over SMB shows up as the System process: Kestrel alerts but cannot kill the remote encryptor.
 * The binaries are not code-signed yet. Microsoft Defender currently flags the unsigned agent (a heuristic on its credential-store path tables); sign it before deployment (see [docs/BUILDING.md](docs/BUILDING.md)).

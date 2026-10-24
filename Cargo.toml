@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/kestrel-common", "crates/kestrel-detect", "crates/kestrel-platform", "crates/kestrel-win", "crates/kestrel-scan", "crates/kestrel-msica", "crates/kestrel-uninstall", "crates/kestrel-agent", "crates/kestrel-server"]
 
 [workspace.package]
-version = "1.1.6"
+version = "1.1.7"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Azka (lawbyte)"]

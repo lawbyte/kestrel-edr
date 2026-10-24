@@ -40,13 +40,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM ${RUNTIME_IMAGE}
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tini && rm -rf /var/lib/apt/lists/* && \
     useradd --system --uid 10001 --home /app --shell /usr/sbin/nologin kestrel && \
-    mkdir -p /app/console /app/agent && chown -R kestrel /app
+    mkdir -p /app/console /app/agent /var/lib/kestrel/evidence && chown -R kestrel /app /var/lib/kestrel && \
+    chmod 0700 /var/lib/kestrel/evidence
 COPY --from=server /usr/local/bin/kestrel-server /usr/local/bin/kestrel-server
 COPY --from=console /src/console/dist/ /app/console/
 ENV CONSOLE_DIR=/app/console \
     AGENT_DIR=/app/agent \
     KESTREL_HTTPS_ADDR=0.0.0.0:443 \
     KESTREL_GRPC_ADDR=0.0.0.0:8443 \
+    KESTREL_EVIDENCE_DIR=/var/lib/kestrel/evidence \
     RUST_LOG=info,sqlx=warn
 USER kestrel
 WORKDIR /app

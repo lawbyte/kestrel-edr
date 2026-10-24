@@ -57,6 +57,8 @@ Retention, notifications (Slack, Teams, signed webhook, SMTP, syslog CEF/JSON), 
 
 Back up **three things**: the Postgres database, the ClickHouse volume (optional — telemetry), and `.env` (master key!).
 
+The `evidence` volume (`KESTREL_EVIDENCE_DIR`, default `/var/lib/kestrel/evidence`) holds evidence bundles an administrator collected after a suspected data theft. They are encrypted with a key derived from `KESTREL_MASTER_KEY` (unreadable without it), deleted automatically after *Settings → retention → evidence* days (default 14), and capped at `KESTREL_EVIDENCE_MAX_GB` (default 20 GB). They are investigation copies of employees' data: back the volume up only if your evidence-handling policy requires it, and keep such backups as restricted as the master key.
+
 ```bash
 # Backup (daily cron)
 docker compose exec -T postgres pg_dump -U kestrel -Fc kestrel > kestrel-$(date +%F).dump

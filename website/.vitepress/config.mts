@@ -30,7 +30,7 @@ export default defineConfig({
       { text: 'Console', link: '/console/', activeMatch: '^/console/' },
       { text: 'Reference', link: '/reference/rules', activeMatch: '^/reference/' },
       {
-        text: 'v1.1.6',
+        text: 'v1.1.7',
         items: [
           { text: 'Releases', link: `${repo}/releases` },
           { text: 'Security policy', link: `${repo}/blob/main/SECURITY.md` },
@@ -65,6 +65,7 @@ export default defineConfig({
           { text: 'Console tour', link: '/console/tour' },
           { text: 'Devices', link: '/console/devices' },
           { text: 'Response actions', link: '/console/response' },
+          { text: 'Evidence capture', link: '/console/evidence' },
           { text: 'Hunting', link: '/console/hunt' },
           { text: 'Rules, exclusions and IOCs', link: '/console/rules' },
           { text: 'Policies', link: '/console/policies' },
@@ -96,6 +97,7 @@ export default defineConfig({
           { text: 'Detection rules', link: '/reference/rules' },
           { text: 'Agent CLI', link: '/reference/cli' },
           { text: 'Ports, files and API', link: '/reference/ports-files' },
+          { text: 'Resource use on endpoints', link: '/reference/performance' },
         ],
       },
     ],

@@ -2,9 +2,57 @@
 
 Read `CLAUDE.md` first. This run took Kestrel from "compiled and simulated" to "validated on real Windows, broader malware coverage, release candidate". Decisions with reasons are in `docs/DECISIONS.md`; the security reviews are `docs/security-review-2026-10-21.md` (v1.0) and `docs/security-review-v1.1-2026-10-21.md` (v1.1, independent).
 
+## Kestrel 1.1.7 (2026-10-25): summary and verification
+
+1.1.7 combines the sections below: readable evidence in the incident view, evidence capture, lower footprint (uploader, ETW pump, tray), the file-manager banner, sensor issuing-thread attribution and `Local State` opens, the detection-quality harness and the detection fix round. The 8.3 short-name prefilter gap from the fix round is closed in `kestrel-win` `filters::may_be_sensitive`. An independent hostile review of the whole 1.1.7 diff found 0 Critical/High, 4 Medium, 3 Low, 2 Info; all are fixed (DECISIONS "Review of the 1.1.7 integration").
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` | pass |
+| `cargo test --workspace` on Windows (server against Postgres 16 in Docker) | pass |
+| Linux (WSL Kali) tests for common, detect, platform, agent | pass |
+| `scripts/e2e.sh` (WSL, real server + simulated agents) | pass, 64/64 |
+| Corpus gate: malicious / benign / benign-lookalike | 127/127, 47/47, 16/16; ratchet empty |
+| Owner export (5.0 M events), Default policy | 463 alerts, 13 containment actions (was 668 / 549); 0 with the two missing signatures filled in (assumption, DETECTION-QUALITY.md section 8) |
+| Console tests / lint / build | pass (247 tests) |
+| Tray tests / clippy / build | pass |
+| Website build and style check | pass |
+| Real Windows (lab VM) | **not run**: no lab VM exists at the moment. 1.1.6 and 1.1.7 are validated by tests and replays only. The owner's own PC runs it audit-only. |
+
+**Needs the owner:** rebuild a lab VM (TESTING-ON-WINDOWS.md) and run the lab checklists in the sections below before moving any PC out of audit-only.
+
+## Evidence capture for suspected data theft (2026-10-25) - agent, Windows, server, console
+
+Owner decision and design in `docs/DECISIONS.md` (2026-10-25 "Evidence capture" + review addendum); contract in `docs/contracts.md` "Evidence capture for suspected data theft".
+
+* **Contracts:** `kestrel_common::evidence` (policy, manifest, report, limits, `KEB1` container), `kestrel_common::seal` (`KSE1` streaming AES-256-GCM, feature `seal`), `ResponseAction::{CollectEvidence, DeleteEvidence}`, `AgentPayload::Evidence`, `LiveServerMsg::EvidenceRead` / `LiveAgentMsg::EvidenceData`, `Policy.evidence`, `Settings.retention_days.evidence`, `kestrel_platform::evidence` (`EvidenceHost`, `PacketCapture`, `WriteHint`, `SensorConfig.write_tx`), console types. No tray protocol change (existing notification).
+* **Detection / agent:** `kestrel-detect/src/evidence.rs` (bounded journal: written files, credential-store reads, connection tuples; tree membership); `kestrel-agent/src/evidence.rs`, `evidence_bundle.rs`, `sim_evidence.rs`, privacy `scrub_evidence_manifest`. ST-02 / ST-04 → capture (120 s back, 60 s forward) → sealed bundle on the PC → `Ready` report with the filtered manifest; `CollectEvidence` → tray notice → server pulls; `DeleteEvidence`; local retention; per-program / global / disk caps; restart and shutdown handling. Capability `evidence.v1`.
+* **Windows:** `kestrel-win/src/evidence_plan.rs` (pure), `win/evidence.rs` (link-safe, oplock-safe source opens, DPAPI key, free space), `win/pktmon.rs` (PktMon capture), `win/writehint.rs` + `win/translate/write_hints.rs` (CreateNewFile-only write hints, never events).
+* **Server:** `src/evidence.rs`, `src/api/evidence.rs`, migration `0010_evidence.sql`; pull + verification + re-validation, per-bundle keys wrapped by the master key (crypto-shredding), AES-256 zip downloads (crate `zip` 9.1, `aes-crypto` only; MIT tree), single-use same-session tickets, MFA step-up, audit `evidence.*`, retention, `KESTREL_EVIDENCE_DIR` / `KESTREL_EVIDENCE_MAX_GB`, docker volume `evidence`.
+* **Console:** `components/evidence-panel.tsx`, `evidence-dialogs.tsx`, `evidence-policy-editor.tsx`, `lib/evidence.ts`, `mock/evidence.ts`; mounted in `pages/incident.tsx`; policy editor section; Settings retention. Screenshots `website/public/img/console/evidence-{panel,collect,password,policy}-{light,dark}.png`.
+* **Docs:** `website/console/evidence.md` (new, sidebar), `website/console/policies.md`, `website/console/settings.md`, `website/guide/privacy.md`, research `docs/research/notes/evidence-pcap.md`.
+* **Review:** independent hostile review, 2 High / 7 Medium / 8 Low, all fixed or accepted with reasons (DECISIONS addendum).
+
+**Verification (this PC):**
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all -- --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass |
+| `cargo test --workspace` (Postgres 16 in Docker) incl. `kestrel-common` evidence / seal, `kestrel-detect` `tests/evidence.rs`, `kestrel-agent` `evidence_tests`, `kestrel-win` evidence_plan / pktmon planner, `kestrel-server` `tests/evidence.rs` | pass (949 tests) |
+| Console tests / lint / build | pass (244 tests) |
+| Website `npm run check` / build | pass |
+
+**Needs lab validation (Windows VM, never this PC):**
+* A benign stealer emulation (TESTING-ON-WINDOWS.md) that reads browser stores and writes `%TEMP%\x\Passwords.txt` + a zip, then connects out: ST-02 / ST-04 → `capturing` → `ready_on_device` in the console within ~70 s; manifest lists the staged files, secrets read and pcap filters; locked Chrome `Cookies` shows `locked`.
+* Kernel-File CreateNewFile (30) hints arrive with the right paths and pids; hint volume during builds in the profile stays low; nothing from hints appears in telemetry / hunt.
+* pktmon: real `status` / `filter list` text and exit codes, IPv6 in `-i`, circular 50 MB ETL and `_1.etl` naming, `etl2pcap` duration for 50 MB, a running admin capture → `busy` and untouched, crash of the agent mid-capture → `cleanup_stale` stops it at next start, no filters left behind, Defender / other EDR reaction to PktMon started by the service (SigmaHQ "PktMon.EXE Execution" will alert in SIEMs).
+* `open_source`: junction / symlink / hard link / ADS refusals, oplock (BaitAndSwitch-style) returns `locked` without waiting, cloud placeholders refused (OneDrive "always keep on this device" files are lost coverage), the 30 s `CancelSynchronousIo` watchdog interrupts a stuck read, other users' profiles and machine-secret folders never copied.
+* DPAPI bundle key created once and reloaded across a service restart; bundles open only on that PC.
+* Collect from the console (with MFA step-up): tray notice "IT collected evidence from this PC for a security investigation", upload, `stored`, PC copy deleted; download opens in 7-Zip with the shown password (and not in Windows Explorer, as documented); delete and retention remove the server copy.
 ## Remove device: remote uninstall (2026-10-22) - server, agent, uninstaller, console
 
-Owner-agreed design; as-built contract in `docs/contracts.md` "Remove device (remote uninstall)", decisions in `docs/DECISIONS.md` (2026-10-22 "Remove device"). Not committed.
+Owner-agreed design; as-built contract in `docs/contracts.md` "Remove device (remote uninstall)", decisions in `docs/DECISIONS.md` (2026-10-22 "Remove device").
 
 * **Console:** device page danger zone "Remove device" (admin, `devices.remove`): purge checkbox (off), typed hostname, comment, MFA step-up via the existing reauth dialog; banners for pending (Cancel removal), removing, failed (Try again), expired, removed (read-only page). Devices list: "Removal pending" / "Removing" / "Removal failed" badges, "Show removed devices" toggle. Disabled with "agent too old" when the agent lacks `agent.uninstall`. Mock mode covers all states. Action statuses `running` / `cancelled`.
 * **Server:** `POST/DELETE /api/devices/:id/remove`, `include_removed` on the list, migration 0009 (`capabilities`, `removal_action_id`, `removed_at`, `removed_by`), `crate::removal` (request checks, cancel, outcomes, finalisation after 10 min of silence, certificate revocation 7 days later, undo when a removed PC reconnects, token rotation after a failed removal). Token attached only at delivery (`Command.secret`). Audit `device.remove.{requested,cancelled,started,failed,completed,expired}`.
@@ -38,7 +86,7 @@ Owner-agreed design; as-built contract in `docs/contracts.md` "Remove device (re
 
 ## Local "turn protection off" switch (2026-10-21) - tray, agent, server, console
 
-Owner request; design and as-built decisions are in `docs/DECISIONS.md` (entry "local turn protection off switch" and its addenda). Contract: `docs/contracts.md` "Local turn-off (tray switch)". Not committed.
+Owner request; design and as-built decisions are in `docs/DECISIONS.md` (entry "local turn protection off switch" and its addenda). Contract: `docs/contracts.md` "Local turn-off (tray switch)".
 
 * **Tray:** "Turn off protection" asks for the uninstall token, the mode (detection only; completely off only if the policy allows it) and the duration (15 min, 1 h, 4 h, 8 h capped by policy; "until turned back on" only if allowed). The amber "Protection is off" card has "Turn protection back on" (no token).
 * **Agent** (`crates/kestrel-agent/src/pause.rs`):
@@ -89,7 +137,7 @@ Owner request; design and as-built decisions are in `docs/DECISIONS.md` (entry "
 
 ## Fresh-install fixes (2026-10-21, after 1.1.2) â€” hidden decoys, "degraded" at install, ST-01 on Widgets
 
-Three findings from a fresh 1.1.2 install in the lab VM. Details and evidence are in `docs/DECISIONS.md` (entry "fresh install of 1.1.2"). Not committed.
+Three findings from a fresh 1.1.2 install in the lab VM. Details and evidence are in `docs/DECISIONS.md` (entry "fresh install of 1.1.2").
 
 1. **Ransomware decoys were visible; RW-07 fired when an employee tidied up.**
    * Decoys are now `FILE_ATTRIBUTE_HIDDEN` (not SYSTEM). The research is in `docs/research/notes/ransomware-decoy-attributes.md`: no family found skips hidden files by default, and LockBit 2.0 handles SYSTEM files differently.
@@ -146,7 +194,7 @@ Three findings from a fresh 1.1.2 install in the lab VM. Details and evidence ar
 
 ## Remote access run (2026-10-21, after v1.1.0-rc1) â€” remote desktop, file manager, install profiles
 
-**What was added.** Admin-only remote desktop and a remote file manager, chosen per install through remote-access profiles. Not committed yet; owner reviews first.
+**What was added.** Admin-only remote desktop and a remote file manager, chosen per install through remote-access profiles.
 * **Profiles and ceiling:**
   * Enrollment tokens carry a `RemoteAccessProfile`: *none*, *unrestricted* or *guarded*, all customisable.
   * The agent pins the profile at enrollment as a ceiling that the server can never raise.
