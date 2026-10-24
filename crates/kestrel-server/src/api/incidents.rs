@@ -378,12 +378,13 @@ pub async fn detail(
     .bind(id)
     .fetch_all(&st.db)
     .await?;
+    // `actor` is the display name (string | null), as in docs/contracts.md; the console prints it as text.
     let mut timeline: Vec<(i64, Value)> = activity
         .iter()
-        .map(|a| (a.ts, json!({"ts": a.ts, "kind": a.kind, "title": a.title, "detail": a.detail, "actor": models::joined_user!(a).to_api()})))
+        .map(|a| (a.ts, json!({"ts": a.ts, "kind": a.kind, "title": a.title, "detail": a.detail, "actor": models::joined_user!(a).to_api()["name"].clone()})))
         .collect();
     for c in &comments {
-        timeline.push((c.ts, json!({"ts": c.ts, "kind": "comment", "title": "Comment", "detail": c.body, "actor": c.author().to_api()})));
+        timeline.push((c.ts, json!({"ts": c.ts, "kind": "comment", "title": "Comment", "detail": c.body, "actor": c.author().to_api()["name"].clone()})));
     }
     timeline.sort_by_key(|(ts, _)| *ts);
 

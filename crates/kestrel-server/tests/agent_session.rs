@@ -334,6 +334,22 @@ async fn full_agent_session() {
         .await;
     assert_eq!(s, 200, "{item}");
     assert_eq!(item["done"], true);
+    // Timeline actors are display names (the console renders them as text).
+    let (s, inc) = ts.get(&format!("/api/incidents/{iid}")).await;
+    assert_eq!(s, 200, "{inc}");
+    let timeline = inc["timeline"].as_array().unwrap();
+    assert!(
+        timeline
+            .iter()
+            .all(|t| t["actor"].is_null() || t["actor"].is_string()),
+        "{timeline:?}"
+    );
+    assert!(
+        timeline
+            .iter()
+            .any(|t| t["kind"] == "action" && t["actor"].is_string()),
+        "{timeline:?}"
+    );
     let (cseq, cmd, _) = st
         .recv_until(|p| matches!(p, ServerPayload::Command { .. }))
         .await;
