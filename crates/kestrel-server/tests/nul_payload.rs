@@ -53,11 +53,13 @@ async fn nul_in_event_does_not_wedge_the_stream() {
     let bad = st
         .send(&AgentPayload::Events {
             events: vec![ev(10, "cmd.exe /c echo a\u{0}b")],
+            repeats: vec![],
         })
         .await;
     let good = st
         .send(&AgentPayload::Events {
             events: vec![ev(11, "cmd.exe /c echo after")],
+            repeats: vec![],
         })
         .await;
     let mut acked = 0;

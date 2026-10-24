@@ -409,6 +409,14 @@ pub fn validate_manual_action(a: &ResponseAction) -> ApiResult<()> {
                 "uninstall_agent is only available as Remove device (POST /api/devices/:id/remove)",
             ));
         }
+        // Only through the `/evidence` endpoints (admin, interactive session,
+        // status checks, audit).
+        ResponseAction::CollectEvidence { .. } | ResponseAction::DeleteEvidence { .. } => {
+            return Err(ApiError::bad_request(format!(
+                "{} is only available from the evidence endpoints (POST /api/evidence/:id/collect, DELETE /api/evidence/:id)",
+                a.name()
+            )));
+        }
         ResponseAction::RemoveAutorun {
             kind,
             location,

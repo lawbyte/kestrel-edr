@@ -9,7 +9,7 @@ use kestrel_common::{
     ProcessInfo, ResponseAction, RuleBundle, RuleMode, Severity,
 };
 use kestrel_detect::{Detection, Engine, HostContext, Output};
-use kestrel_platform::LateEnrichment;
+use kestrel_platform::{LateEnrichment, WriteHint};
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::Ordering;
@@ -220,6 +220,7 @@ pub fn spawn(
     seeds: Vec<ProcessInfo>,
     events: mpsc::Receiver<Event>,
     enrich: mpsc::Receiver<LateEnrichment>,
+    writes: mpsc::Receiver<WriteHint>,
     ctl: mpsc::UnboundedReceiver<EngineCtl>,
     rt: tokio::runtime::Handle,
 ) -> Result<std::thread::JoinHandle<()>> {
@@ -259,7 +260,7 @@ pub fn spawn(
             }
             load_st12(&core.store, &mut engine, kestrel_common::now_ms());
             let _ = ready_tx.send(Ok(()));
-            local.block_on(detect_loop(core, engine, events, enrich, ctl, rt));
+            local.block_on(detect_loop(core, engine, events, enrich, writes, ctl, rt));
         })?;
     match ready_rx.recv() {
         Ok(Ok(())) => Ok(h),
@@ -320,31 +321,33 @@ async fn detect_loop(
     mut engine: Engine,
     mut events: mpsc::Receiver<Event>,
     mut enrich: mpsc::Receiver<LateEnrichment>,
+    mut writes: mpsc::Receiver<WriteHint>,
     mut ctl: mpsc::UnboundedReceiver<EngineCtl>,
     rt: tokio::runtime::Handle,
 ) {
+    // Evidence journal + capture triggers (ST-02 / ST-04).
+    let mut evidence = crate::evidence::EvidenceTracker::new(&core, rt.clone());
     let mut disp = Dispatcher {
         core: core.clone(),
         rt,
         workers: HashMap::new(),
     };
-    let mut batch: Vec<Event> = Vec::new();
-    let mut batch_started: Option<Instant> = None;
     let mut tick = tokio::time::interval(core.tuning.tick);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let max_batch = core.tuning.batch_max_events.max(1);
-    let max_delay = core.tuning.batch_max_delay;
+    // Upload copy: de-duplicated, batched, written by a low-priority thread
+    // (`crate::uploader`). Arrival times are measured on a monotonic clock.
+    let mut uploader = crate::uploader::Uploader::new(crate::uploader::UploadConfig {
+        max_events: core.tuning.batch_max_events.max(1),
+        max_delay_ms: core.tuning.batch_max_delay.as_millis() as i64,
+        window_ms: core.tuning.upload_dedupe_window.as_millis() as i64,
+        ..Default::default()
+    });
+    let writer = crate::uploader::OutboxWriter::spawn(core.clone());
+    let clock = Instant::now();
+    let arrival = || clock.elapsed().as_millis() as i64;
     let mut ticks: u64 = 0;
     let mut st12_saved = Instant::now();
     plant_canaries(&core, &mut engine);
-
-    let flush = |batch: &mut Vec<Event>, started: &mut Option<Instant>| {
-        if !batch.is_empty() {
-            let events = std::mem::take(batch);
-            core.enqueue(&AgentPayload::Events { events });
-        }
-        *started = None;
-    };
 
     loop {
         tokio::select! {
@@ -366,7 +369,10 @@ async fn detect_loop(
                 EngineCtl::PlantCanaries => plant_canaries(&core, &mut engine),
                 EngineCtl::Pause(m) => {
                     match std::panic::catch_unwind(AssertUnwindSafe(|| engine.set_paused(m))) {
-                        Ok(outs) => route(&mut disp, outs),
+                        Ok(outs) => {
+                            evidence.on_outputs(&core, engine.processes(), &outs);
+                            route(&mut disp, outs)
+                        }
                         Err(_) => tracing::error!("engine panicked applying the pause"),
                     }
                 }
@@ -376,11 +382,24 @@ async fn detect_loop(
                 // revoked signature found by the background check.
                 let now = kestrel_common::now_ms();
                 match std::panic::catch_unwind(AssertUnwindSafe(|| engine.enrich_process(&le.guid, le.facts, now))) {
-                    Ok(outs) => route(&mut disp, outs),
+                    Ok(outs) => {
+                        evidence.on_outputs(&core, engine.processes(), &outs);
+                        route(&mut disp, outs)
+                    }
                     Err(_) => {
                         core.stats.engine_panics.fetch_add(1, Ordering::Relaxed);
                         tracing::error!(pid = le.pid, "engine panicked on late enrichment");
                     }
+                }
+            },
+            Some(h) = writes.recv() => {
+                // Evidence write hints: journal only (never an event,
+                // never uploaded).
+                evidence.observe_write(&h);
+                let mut n = 0;
+                while n < 1024 {
+                    match writes.try_recv() { Ok(h) => evidence.observe_write(&h), Err(_) => break }
+                    n += 1;
                 }
             },
             ev = events.recv() => {
@@ -393,33 +412,42 @@ async fn detect_loop(
                 let filter = core.filter();
                 for ev in chunk {
                     core.stats.events_seen.fetch_add(1, Ordering::Relaxed);
+                    evidence.observe(&ev);
                     match std::panic::catch_unwind(AssertUnwindSafe(|| engine.process(&ev))) {
-                        Ok(outs) => route(&mut disp, outs),
+                        Ok(outs) => {
+                            evidence.on_outputs(&core, engine.processes(), &outs);
+                            route(&mut disp, outs)
+                        }
                         Err(_) => {
                             core.stats.engine_panics.fetch_add(1, Ordering::Relaxed);
                             tracing::error!(kind = ev.kind().as_str(), pid = ev.pid, "engine panicked on event; skipped");
                         }
                     }
                     if let Some(up) = filter.filter_event(&ev) {
-                        batch.push(up);
-                        batch_started.get_or_insert_with(Instant::now);
-                        if batch.len() >= max_batch {
-                            flush(&mut batch, &mut batch_started);
+                        for b in uploader.push(up, arrival()) {
+                            writer.submit(b);
                         }
                     }
                 }
             },
             _ = tick.tick() => {
                 ticks += 1;
-                match std::panic::catch_unwind(AssertUnwindSafe(|| engine.tick(kestrel_common::now_ms()))) {
-                    Ok(outs) => route(&mut disp, outs),
+                let now = kestrel_common::now_ms();
+                match std::panic::catch_unwind(AssertUnwindSafe(|| engine.tick(now))) {
+                    Ok(outs) => {
+                        evidence.on_outputs(&core, engine.processes(), &outs);
+                        route(&mut disp, outs)
+                    }
                     Err(_) => {
                         core.stats.engine_panics.fetch_add(1, Ordering::Relaxed);
                         tracing::error!("engine panicked on tick");
                     }
                 }
-                if batch_started.is_some_and(|s| s.elapsed() >= max_delay) {
-                    flush(&mut batch, &mut batch_started);
+                if std::panic::catch_unwind(AssertUnwindSafe(|| evidence.tick(&core, engine.processes(), now))).is_err() {
+                    tracing::error!("evidence tracker panicked on tick");
+                }
+                for b in uploader.tick(arrival()) {
+                    writer.submit(b);
                 }
                 if ticks.is_multiple_of(240) {
                     disp.gc();
@@ -431,7 +459,19 @@ async fn detect_loop(
             }
         }
     }
-    flush(&mut batch, &mut batch_started);
+    for b in uploader.finish(arrival()) {
+        writer.submit(b);
+    }
+    writer.finish();
+    let s = &uploader.stats;
+    tracing::info!(
+        events = s.events_in,
+        merged = s.suppressed,
+        summaries = s.summaries,
+        rows = s.rows_out,
+        batches = s.batches,
+        "telemetry upload totals"
+    );
     save_st12(&core.store, &engine, kestrel_common::now_ms());
 }
 

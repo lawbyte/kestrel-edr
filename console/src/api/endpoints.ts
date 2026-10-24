@@ -1,4 +1,4 @@
-import { http } from './client'
+import { http, request } from './client'
 import type * as T from './types'
 
 /** Thin typed wrappers over the REST contract (docs/contracts.md). */
@@ -69,6 +69,15 @@ export const api = {
   alert: (id: string) => http.get<T.AlertDetail>(`/alerts/${id}`),
   patchAlerts: (ids: string[], status: T.AlertStatus) => http.patch<void>('/alerts', { ids, status }),
 
+  // evidence capture after ST-02 / ST-04 (collect / download / delete: admins, interactive session)
+  incidentEvidence: (id: string) => http.get<{ items: T.EvidenceBundle[] }>(`/incidents/${id}/evidence`),
+  evidence: (id: string) => http.get<T.EvidenceBundle>(`/evidence/${id}`),
+  /** 403 `reauth_required` when the admin has MFA and no fresh code (wrap in `withReauth`). `reason` (≤ 200 chars) goes to the audit log. */
+  collectEvidence: (id: string, reason?: string) => http.post<T.EvidenceBundle>(`/evidence/${id}/collect`, reason ? { reason } : {}),
+  /** The ticket's password is shown once and never stored; `url` is single use, same session, 10 min. */
+  evidenceDownload: (id: string, reason?: string) => http.post<T.EvidenceDownloadTicket>(`/evidence/${id}/download`, reason ? { reason } : {}),
+  deleteEvidence: (id: string, reason?: string) => request<T.EvidenceBundle>('DELETE', `/evidence/${id}`, reason ? { reason } : undefined),
+
   // response
   actions: (q: { device_id?: string; status?: string; limit?: number; cursor?: string } = {}) =>
     http.get<T.Page<T.ResponseActionRow>>('/actions', { limit: 200, ...q }),
@@ -136,6 +145,7 @@ export const qk = {
   incident: (id: string) => ['incident', id] as const,
   alerts: (q?: object) => ['alerts', q ?? {}] as const,
   alert: (id: string) => ['alert', id] as const,
+  incidentEvidence: (id: string) => ['evidence', 'incident', id] as const,
   actions: (q?: object) => ['actions', q ?? {}] as const,
   policies: ['policies'] as const,
   policy: (id: string) => ['policy', id] as const,

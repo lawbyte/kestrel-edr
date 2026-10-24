@@ -10,6 +10,8 @@ import { EmptyState, ErrorState, PageHeader } from '@/components/common'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger, Segmented } from '@/components/ui/misc'
 import { describeEvent } from '@/lib/events'
+import type { ExplainContext } from '@/lib/explain'
+import { EventDetails } from '@/components/event-details'
 import { EXAMPLE_QUERIES, FIELD_HELP, HUNT_FIELDS, complete, parseHunt, type Completion, type HuntField } from '@/lib/hunt'
 import { EVENT_KIND_LABEL, EVENT_KINDS_UI } from '@/lib/labels'
 import { formatDateTime, formatTime } from '@/lib/format'
@@ -306,6 +308,7 @@ function SyntaxHelp({ onPick }: { onPick: (q: string) => void }) {
 
 function Results({ data }: { data: HuntResponse }) {
   const [open, setOpen] = useState<number | null>(null)
+  const ctx = useMemo<ExplainContext>(() => ({ events: data.items }), [data.items])
   if (!data.items.length) return <EmptyState title="No events match">Widen the time range or loosen a condition (try ~ instead of =).</EmptyState>
   const exportCsv = () =>
     downloadText(
@@ -334,7 +337,7 @@ function Results({ data }: { data: HuntResponse }) {
         </thead>
         <tbody>
           {data.items.map((e, i) => (
-            <ResultRow key={i} e={e} open={open === i} onToggle={() => setOpen(open === i ? null : i)} />
+            <ResultRow key={i} e={e} open={open === i} onToggle={() => setOpen(open === i ? null : i)} ctx={ctx} />
           ))}
         </tbody>
       </table>
@@ -346,7 +349,7 @@ function imageOf(e: DeviceEvent) {
   return e.type === 'process_start' ? e.image : (e.process_image ?? '')
 }
 
-function ResultRow({ e, open, onToggle }: { e: DeviceEvent; open: boolean; onToggle: () => void }) {
+function ResultRow({ e, open, onToggle, ctx }: { e: DeviceEvent; open: boolean; onToggle: () => void; ctx: ExplainContext }) {
   const img = imageOf(e)
   return (
     <>
@@ -366,12 +369,12 @@ function ResultRow({ e, open, onToggle }: { e: DeviceEvent; open: boolean; onTog
             <ProvenanceBadges event={e} />
           </span>
         </td>
-        <td className="max-w-[640px] truncate px-3 py-1.5 font-mono text-[12px] text-fg-muted">{describeEvent(e)}</td>
+        <td className="w-full max-w-0 truncate px-3 py-1.5 font-mono text-[12px] text-fg-muted">{describeEvent(e)}</td>
       </tr>
       {open ? (
         <tr className="border-b border-border bg-surface-2/50">
           <td colSpan={5} className="px-3 py-2">
-            <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all font-mono text-[11.5px]">{JSON.stringify(e, null, 2)}</pre>
+            <EventDetails event={e} context={ctx} />
           </td>
         </tr>
       ) : null}

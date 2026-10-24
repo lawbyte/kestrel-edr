@@ -86,6 +86,7 @@ fn payload_type(p: &AgentPayload) -> &'static str {
         AgentPayload::UpdateResult { .. } => "update_result",
         AgentPayload::Live { .. } => "live",
         AgentPayload::Pause(_) => "pause",
+        AgentPayload::Evidence(_) => "evidence",
     }
 }
 
@@ -533,6 +534,16 @@ impl AgentService for AgentSvc {
         for m in initial {
             let _ = tx.send(m).await;
         }
+        // Evidence uploads interrupted by a disconnect / server restart, and
+        // the one automatic retry of a failed upload.
+        {
+            let state = state.clone();
+            tokio::spawn(async move {
+                if let Err(e) = crate::evidence::on_connect(&state, device_id).await {
+                    tracing::warn!(%device_id, error = %e, "evidence reconnect handling failed");
+                }
+            });
+        }
         if first.seq > 0 {
             let _ = tx.send(ServerPayload::Ack { seq: first.seq }).await;
         }
@@ -630,8 +641,8 @@ impl AgentService for AgentSvc {
                         Some(AgentPayload::Heartbeat(hb)) => {
                             ingest::heartbeat(&state, &sess, &hb).await
                         }
-                        Some(AgentPayload::Events { events }) => {
-                            ingest::events(&state, &sess, &events).await
+                        Some(AgentPayload::Events { events, repeats }) => {
+                            ingest::events(&state, &sess, &events, &repeats).await
                         }
                         Some(AgentPayload::Alert(a)) => ingest::alert(&state, &sess, *a).await,
                         Some(AgentPayload::ActionResult {
@@ -643,6 +654,10 @@ impl AgentService for AgentSvc {
                         }
                         Some(AgentPayload::Inventory(inv)) => {
                             ingest::inventory(&state, &sess, &inv).await
+                        }
+                        // Evidence lifecycle (metadata only): never telemetry.
+                        Some(AgentPayload::Evidence(r)) => {
+                            crate::evidence::report(&state, &sess, *r).await
                         }
                         Some(AgentPayload::Pause(r)) => {
                             ingest::pause_report(&state, &sess, r).await

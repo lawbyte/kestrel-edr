@@ -4,6 +4,7 @@ mod alerts;
 mod auth_routes;
 mod dashboard;
 mod devices;
+mod evidence;
 mod groups;
 mod hunt;
 mod incidents;
@@ -242,6 +243,7 @@ pub fn router() -> Router<AppState> {
         .route("/devices/:id/files/rename", post(remote::files::rename))
         .route("/devices/:id/files/delete", post(remote::files::delete))
         .route("/devices/:id/files/mkdir", post(remote::files::mkdir))
+        .route("/devices/:id/files/end", post(remote::files::end))
         .route(
             "/devices/:id/remote-desktop/status",
             get(remote::desktop::status),
@@ -267,6 +269,20 @@ pub fn router() -> Router<AppState> {
             "/incidents/:id/checklist/:item_id",
             post(incidents::checklist),
         )
+        // evidence capture (read: metadata; collect/download/delete: admin,
+        // interactive session only)
+        .route("/incidents/:id/evidence", get(evidence::for_incident))
+        .route("/evidence", get(evidence::list))
+        .route(
+            "/evidence/downloads/:download_id",
+            get(evidence::download_file),
+        )
+        .route(
+            "/evidence/:id",
+            get(evidence::get_one).delete(evidence::delete_bundle),
+        )
+        .route("/evidence/:id/collect", post(evidence::collect))
+        .route("/evidence/:id/download", post(evidence::create_download))
         .route("/alerts", get(alerts::list).patch(alerts::bulk_update))
         .route("/alerts/:id", get(alerts::detail))
         .route("/actions", get(alerts::list_actions))

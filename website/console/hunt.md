@@ -70,6 +70,8 @@ reg_key ~ \CurrentVersion\Run and op = set
 
 Saved queries are kept in your browser.
 
+Click a result row to expand it into a plain-language explanation, its key fields and the raw event, the same view as incident evidence (see [Reading evidence](./index#reading-evidence)). Explanations only see the events in the result, so add `or event_type = file_access` to a DPAPI query to show which key file was opened.
+
 ## Privacy
 
 Every hunt query is recorded in the audit log, because hunting reads employee activity. Policies can stop command lines, DNS queries, script content or all raw telemetry from leaving devices, and can redact path prefixes or hash user names. See [Privacy](../guide/privacy).

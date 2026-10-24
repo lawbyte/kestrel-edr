@@ -124,6 +124,23 @@ pub enum ResponseAction {
         #[serde(default)]
         purge_data: bool,
     },
+    /// Prepare the evidence bundle `bundle_id` (captured after an ST-02 /
+    /// ST-04 alert) for upload. The agent checks the bundle is complete,
+    /// tells the employee in the tray (`evidence::TRAY_COLLECTED_TITLE`) and
+    /// answers `ok` with `artifact` = the bundle id; the server then pulls it
+    /// with `LiveServerMsg::EvidenceRead`. Admin only (`evidence.download`),
+    /// queued only by `POST /evidence/:id/collect` (never the generic action
+    /// endpoint); the agent refuses it from the engine and the tray. Agents
+    /// announce support with `evidence::CAP_EVIDENCE`.
+    CollectEvidence {
+        bundle_id: uuid::Uuid,
+    },
+    /// Delete the evidence bundle `bundle_id` on the PC (after the server
+    /// stored it, or when an admin deletes the evidence). Succeeds when the
+    /// bundle is already gone. Server-issued only, like `CollectEvidence`.
+    DeleteEvidence {
+        bundle_id: uuid::Uuid,
+    },
 }
 
 /// `Hello.capabilities` entry of agents that understand
@@ -175,6 +192,8 @@ impl ResponseAction {
             ResponseAction::RemoveAutorun { .. } => "remove_autorun",
             ResponseAction::ResumeProtection => "resume_protection",
             ResponseAction::UninstallAgent { .. } => "uninstall_agent",
+            ResponseAction::CollectEvidence { .. } => "collect_evidence",
+            ResponseAction::DeleteEvidence { .. } => "delete_evidence",
         }
     }
 
@@ -202,6 +221,11 @@ impl ResponseAction {
             // Uninstalls the product: admin only, and only through
             // `POST /devices/:id/remove` (never the generic action endpoint).
             ResponseAction::UninstallAgent { .. } => "devices.remove",
+            // May contain the employee's real secrets: admin only, and only
+            // through the `/evidence` endpoints (interactive sessions).
+            ResponseAction::CollectEvidence { .. } | ResponseAction::DeleteEvidence { .. } => {
+                "evidence.download"
+            }
         }
     }
 }
@@ -234,6 +258,23 @@ mod tests {
         let j =
             serde_json::to_string(&ResponseAction::UninstallAgent { purge_data: true }).unwrap();
         assert_eq!(j, r#"{"type":"uninstall_agent","purge_data":true}"#);
+    }
+
+    #[test]
+    fn evidence_actions_wire_format() {
+        let id = uuid::Uuid::nil();
+        let a = ResponseAction::CollectEvidence { bundle_id: id };
+        let j = serde_json::to_string(&a).unwrap();
+        assert_eq!(
+            j,
+            r#"{"type":"collect_evidence","bundle_id":"00000000-0000-0000-0000-000000000000"}"#
+        );
+        assert_eq!(serde_json::from_str::<ResponseAction>(&j).unwrap(), a);
+        assert_eq!(a.name(), "collect_evidence");
+        assert_eq!(a.privilege(), "evidence.download");
+        let d = ResponseAction::DeleteEvidence { bundle_id: id };
+        assert_eq!(d.name(), "delete_evidence");
+        assert_eq!(d.privilege(), "evidence.download");
     }
 
     #[test]

@@ -6,6 +6,11 @@
 //! file-manager session. File contents are streamed through memory only (never
 //! logged, stored or sent to telemetry); the audit log records path, size and
 //! SHA-256.
+//!
+//! `POST …/files/end` (console file manager closed) tells the agent that the
+//! file-manager session is over, so the employee's mandatory on-screen
+//! banner and tray notice end at once instead of after the agent's idle
+//! timeout (`FILE_SESSION_IDLE_MS`).
 
 use super::{
     admin_name, audit_op, authorize, check_audited, clean_text, LiveSession, RemoteFail, Target,
@@ -28,8 +33,8 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use futures::StreamExt;
 use kestrel_common::remote::{
     file_name_of, parent_of, validate_remote_path, FileContext, FileEntry, FileKind, FileOp,
-    FileReply, RemoteErrorCode, FILE_CHUNK_MAX, LIST_MAX_ENTRIES, TRANSFER_IDLE_TIMEOUT_MS,
-    TRANSFER_MAX,
+    FileReply, LiveServerMsg, RemoteErrorCode, FILE_CHUNK_MAX, LIST_MAX_ENTRIES,
+    TRANSFER_IDLE_TIMEOUT_MS, TRANSFER_MAX,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -427,6 +432,55 @@ pub async fn mkdir(
     })
     .await
     .map(Json)
+}
+
+// ----------------------------------------------------------------------- end
+
+/// `POST /devices/:id/files/end?fm_session=…`: the admin closed the file
+/// manager. Best effort and idempotent: the agent (if connected) ends that
+/// file-manager session of this admin (banner and tray notice off, consent
+/// dropped); no reply is awaited. 204 for any known device, also offline
+/// (the agent ends sessions on stream loss) or old agents (they end it after
+/// the idle timeout). Audited as `remote.files.end`.
+pub async fn end(
+    State(st): State<AppState>,
+    p: Principal,
+    ApiPath(id): ApiPath<String>,
+    ApiQuery(fq): ApiQuery<FmQuery>,
+) -> ApiResult<StatusCode> {
+    authorize(&p, Feature::Files)?;
+    let id = parse_uuid(&id)?;
+    let fm = match fq.fm_session.as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() => {
+            Uuid::parse_str(s).map_err(|_| ApiError::bad_request("fm_session must be a UUID"))?
+        }
+        _ => return Err(ApiError::bad_request("fm_session is required")),
+    };
+    let conn = st.agents.get(&id);
+    let Some(dev) = super::load_device(&st, id, conn.as_deref()).await? else {
+        return Err(ApiError::not_found("device not found"));
+    };
+    let delivered = conn.is_some_and(|c| {
+        c.tx.try_send(kestrel_common::wire::ServerPayload::Live {
+            session_id: Uuid::new_v4(),
+            msg: LiveServerMsg::FileSessionEnd {
+                fm_session: fm,
+                admin_name: admin_name(&p),
+            },
+        })
+        .is_ok()
+    });
+    audit_op(
+        &st,
+        &p,
+        "remote.files.end",
+        id,
+        &dev.hostname,
+        json!({ "fm_session": fm.to_string(), "delivered": delivered }),
+        Ok(()),
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ------------------------------------------------------------------ download

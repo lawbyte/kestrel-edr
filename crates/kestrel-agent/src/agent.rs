@@ -9,7 +9,7 @@ use kestrel_common::{
 use kestrel_detect::HostContext;
 use kestrel_platform::{
     ActionOrigin, Audience, BlockSelector, LateEnrichment, Platform, SensorConfig, SensorHandle,
-    TrayPush,
+    TrayPush, WriteHint,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -32,6 +32,8 @@ pub struct Tuning {
     pub heartbeat: Duration,
     pub batch_max_events: usize,
     pub batch_max_delay: Duration,
+    /// Upload de-duplication window (`crate::uploader`); zero disables it.
+    pub upload_dedupe_window: Duration,
     pub tick: Duration,
     pub inventory_every: Duration,
     pub event_channel: usize,
@@ -42,6 +44,14 @@ pub struct Tuning {
     /// "uninstall started" outcome; without the ack the removal is not
     /// started (reported as failed).
     pub removal_ack_wait: Duration,
+    /// Evidence capture: follow-up after the trigger alert before the
+    /// bundle is built (`evidence::FOLLOW_MS`).
+    pub evidence_follow: Duration,
+    /// Evidence upload session without a read for this long ends.
+    pub evidence_read_idle: Duration,
+    /// Building one evidence bundle may take this long; past it the build
+    /// is cancelled and reported failed ("timed out copying files").
+    pub evidence_build_deadline: Duration,
 }
 
 impl Default for Tuning {
@@ -49,7 +59,11 @@ impl Default for Tuning {
         Tuning {
             heartbeat: Duration::from_secs(30),
             batch_max_events: 500,
-            batch_max_delay: Duration::from_secs(2),
+            // Telemetry for hunting (alerts are sent at once, separately):
+            // fewer, larger and better compressed batches (2 s before
+            // 2026-10-25), see `crate::uploader`.
+            batch_max_delay: Duration::from_secs(5),
+            upload_dedupe_window: Duration::from_secs(300),
             tick: Duration::from_millis(250),
             inventory_every: Duration::from_secs(24 * 3600),
             event_channel: 65_536,
@@ -57,8 +71,19 @@ impl Default for Tuning {
             hardening_recheck: Duration::from_secs(15 * 60),
             action_timeout: Duration::from_secs(30),
             removal_ack_wait: Duration::from_secs(5 * 60),
+            evidence_follow: Duration::from_millis(kestrel_common::evidence::FOLLOW_MS as u64),
+            evidence_read_idle: Duration::from_millis(
+                kestrel_common::remote::TRANSFER_IDLE_TIMEOUT_MS as u64,
+            ),
+            evidence_build_deadline: Duration::from_secs(10 * 60),
         }
     }
+}
+
+/// Tokio worker threads for the long-running agent: 2 to 4 whatever the
+/// number of CPUs (the default is one per logical CPU).
+pub fn worker_threads() -> usize {
+    std::thread::available_parallelism().map_or(2, |n| n.get().clamp(2, 4))
 }
 
 #[derive(Debug, Default)]
@@ -94,12 +119,17 @@ pub struct Core {
     sensor_cfg: Mutex<Option<SensorConfig>>,
     event_tx: mpsc::Sender<Event>,
     enrich_tx: mpsc::Sender<LateEnrichment>,
+    /// Evidence write hints (sensors → detection thread journal); given to
+    /// the sensors only while staged-file capture is on.
+    write_tx: mpsc::Sender<WriteHint>,
     pub(crate) engine_ctl: mpsc::UnboundedSender<EngineCtl>,
     server_ips: RwLock<Vec<String>>,
     inflight_cmds: Mutex<HashSet<Uuid>>,
     salt: String,
     /// Live remote-access sessions (remote desktop, file manager).
     pub live: crate::live::LiveManager,
+    /// Evidence capture for suspected data theft (bundles, uploads).
+    pub evidence: crate::evidence::EvidenceManager,
     /// Local "turn protection off" switch (`crate::pause`): the pause in
     /// force (persisted in the store), the wrong-token lockout, and a lock
     /// serialising turn-off / turn-on / policy reconciliation.
@@ -278,6 +308,33 @@ impl Core {
             };
         }
         let action = match action {
+            // Evidence: handled by the agent (never the platform), and only
+            // on an administrator's command from the server.
+            ResponseAction::CollectEvidence { bundle_id }
+            | ResponseAction::DeleteEvidence { bundle_id } => {
+                if origin != ActionOrigin::ServerCommand {
+                    return ActionOutcome {
+                        action: action.clone(),
+                        ok: false,
+                        detail: format!("refused: {} is a server command", action.name()),
+                        ts: now,
+                        artifact: None,
+                    };
+                }
+                let collect = matches!(action, ResponseAction::CollectEvidence { .. });
+                let (ok, detail) = if collect {
+                    self.evidence.collect(self, *bundle_id)
+                } else {
+                    self.evidence.delete(self, *bundle_id)
+                };
+                return ActionOutcome {
+                    action: action.clone(),
+                    ok,
+                    detail,
+                    ts: kestrel_common::now_ms(),
+                    artifact: (ok && collect).then(|| bundle_id.to_string()),
+                };
+            }
             // Remote removal needs the token the server attaches to the
             // command at delivery: only `run_command_with` can run it.
             ResponseAction::UninstallAgent { .. } => {
@@ -605,6 +662,10 @@ impl Core {
             self_pid: std::process::id(),
             groups: p.sensors.clone(),
             enrich_tx: Some(self.enrich_tx.clone()),
+            // Staged-file candidates for the evidence journal: only while
+            // that part of the capture is on and the platform supports it.
+            write_tx: (p.evidence.staged_files && self.platform.evidence().is_some())
+                .then(|| self.write_tx.clone()),
         }
     }
 
@@ -665,6 +726,8 @@ impl Core {
             etw_buffers_lost: stats.buffers_lost,
             etw_kernel_events_lost: Some(stats.kernel_events_lost),
             sensor_internal_dropped: Some(stats.internal_dropped),
+            sensor_high_value_dropped: Some(stats.high_value_dropped),
+            sensor_events_total: Some(stats.events_total),
             events_per_min: self.stats.events_per_min.load(Ordering::Relaxed),
             outbox_depth: self.outbox_depth(),
             sysmon_present: stats.sysmon_present,
@@ -797,6 +860,12 @@ impl AgentHandle {
         self.core.shutdown.cancel();
         // Remote desktop banner / helper and transfers end with the agent.
         self.core.live.shutdown();
+        // Evidence: stop packet captures, report unfinished captures.
+        let _ = tokio::time::timeout(
+            Duration::from_secs(10),
+            crate::evidence::shutdown(&self.core),
+        )
+        .await;
         self.core.stop_sensors();
         for t in self.tasks.drain(..) {
             let _ = tokio::time::timeout(Duration::from_secs(10), t).await;
@@ -880,6 +949,7 @@ pub async fn start(
 
     let (event_tx, event_rx) = mpsc::channel(tuning.event_channel);
     let (enrich_tx, enrich_rx) = mpsc::channel::<LateEnrichment>(4096);
+    let (write_tx, write_rx) = mpsc::channel::<WriteHint>(8192);
     let (ctl_tx, ctl_rx) = mpsc::unbounded_channel();
     // Volume-aware path trust for everything in this process (H1).
     let system_drive = platform.system_drive();
@@ -912,11 +982,13 @@ pub async fn start(
         sensor_cfg: Mutex::new(None),
         event_tx,
         enrich_tx,
+        write_tx,
         engine_ctl: ctl_tx,
         server_ips: RwLock::new(server_ips.clone()),
         inflight_cmds: Mutex::new(HashSet::new()),
         salt,
         live: crate::live::LiveManager::default(),
+        evidence: crate::evidence::EvidenceManager::default(),
         pause: RwLock::new(None),
         pause_lockout: Mutex::new(crate::pause::Lockout::default()),
         pause_op: tokio::sync::Mutex::new(()),
@@ -961,6 +1033,7 @@ pub async fn start(
         seeds,
         event_rx,
         enrich_rx,
+        write_rx,
         ctl_rx,
         tokio::runtime::Handle::current(),
     )?;
@@ -992,6 +1065,9 @@ pub async fn start(
     // A remote removal that began before this start (installer rollback):
     // report its result.
     tokio::spawn(crate::remote_uninstall::resume_after_restart(core.clone()));
+    // Evidence: clean up after an earlier run (partial bundles, a capture
+    // left running, captures interrupted by a restart).
+    tokio::spawn(crate::evidence::startup(core.clone()));
 
     let mut tasks = vec![];
     tasks.push(tokio::spawn(crate::transport::run(core.clone())));
@@ -1049,6 +1125,7 @@ async fn housekeeping(core: Arc<Core>) {
                 last_minute = Instant::now();
                 core.enforce_cap();
                 core.maybe_send_inventory();
+                core.evidence.housekeep(&core);
                 if core.is_connected() {
                     core.mark_server_contact();
                 } else {
@@ -1082,6 +1159,7 @@ pub fn sensors_need_restart(running: Option<&SensorConfig>, new: &SensorConfig) 
                 || r.script_content != new.script_content
                 || r.sysmon != new.sysmon
                 || r.groups != new.groups
+                || r.write_tx.is_some() != new.write_tx.is_some()
         }
     }
 }
@@ -1157,6 +1235,7 @@ mod tests {
             self_pid: 1,
             groups: SensorSettings::default(),
             enrich_tx: None,
+            write_tx: None,
         };
         assert!(sensors_need_restart(None, &base));
         // Same collection (other boot id / pid / late-enrichment sink): no restart.
@@ -1175,6 +1254,12 @@ mod tests {
         let mut script = base.clone();
         script.script_content = false;
         assert!(sensors_need_restart(Some(&base), &script));
+        // Evidence write hints switched on / off.
+        let mut hints = base.clone();
+        let (wtx, _wrx) = tokio::sync::mpsc::channel(1);
+        hints.write_tx = Some(wtx);
+        assert!(sensors_need_restart(Some(&base), &hints));
+        assert!(sensors_need_restart(Some(&hints), &base));
     }
 
     #[test]

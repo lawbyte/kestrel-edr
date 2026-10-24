@@ -82,6 +82,9 @@ pub async fn create(
     pol.remote_access
         .validate()
         .map_err(|e| ApiError::bad_request(format!("invalid remote_access: {e}")))?;
+    pol.evidence
+        .validate()
+        .map_err(|e| ApiError::bad_request(format!("invalid evidence settings: {e}")))?;
     let now = now_ms();
     sqlx::query("INSERT INTO policies (id, name, version, body, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$5)")
         .bind(&id)
@@ -160,6 +163,9 @@ pub async fn replace(
     pol.remote_access
         .validate()
         .map_err(|e| ApiError::bad_request(format!("invalid remote_access: {e}")))?;
+    pol.evidence
+        .validate()
+        .map_err(|e| ApiError::bad_request(format!("invalid evidence settings: {e}")))?;
     if !(1..=kestrel_common::pause::PAUSE_MAX_MINUTES_CAP).contains(&pol.local_pause.max_minutes) {
         return Err(ApiError::bad_request(format!(
             "local_pause.max_minutes must be between 1 and {}",

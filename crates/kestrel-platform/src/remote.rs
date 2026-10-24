@@ -328,6 +328,28 @@ pub trait DesktopSession: Send + Sync {
     /// End the session: stop capture, remove the banner, terminate any helper
     /// process. Idempotent; must not block for long.
     fn stop(&self);
+    /// Show `text` (the remote file-manager notice composed by the agent
+    /// core, e.g. "IT (Jane Doe) is accessing files on this PC since
+    /// 14:02") as an extra line of this session's banner; empty removes it.
+    /// While a desktop session runs, its banner is the only one on screen:
+    /// the agent closes the stand-alone file banner ([`SessionBanner`]) once
+    /// the desktop banner carries the notice.
+    fn set_files_notice(&self, text: &str);
+}
+
+/// A stand-alone employee banner (remote file manager without a desktop
+/// session). Windows: the desktop helper in banner-only mode (no capture,
+/// no input) in the active console session.
+pub trait SessionBanner: Send + Sync {
+    /// Replace the text.
+    fn set_text(&self, text: &str);
+    /// Whether the banner is still on screen (helper process running and
+    /// connected). `false` after [`SessionBanner::close`] or when the helper
+    /// ended on its own (user logged off, console session changed).
+    fn is_alive(&self) -> bool;
+    /// Remove the banner and end any helper process. Idempotent; must not
+    /// block for long.
+    fn close(&self);
 }
 
 /// Screen capture + input injection.
@@ -341,4 +363,18 @@ pub trait RemoteDesktop: Send + Sync {
         params: DesktopStartParams,
         sink: DesktopSink,
     ) -> Result<Box<dyn DesktopSession>, (RemoteErrorCode, String)>;
+
+    /// Show the mandatory employee banner on its own (remote file-manager
+    /// sessions). Returns only once the banner is on screen; any failure is
+    /// an `Err` and the agent refuses the file operation (fail closed), with
+    /// the same rules as [`RemoteDesktop::start`]: `Unavailable` when no
+    /// interactive console session exists or the helper / banner window
+    /// cannot start. The default refuses (no banner on this platform).
+    fn show_banner(&self, text: &str) -> Result<Box<dyn SessionBanner>, (RemoteErrorCode, String)> {
+        let _ = text;
+        Err((
+            RemoteErrorCode::Unavailable,
+            "this device cannot show the on-screen notice for remote access".into(),
+        ))
+    }
 }

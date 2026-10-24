@@ -43,6 +43,12 @@ pub struct Config {
     pub update_pubkey: Option<String>,
     /// Run background jobs (retention, status) — disabled in some tests.
     pub run_jobs: bool,
+    /// Where collected evidence bundles (sealed) and temporary download
+    /// archives live (`KESTREL_EVIDENCE_DIR`, default
+    /// `/var/lib/kestrel/evidence`; created 0700 on Unix).
+    pub evidence_dir: PathBuf,
+    /// Total bytes of stored evidence (`KESTREL_EVIDENCE_MAX_GB`, default 20).
+    pub evidence_max_bytes: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -144,6 +150,10 @@ impl Config {
                 None => None,
             },
             run_jobs: true,
+            evidence_dir: env("KESTREL_EVIDENCE_DIR")
+                .unwrap_or_else(|| DEFAULT_EVIDENCE_DIR.into())
+                .into(),
+            evidence_max_bytes: evidence_max_bytes(env("KESTREL_EVIDENCE_MAX_GB"))?,
         })
     }
 
@@ -168,6 +178,27 @@ impl Config {
             format!("https://{}:{}", self.primary_hostname(), port)
         }
     }
+}
+
+/// Default `KESTREL_EVIDENCE_DIR` (the docker volume mount point).
+pub const DEFAULT_EVIDENCE_DIR: &str = "/var/lib/kestrel/evidence";
+/// Default `KESTREL_EVIDENCE_MAX_GB`.
+pub const DEFAULT_EVIDENCE_MAX_GB: u64 = 20;
+
+/// `KESTREL_EVIDENCE_MAX_GB` (whole GB, 1-100000) in bytes.
+pub fn evidence_max_bytes(v: Option<String>) -> anyhow::Result<u64> {
+    let gb = match v {
+        Some(s) => s
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|g| (1..=100_000).contains(g))
+            .ok_or_else(|| {
+                anyhow::anyhow!("KESTREL_EVIDENCE_MAX_GB must be a whole number of GB (1-100000)")
+            })?,
+        None => DEFAULT_EVIDENCE_MAX_GB,
+    };
+    Ok(gb * 1024 * 1024 * 1024)
 }
 
 /// The externally visible HTTPS port: `KESTREL_HTTPS_PUBLIC_PORT`, else the

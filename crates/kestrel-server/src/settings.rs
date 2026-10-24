@@ -47,6 +47,9 @@ pub struct Retention {
     pub events: u32,
     pub alerts: u32,
     pub audit: u32,
+    /// Days a collected evidence bundle is kept on the server (1-365;
+    /// settings stored before the field get the default, 14).
+    pub evidence: u32,
 }
 
 impl Default for Retention {
@@ -55,6 +58,7 @@ impl Default for Retention {
             events: 30,
             alerts: 365,
             audit: 730,
+            evidence: kestrel_common::evidence::DEFAULT_RETENTION_DAYS,
         }
     }
 }

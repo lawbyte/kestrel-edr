@@ -479,6 +479,7 @@ pub async fn sensors_test(
         self_pid: std::process::id(),
         groups: kestrel_common::SensorSettings::default(),
         enrich_tx: None,
+        write_tx: None,
     };
     let handle = platform
         .start_sensors(cfg, tx)

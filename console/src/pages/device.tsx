@@ -19,6 +19,8 @@ import { useAuth } from '@/lib/auth'
 import { Tabs, TabsContent, TabsList, TabsTrigger, Tooltip } from '@/components/ui/misc'
 import { EVENT_KIND_LABEL, EVENT_KINDS_UI, HARDENING_INFO, describeAction } from '@/lib/labels'
 import { describeEvent } from '@/lib/events'
+import type { ExplainContext } from '@/lib/explain'
+import { EventDetails } from '@/components/event-details'
 import { eventsLostDetail } from '@/lib/health'
 import { formatBytes, formatDateTime, formatTime, formatUptime, timeAgo } from '@/lib/format'
 import { basename, cn } from '@/lib/utils'
@@ -323,7 +325,8 @@ function EventTimeline({ deviceId }: { deviceId: string }) {
   const [q, setQ] = useState('')
   const [open, setOpen] = useState<number | null>(null)
   const ev = useQuery({ queryKey: qk.deviceEvents(deviceId, { kinds, q }), queryFn: () => api.deviceEvents(deviceId, { kinds, q, limit: 300 }), placeholderData: (p) => p })
-  const items = ev.data?.items ?? []
+  const items = useMemo(() => ev.data?.items ?? [], [ev.data])
+  const ctx = useMemo<ExplainContext>(() => ({ events: items }), [items])
   return (
     <div className="rounded-lg border border-border bg-surface">
       <div className="flex flex-wrap items-center gap-1.5 border-b border-border px-3 py-2">
@@ -354,7 +357,7 @@ function EventTimeline({ deviceId }: { deviceId: string }) {
           <table className="w-full text-sm">
             <tbody>
               {items.map((e, i) => (
-                <TimelineRow key={i} e={e} open={open === i} onToggle={() => setOpen(open === i ? null : i)} />
+                <TimelineRow key={i} e={e} open={open === i} onToggle={() => setOpen(open === i ? null : i)} ctx={ctx} />
               ))}
             </tbody>
           </table>
@@ -365,7 +368,7 @@ function EventTimeline({ deviceId }: { deviceId: string }) {
   )
 }
 
-function TimelineRow({ e, open, onToggle }: { e: import('@/api/types').DeviceEvent; open: boolean; onToggle: () => void }) {
+function TimelineRow({ e, open, onToggle, ctx }: { e: import('@/api/types').DeviceEvent; open: boolean; onToggle: () => void; ctx: ExplainContext }) {
   const image = e.type === 'process_start' ? e.image : e.process_image
   return (
     <>
@@ -382,12 +385,12 @@ function TimelineRow({ e, open, onToggle }: { e: import('@/api/types').DeviceEve
             <ProvenanceBadges event={e} />
           </span>
         </td>
-        <td className="max-w-[640px] truncate px-2 py-1.5 font-mono text-[12px] text-fg-muted">{describeEvent(e)}</td>
+        <td className="w-full max-w-0 truncate px-2 py-1.5 font-mono text-[12px] text-fg-muted">{describeEvent(e)}</td>
       </tr>
       {open ? (
         <tr className="border-b border-border bg-surface-2/50">
           <td colSpan={4} className="px-3 py-2">
-            <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all font-mono text-[11.5px]">{JSON.stringify(e, null, 2)}</pre>
+            <EventDetails event={e} context={ctx} />
           </td>
         </tr>
       ) : null}

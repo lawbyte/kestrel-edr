@@ -753,9 +753,47 @@ function protectionOff(ctx: Ctx): IncidentDetail | null {
   })
 }
 
+/** Unsigned Electron app in Temp decrypts its own "Chromium" key, opens a QUIC connection and looks up pastebin.com (Audit; teaches the evidence view). */
+function xeno(ctx: Ctx): IncidentDetail {
+  const s = story(ctx, 'ENG-LT-011', NOW - 3 * HOUR - 25 * MIN)
+  const d = s.dev
+  const ex = s.proc(null, EXPLORER, 'C:\\Windows\\Explorer.EXE', { dt: -4 * HOUR, pid: 6112, signer: MS, quiet: true })
+  const img = `${home(d)}\\AppData\\Local\\Temp\\Xeno-v1.3.65.exe`
+  const x = s.proc(ex, img, `"${img}"`, { dt: 0, pid: 47852, size: 176_160_768, motw: 3 })
+  s.alert(x, 300, 'ST-12', 'Xeno-v1.3.65.exe, an unsigned program downloaded from the internet, ran from the Temp folder.', {
+    evidence: [s.events.find((e) => e.guid === x.guid)!],
+    mode: 'audit',
+  })
+  const ownKey = s.file(x, 3_800, `${home(d)}\\AppData\\Roaming\\Xeno\\Local State`)
+  const dp = s.ev(x, 4_100, { type: 'dpapi_unprotect', description: 'Chromium' })
+  s.alert(x, 4_200, 'ST-03', 'Xeno-v1.3.65.exe used Windows DPAPI to decrypt Chromium secrets ("Chromium"), which only the browser itself should do.', {
+    data: ['browser_master_key'],
+    evidence: [ownKey, dp],
+    mode: 'audit',
+  })
+  const answers = Array.from({ length: 20 }, (_, i) => (i % 2 ? `172.67.${19 + i}.${40 + i * 3}` : `104.20.${67 + i}.${143 - i * 2}`))
+  const dq = s.dns(x, 5_200, 'pastebin.com', answers)
+  const quic = s.ev(x, 5_600, { type: 'net_connect', proto: 'udp', dst_ip: '172.66.44.125', dst_port: 443, src_port: 58211, dst_host: null, bytes_sent: 1250 })
+  s.network.push({ ts: quic.ts, process_guid: x.guid, image: img, dst_ip: '172.66.44.125', dst_port: 443, dst_host: null, blocked: false })
+  s.connect(x, 5_900, answers[0], 443, 'pastebin.com', { bytes: 3_410 })
+  s.alert(x, 6_000, 'ST-14', 'Xeno-v1.3.65.exe, which is not a browser, looked up pastebin.com.', { evidence: [dq, quic], mode: 'audit' })
+  return s.finalize({
+    status: 'open',
+    contained: false,
+    storyline: `\`Xeno-v1.3.65.exe\`, an **unsigned Electron app** downloaded from the internet, ran from **Temp**. It decrypted a DPAPI key labelled "Chromium" right after reading the \`Local State\` file in **its own** \`AppData\\Roaming\\Xeno\` folder, which is what Electron apps do at start-up. It did **not** read any browser's key file or password database. It then looked up **pastebin.com** and opened one QUIC connection that sent **1.2 KB**, the size of a single handshake packet, not an upload.
+
+These rules ran in **Audit**, so nothing was stopped. Ask the user what Xeno is and why it runs from Temp; unsigned tools that fetch scripts from paste sites are worth removing even when they are not stealers.`,
+    approve: [
+      { text: 'Kill Xeno-v1.3.65.exe', action: { type: 'kill_process', pid: x.pid, guid: x.guid, tree: true } },
+      { text: 'Quarantine Xeno-v1.3.65.exe', action: { type: 'quarantine_file', path: img, sha256: x.sha256 } },
+    ],
+    manual: [{ text: `Ask ${d.logged_on_user ?? 'the user'} where Xeno-v1.3.65.exe came from and what it is used for` }],
+  })
+}
+
 export function buildIncidents(ctx: Ctx, all: Device[]): IncidentDetail[] {
   const off = protectionOff(ctx)
-  return [...(off ? [off] : []), lumma(ctx), abe(ctx), debugKey(ctx), canary(ctx), vidar(ctx), backupFp(ctx), acreed(ctx), filefix(ctx), tamper(ctx), ransomware(ctx), credDump(ctx), lsassBlocked(ctx), persistence(ctx), ...noise(ctx, all)]
+  return [...(off ? [off] : []), lumma(ctx), xeno(ctx), abe(ctx), debugKey(ctx), canary(ctx), vidar(ctx), backupFp(ctx), acreed(ctx), filefix(ctx), tamper(ctx), ransomware(ctx), credDump(ctx), lsassBlocked(ctx), persistence(ctx), ...noise(ctx, all)]
 }
 
 /** A fresh incident injected while the console is open, to exercise live updates. */

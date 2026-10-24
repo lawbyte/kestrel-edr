@@ -18,7 +18,7 @@ The triage queue. Alerts are grouped by device and process tree into incidents, 
 
 <Shot name="console/incident" alt="Incident detail" />
 
-One incident in full: the plain-language storyline, the data at risk with what to do about each category, the process tree, and the remediation checklist (done, approve, manual). Set status, assignee and classification here, add comments, and approve the proposed response actions. Tabs show alerts, timeline, network connections, raw evidence and actions.
+One incident in full: the plain-language storyline, the data at risk with what to do about each category, the process tree, and the remediation checklist (done, approve, manual). Set status, assignee and classification here, add comments, and approve the proposed response actions. Tabs show alerts, timeline, network connections, evidence and actions. Expanding an evidence row explains the event in plain words (for example which key a DPAPI decrypt unlocked, or whether a connection was a handshake or an upload), lists its key fields and keeps the raw event one click away.
 
 ## Alerts
 

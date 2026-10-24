@@ -9,6 +9,8 @@ import { ProtectionOffNote } from '@/components/protection-off'
 import { ActionStatusBadge, DeviceStatusBadge, ModeBadge, PriorityScore, ProvenanceBadges, SeverityBadge, SeverityIcon } from '@/components/badges'
 import { AttackChips, Avatar, Card, EmptyState, ErrorState, KeyValue, LoadingRows, Mono } from '@/components/common'
 import { AssigneeControl, ClassificationControl, StatusControl } from '@/components/incident-controls'
+import { EventDetails } from '@/components/event-details'
+import { EvidencePanel } from '@/components/evidence-panel'
 import { DataAtRiskPanel, PriorityBreakdown, RemediationChecklist, pickTarget } from '@/components/incident-parts'
 import { Markdown } from '@/components/markdown'
 import { ProcessDetail, ProcessTree } from '@/components/process-tree'
@@ -19,6 +21,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger, Tooltip } from '@/components/
 import { useAuth } from '@/lib/auth'
 import { describeAction, EVENT_KIND_LABEL } from '@/lib/labels'
 import { describeEvent, withAgentSpawned } from '@/lib/events'
+import type { ExplainContext } from '@/lib/explain'
 import { formatDateTime, formatTime, safeDisplay, timeAgo } from '@/lib/format'
 import { basename, cn } from '@/lib/utils'
 import { ExclusionDialog } from './exclusions'
@@ -173,6 +176,8 @@ function IncidentView({ inc }: { inc: IncidentDetail }) {
               <ActionsList inc={inc} onPick={setAction} />
             </TabsContent>
           </Tabs>
+
+          <EvidencePanel incidentId={inc.id} />
         </div>
 
         <aside className="min-w-0 space-y-5">
@@ -371,6 +376,7 @@ function NetworkTable({ rows, onBlock }: { rows: IncidentDetail['network']; onBl
 
 export function EvidenceTable({ events, nodes }: { events: KEvent[]; nodes?: Map<string, TreeNode> }) {
   const [open, setOpen] = useState<Set<number>>(new Set())
+  const ctx = useMemo<ExplainContext>(() => ({ events, processes: nodes }), [events, nodes])
   if (!events.length) return <EmptyState title="No evidence events" />
   return (
     <div className="overflow-x-auto rounded-lg border border-border bg-surface">
@@ -413,13 +419,13 @@ export function EvidenceTable({ events, nodes }: { events: KEvent[]; nodes?: Map
                       <ProvenanceBadges event={e} />
                     </span>
                   </td>
-                  <td className="max-w-[520px] truncate px-3 py-1.5 font-mono text-[12px] text-fg-muted">{describeEvent(e)}</td>
+                  <td className="w-full max-w-0 truncate px-3 py-1.5 font-mono text-[12px] text-fg-muted">{describeEvent(e)}</td>
                 </tr>
                 {isOpen ? (
                   <tr className="border-b border-border bg-surface-2/50">
                     <td />
                     <td colSpan={4} className="px-3 py-2">
-                      <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all font-mono text-[11.5px] leading-relaxed">{JSON.stringify(e, null, 2)}</pre>
+                      <EventDetails event={e} context={ctx} />
                     </td>
                   </tr>
                 ) : null}

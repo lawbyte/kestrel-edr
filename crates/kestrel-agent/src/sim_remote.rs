@@ -12,14 +12,17 @@
 //!   at the last mouse position), JPEG-encodes it at the session's quality /
 //!   scale and offers it to the sink at ≤ `max_fps`, only when the content
 //!   changed. The "banner" state (`{active, admin_name, view_only, reason,
-//!   inputs}`) is written to `<state>/sim-desktop.json`; input is counted,
-//!   never recorded.
+//!   inputs, files_notice}`) is written to `<state>/sim-desktop.json`; input
+//!   is counted, never recorded.
+//! * File-manager banner (no desktop session): `{active, text}` in
+//!   `<state>/sim-files-banner.json`.
 
 use kestrel_common::remote::{
     DesktopInfo, DesktopSettings, FileEntry, FileKind, InputEvent, RemoteErrorCode,
 };
 use kestrel_platform::{
     DesktopEvent, DesktopSession, DesktopSink, DesktopStartParams, RemoteDesktop, RemoteFs,
+    SessionBanner,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -29,6 +32,8 @@ use tokio::sync::mpsc::error::TrySendError;
 
 /// Banner state file of the simulated desktop session.
 pub const SIM_DESKTOP_FILE: &str = "sim-desktop.json";
+/// Banner state file of the simulated stand-alone file-manager banner.
+pub const SIM_FILES_BANNER_FILE: &str = "sim-files-banner.json";
 /// Native size of the simulated screen.
 pub const SIM_SCREEN: (u32, u32) = (1280, 720);
 
@@ -149,6 +154,16 @@ struct Shared {
     reason: String,
     file: PathBuf,
     banner: Mutex<()>,
+    files_notice: Mutex<String>,
+}
+
+fn write_json(file: &Path, v: &serde_json::Value) {
+    if let Ok(b) = serde_json::to_vec_pretty(v) {
+        let tmp = file.with_extension("json.tmp");
+        if std::fs::write(&tmp, b).is_ok() {
+            let _ = std::fs::rename(&tmp, file);
+        }
+    }
 }
 
 impl Shared {
@@ -162,13 +177,9 @@ impl Shared {
             "view_only": self.view_only.load(Ordering::SeqCst),
             "reason": self.reason,
             "inputs": self.inputs.load(Ordering::SeqCst),
+            "files_notice": lock(&self.files_notice).clone(),
         });
-        if let Ok(b) = serde_json::to_vec_pretty(&v) {
-            let tmp = self.file.with_extension("json.tmp");
-            if std::fs::write(&tmp, b).is_ok() {
-                let _ = std::fs::rename(&tmp, &self.file);
-            }
-        }
+        write_json(&self.file, &v);
     }
 }
 
@@ -203,6 +214,54 @@ impl DesktopSession for SimDesktopSession {
         self.sh.stop.store(true, Ordering::SeqCst);
         self.sh.write_banner(false);
     }
+
+    fn set_files_notice(&self, text: &str) {
+        *lock(&self.sh.files_notice) = text.to_string();
+        self.sh.write_banner(true);
+    }
+}
+
+/// Simulated stand-alone file-manager banner (a state file).
+struct SimFilesBanner {
+    file: PathBuf,
+    state: Mutex<(bool, String)>,
+}
+
+impl SimFilesBanner {
+    fn write(&self, st: &(bool, String)) {
+        write_json(
+            &self.file,
+            &serde_json::json!({ "active": st.0, "text": st.1 }),
+        );
+    }
+}
+
+impl SessionBanner for SimFilesBanner {
+    fn set_text(&self, text: &str) {
+        let mut st = lock(&self.state);
+        if st.0 {
+            st.1 = text.to_string();
+            self.write(&st);
+        }
+    }
+
+    fn is_alive(&self) -> bool {
+        lock(&self.state).0
+    }
+
+    fn close(&self) {
+        let mut st = lock(&self.state);
+        if st.0 {
+            st.0 = false;
+            self.write(&st);
+        }
+    }
+}
+
+impl Drop for SimFilesBanner {
+    fn drop(&mut self) {
+        self.close();
+    }
 }
 
 impl RemoteDesktop for SimDesktop {
@@ -224,6 +283,7 @@ impl RemoteDesktop for SimDesktop {
             reason: params.reason.clone(),
             file: self.state_dir.join(SIM_DESKTOP_FILE),
             banner: Mutex::new(()),
+            files_notice: Mutex::new(String::new()),
         });
         sh.write_banner(true);
         let t = sh.clone();
@@ -232,6 +292,15 @@ impl RemoteDesktop for SimDesktop {
             .spawn(move || capture_loop(t, sink))
             .map_err(|e| (RemoteErrorCode::Unavailable, format!("capture thread: {e}")))?;
         Ok(Box::new(SimDesktopSession { sh }))
+    }
+
+    fn show_banner(&self, text: &str) -> Result<Box<dyn SessionBanner>, (RemoteErrorCode, String)> {
+        let b = SimFilesBanner {
+            file: self.state_dir.join(SIM_FILES_BANNER_FILE),
+            state: Mutex::new((true, text.to_string())),
+        };
+        b.write(&lock(&b.state));
+        Ok(Box::new(b))
     }
 }
 

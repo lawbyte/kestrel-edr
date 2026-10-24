@@ -12,6 +12,8 @@ import { remoteAccessFor } from '@/mock/remote-state'
 import { TooltipProvider } from '../ui/misc'
 import { InstallAgentWizard, canChooseRemote, nextAfterChoice } from '../install-wizard'
 import { FileManager } from './file-manager'
+import { ApiError } from '@/api/client'
+import { remoteErrorText } from '@/api/remote'
 import { RemoteDesktop } from './remote-desktop'
 import { ReauthProvider, useReauth } from './reauth'
 import { RemoteProfileEditor } from './profile-editor'
@@ -102,6 +104,17 @@ describe('FileManager permission-driven controls', () => {
     fireEvent.click(screen.getByText('C:\\'))
     await screen.findByText('Users')
     expect(screen.queryAllByRole('button', { name: /More actions for/ })).toHaveLength(0)
+  })
+  it('ends the file-manager session on the device when the tab closes (banner off)', async () => {
+    const before = db.audit.filter((a) => a.action === 'remote.files.end').length
+    const r = fm(profileUnrestricted())
+    await screen.findByText('C:\\')
+    r.unmount()
+    await waitFor(() => expect(db.audit.filter((a) => a.action === 'remote.files.end').length).toBe(before + 1))
+  })
+  it('explains a refusal because the banner could not be shown', () => {
+    const e = new ApiError(503, 'unavailable', 'the on-screen notice for the user at this PC could not be shown (no user is signed in at the console); remote file access is refused', 'unavailable')
+    expect(remoteErrorText(e)).toMatch(/^File access was refused: the banner .* could not be shown\. Details: .*no user is signed in/)
   })
   it('shows a plain reason when not permitted by the install profile', () => {
     const d = engDevice()

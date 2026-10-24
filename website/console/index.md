@@ -49,7 +49,24 @@ Titles say what happened, for example "Credential theft by labsim.exe on WKS-01"
   * **Approve:** one-click response actions waiting for an analyst. Approving one queues the action; you need permission for that action as well as for incidents.
   * **Manual:** steps only people can do, such as "revoke all web sessions" (a password reset alone does not invalidate stolen cookies), resetting passwords of accounts used on the host, checking backups, or assessing breach notification under PDPA or UU PDP.
 * **Details:** status (open, in progress, resolved, dismissed), assignee, classification (true positive, false positive, benign) and comments.
-* Tabs: **Alerts**, **Timeline** (alerts, actions, comments and status changes), **Network** (connections, with blocked ones marked), **Evidence** (raw events) and **Actions** (response actions with their result).
+* Tabs: **Alerts**, **Timeline** (alerts, actions, comments and status changes), **Network** (connections, with blocked ones marked), **Evidence** (the recorded events, explained; see below) and **Actions** (response actions with their result).
+
+### Reading evidence
+
+<Shot name="console/incident-evidence" alt="Evidence tab with a DPAPI decrypt, a DNS lookup and a QUIC connection expanded" />
+
+Each evidence row has a one-line summary. Click a row to expand it:
+
+* **What happened:** one or two sentences about this event with its own values. Examples:
+  * A DPAPI decrypt names the key label and what uses it. "Chromium" is the label Chrome, Edge, Brave and Electron apps give the master key for saved passwords and cookies. **Which key?** lists the `Local State` files the same process opened in the 10 seconds before, marked **the app's own profile** (its `--user-data-dir` or its own `AppData` folder) or a **browser's key store** (Chrome, Edge, Brave, Opera, Vivaldi, Yandex). An Electron app unlocking its own key is normal at start-up; a program unlocking a browser's key is how stealers read saved passwords.
+  * A network connection gives the protocol in words (UDP 443 is QUIC, TCP 443 is HTTPS), the host name if one was recorded and how much was sent. About 1.2 KB over QUIC is one handshake packet, not an upload; more than 100 KB is flagged as a large upload. Kestrel records connections, not their content.
+  * A DNS lookup shows the first three answers with the rest behind "+N more", and says why a name matters when it is on the dead-drop list (Telegram, Steam, Pastebin, file-drop and IP-lookup services).
+  * A process access decodes the access mask into named rights (for example `PROCESS_VM_READ`) and says when Windows refused the request.
+  * File opens name the credential store when the path is recognisable (browser passwords, cookies, wallets, Telegram, cloud keys).
+* **Key fields:** time, process and PID, and the fields that matter for this kind of event.
+* **Show raw event:** the event exactly as the agent sent it, with a copy button.
+
+The same view is used in the device event timeline and in Hunt results. Explanations only use the events on the page: on a device timeline filtered to one event type, or in Hunt, the file opens behind a DPAPI decrypt may not be listed.
 
 Persistence incidents add an **approve** item per autorun entry found in the evidence (Run value, Startup file, scheduled task, service, WMI subscription), which removes the entry after backing it up into the quarantine vault. When a network block on a program succeeded, a "Lift network block ... (only if it was a false positive)" item is added.
 

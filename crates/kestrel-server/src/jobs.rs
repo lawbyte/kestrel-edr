@@ -104,6 +104,9 @@ pub async fn fast_jobs(st: &AppState) -> anyhow::Result<()> {
     if removed > 0 {
         tracing::info!(removed, "devices removed after their remote uninstall");
     }
+    if let Err(e) = crate::evidence::fast_job(st).await {
+        tracing::warn!(error = %e, "evidence housekeeping failed");
+    }
     let revoked = crate::removal::revoke_removed(st).await?;
     if revoked > 0 {
         tracing::info!(revoked, "certificates of removed devices revoked");
@@ -179,6 +182,9 @@ pub async fn retention(st: &AppState) -> anyhow::Result<()> {
         .await?
         .rows_affected()
         + ingest::cap_dead_letters(&st.db, None).await?;
+    // Evidence: stored bundles past their retention, uncollected bundles the
+    // PC has deleted, metadata of alerts that are gone, orphaned files.
+    let ev = crate::evidence::retention(st, &s).await?;
     st.oidc_pending.retain(|_, p| now - p.created < 600_000);
     st.login_limiter.prune(15 * 60_000);
     st.login_throttle.prune(now);
@@ -188,6 +194,7 @@ pub async fn retention(st: &AppState) -> anyhow::Result<()> {
         incidents = i,
         audit = au,
         dead_letters = dl,
+        evidence_expired = ev,
         "retention applied"
     );
     Ok(())

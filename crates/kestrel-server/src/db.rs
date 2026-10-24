@@ -32,6 +32,9 @@ pub const ALL_PRIVILEGES: &[&str] = &[
     // "Remove device" (remote uninstall): admin only (via `*`), interactive
     // console session only.
     "devices.remove",
+    // Evidence capture for suspected data theft: collect, download and
+    // delete bundles. Admin only (via `*`), interactive console session only.
+    "evidence.download",
 ];
 
 pub const DEFAULT_POLICY_ID: &str = "default";

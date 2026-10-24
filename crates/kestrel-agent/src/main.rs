@@ -271,14 +271,27 @@ fn desktop_helper(pipe: &str, parent: u32) -> Result<()> {
     }
 }
 
+/// Runtime of the long-running agent (`run`). Tokio defaults to one worker
+/// per logical CPU (32 on the owner's PC, 60 agent threads in total); the
+/// agent's async work (transport, tray pipe, housekeeping, action
+/// dispatch) needs a few. Detection and the sensors run on their own
+/// threads. Blocking threads (SQLite, file hashing for actions) are capped
+/// and exit after 10 s idle (tokio default).
+fn agent_runtime() -> Result<tokio::runtime::Runtime> {
+    Ok(tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(kestrel_agent::agent::worker_threads())
+        .max_blocking_threads(64)
+        .thread_name("kestrel-rt")
+        .enable_all()
+        .build()?)
+}
+
 fn run(state_dir: PathBuf, console: bool) -> Result<()> {
     if cfg!(windows) && !console {
         let sd = state_dir.clone();
         return platform_win::run_service(move |stop| {
             let _log = logging::init(Some(&sd), false);
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
+            let rt = agent_runtime()?;
             rt.block_on(async move {
                 let (tx, rx) = tokio::sync::oneshot::channel::<()>();
                 std::thread::spawn(move || {
@@ -293,9 +306,7 @@ fn run(state_dir: PathBuf, console: bool) -> Result<()> {
         });
     }
     let _log = logging::init(Some(&state_dir), true);
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
+    let rt = agent_runtime()?;
     rt.block_on(commands::run_real(state_dir, async {
         let _ = tokio::signal::ctrl_c().await;
     }))

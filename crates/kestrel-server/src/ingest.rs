@@ -708,7 +708,7 @@ pub async fn heartbeat(state: &AppState, s: &Session, hb: &Heartbeat) -> anyhow:
     };
     let lost_rising = prev_health
         .as_ref()
-        .map(|p| hb.health.etw_events_lost > p.etw_events_lost)
+        .map(|p| significant_loss(p, &hb.health))
         .unwrap_or(false);
     let health = serde_json::to_value(&health_in)?;
     let new_status: (String,) = sqlx::query_as(
@@ -831,11 +831,16 @@ pub async fn heartbeat(state: &AppState, s: &Session, hb: &Heartbeat) -> anyhow:
     Ok(())
 }
 
-pub async fn events(state: &AppState, s: &Session, events: &[Event]) -> anyhow::Result<()> {
+pub async fn events(
+    state: &AppState,
+    s: &Session,
+    events: &[Event],
+    repeats: &[kestrel_common::wire::EventRepeat],
+) -> anyhow::Result<()> {
     let privacy = device_privacy(state, s.device_id).await?;
     let prefixes = crate::scrub::norm_prefixes(&privacy);
     let sc = scrub_for(state, &privacy, &prefixes);
-    let rows: Vec<EventRow> = events
+    let mut rows: Vec<EventRow> = events
         .iter()
         .map(|e| {
             let mut e = e.clone();
@@ -843,6 +848,7 @@ pub async fn events(state: &AppState, s: &Session, events: &[Event]) -> anyhow::
             EventRow::from_event(s.device_id, &s.hostname, &e)
         })
         .collect();
+    apply_repeats(&mut rows, repeats);
     state.events.insert(rows).await?;
     sqlx::query("UPDATE devices SET last_seen = $2 WHERE id = $1")
         .bind(s.device_id)
@@ -850,6 +856,80 @@ pub async fn events(state: &AppState, s: &Session, events: &[Event]) -> anyhow::
         .execute(&state.db)
         .await?;
     Ok(())
+}
+
+/// Repeat summaries from agents 1.1.7+ (`kestrel_agent::uploader`): the
+/// row stands for `count` identical events from `first_ts` to its `ts`.
+/// Stored in the row's raw JSON as `repeat_count` / `repeat_first_ts`
+/// (hunting shows them; no schema change). Out-of-range indexes and
+/// counts of 0 are ignored.
+pub fn apply_repeats(rows: &mut [EventRow], repeats: &[kestrel_common::wire::EventRepeat]) {
+    // At most one summary per row, at most one per event (review
+    // 2026-10-25 L1: an oversized list must not cost a JSON round trip each).
+    let mut seen = std::collections::HashSet::new();
+    for r in repeats.iter().take(rows.len()) {
+        if !seen.insert(r.index) {
+            continue;
+        }
+        let Some(row) = rows.get_mut(r.index as usize) else {
+            continue;
+        };
+        if r.count == 0 {
+            continue;
+        }
+        let Ok(serde_json::Value::Object(mut m)) =
+            serde_json::from_str::<serde_json::Value>(&row.raw)
+        else {
+            continue;
+        };
+        m.insert("repeat_count".into(), json!(r.count));
+        m.insert("repeat_first_ts".into(), json!(r.first_ts.min(row.ts)));
+        row.raw = serde_json::Value::Object(m).to_string();
+    }
+}
+
+/// Loss ratio (percent of the interval's events) above which a device is
+/// Degraded when no high-value record was lost.
+pub const LOSS_DEGRADED_PCT: u64 = 1;
+
+/// Is the loss reported by this heartbeat (versus the previous one) large
+/// enough to show the device as Degraded? Owner-PC triage 2026-10-25: any
+/// increase did, so a handful of low-value records shed during a burst
+/// turned an idle developer PC Degraded for an hour.
+///
+/// * Any increase of the events Windows lost (`etw_kernel_events_lost`):
+///   those are unclassified and may be process starts (review 2026-10-25
+///   M1).
+/// * Agents 1.1.7+ (`sensor_high_value_dropped`, `sensor_events_total`):
+///   any loss of a high-value record, or a total loss above
+///   [`LOSS_DEGRADED_PCT`] % of the events of the interval.
+/// * Older agents, or counters that went backwards (agent restart): any
+///   increase, as before.
+pub fn significant_loss(prev: &AgentHealth, cur: &AgentHealth) -> bool {
+    let lost = cur.etw_events_lost.saturating_sub(prev.etw_events_lost);
+    if lost == 0 {
+        return false;
+    }
+    if let (Some(kc), Some(kp)) = (cur.etw_kernel_events_lost, prev.etw_kernel_events_lost) {
+        if kc != kp {
+            return true;
+        }
+    }
+    match (
+        cur.sensor_high_value_dropped,
+        prev.sensor_high_value_dropped,
+        cur.sensor_events_total,
+        prev.sensor_events_total,
+    ) {
+        (Some(hc), Some(hp), Some(tc), Some(tp)) if hc >= hp && tc >= tp => {
+            if hc > hp {
+                return true;
+            }
+            let seen = (tc - tp).saturating_add(lost);
+            lost.saturating_mul(100) > seen.saturating_mul(LOSS_DEGRADED_PCT)
+        }
+        _ => true,
+    }
 }
 
 pub async fn alert(state: &AppState, s: &Session, mut a: Alert) -> anyhow::Result<()> {
@@ -883,7 +963,7 @@ pub async fn alert(state: &AppState, s: &Session, mut a: Alert) -> anyhow::Resul
 }
 
 /// Server-side scrub settings for a device's privacy policy (V-L5).
-fn scrub_for<'a>(
+pub fn scrub_for<'a>(
     state: &'a AppState,
     privacy: &kestrel_common::Privacy,
     prefixes: &'a [String],
@@ -1058,6 +1138,11 @@ pub async fn action_result(
         ResponseAction::IsolateHost { .. } | ResponseAction::ReleaseHost
     ) {
         state.publish("device", s.device_id, "updated");
+    }
+    // Evidence upload: the PC prepared the bundle → the server pulls it.
+    if let ResponseAction::CollectEvidence { bundle_id } = &action {
+        crate::evidence::on_collect_result(state, s.device_id, command_id, *bundle_id, outcome)
+            .await?;
     }
     Ok(())
 }
@@ -1236,6 +1321,92 @@ fn events_lost_summary(host: &str, delta: u64, cur: &AgentHealth, prev: &AgentHe
 #[cfg(test)]
 mod events_lost_tests {
     use super::*;
+
+    fn h2(lost: u64, high: u64, total: u64) -> AgentHealth {
+        AgentHealth {
+            etw_ok: true,
+            etw_events_lost: lost,
+            sensor_internal_dropped: Some(lost),
+            etw_kernel_events_lost: Some(0),
+            sensor_high_value_dropped: Some(high),
+            sensor_events_total: Some(total),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn degraded_threshold_is_proportional() {
+        // No new loss: never.
+        assert!(!significant_loss(&h2(10, 0, 1_000), &h2(10, 0, 2_000)));
+        // A handful of low-value records shed among 1,000 events: healthy.
+        assert!(!significant_loss(&h2(0, 0, 0), &h2(7, 0, 1_000)));
+        // 7,403 low-value records over a 1.38 M event burst (0.5 %): healthy.
+        assert!(!significant_loss(&h2(0, 0, 0), &h2(7_403, 0, 1_380_000)));
+        // Windows (ETW) lost events: always degraded.
+        let mut k = h2(3, 0, 1_000_000);
+        k.etw_kernel_events_lost = Some(3);
+        assert!(significant_loss(&h2(0, 0, 0), &k));
+        // Above 1 % of the interval's events: degraded.
+        assert!(significant_loss(&h2(0, 0, 0), &h2(20, 0, 1_000)));
+        // Any high-value loss: degraded.
+        assert!(significant_loss(&h2(0, 0, 0), &h2(1, 1, 1_000_000)));
+        // Older agent (no split): any increase, as before.
+        let old = |l| AgentHealth {
+            etw_ok: true,
+            etw_events_lost: l,
+            ..Default::default()
+        };
+        assert!(significant_loss(&old(0), &old(1)));
+        // Agent restarted (counters went backwards): conservative.
+        assert!(significant_loss(&h2(100, 5, 50_000), &h2(101, 0, 10)));
+    }
+
+    #[test]
+    fn repeats_are_stored_in_raw() {
+        let ev = |ts| Event {
+            ts,
+            pid: 1,
+            guid: kestrel_common::ProcessGuid("g".into()),
+            data: kestrel_common::EventData::DpapiUnprotect {
+                description: String::new(),
+            },
+        };
+        let d = uuid::Uuid::new_v4();
+        let mut rows = vec![
+            EventRow::from_event(d, "h", &ev(10)),
+            EventRow::from_event(d, "h", &ev(90)),
+        ];
+        apply_repeats(
+            &mut rows,
+            &[
+                kestrel_common::wire::EventRepeat {
+                    index: 1,
+                    count: 41,
+                    first_ts: 20,
+                },
+                // Duplicate index, out of range, zero: ignored.
+                kestrel_common::wire::EventRepeat {
+                    index: 1,
+                    count: 5,
+                    first_ts: 0,
+                },
+                kestrel_common::wire::EventRepeat {
+                    index: 7,
+                    count: 3,
+                    first_ts: 0,
+                },
+                kestrel_common::wire::EventRepeat {
+                    index: 0,
+                    count: 0,
+                    first_ts: 0,
+                },
+            ],
+        );
+        let v: serde_json::Value = serde_json::from_str(&rows[1].raw).unwrap();
+        assert_eq!(v["repeat_count"], 41);
+        assert_eq!(v["repeat_first_ts"], 20);
+        assert!(!rows[0].raw.contains("repeat_count"));
+    }
 
     fn h(total: u64, k: Option<u64>, d: Option<u64>) -> AgentHealth {
         AgentHealth {

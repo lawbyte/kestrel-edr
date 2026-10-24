@@ -61,6 +61,11 @@ pub struct Policy {
     /// required). Policies saved before this field get the defaults.
     #[serde(default)]
     pub local_pause: crate::pause::LocalPause,
+    /// Evidence capture for suspected data theft (ST-02 / ST-04): which parts
+    /// run and how long an uncollected bundle stays on the PC. Policies
+    /// saved before this field get the defaults (every part on).
+    #[serde(default)]
+    pub evidence: crate::evidence::EvidencePolicy,
 }
 
 /// Optional sensor groups. Defaults are on; each can be turned off per policy
@@ -153,6 +158,7 @@ impl Default for Policy {
             sensors: SensorSettings::default(),
             remote_access: crate::remote::RemoteAccessProfile::none(),
             local_pause: crate::pause::LocalPause::default(),
+            evidence: crate::evidence::EvidencePolicy::default(),
         }
     }
 }

@@ -110,6 +110,8 @@ pub struct SimPlatform {
     /// Exit code the simulated uninstall helper reports (`None` = it keeps
     /// running, like a real removal that stops the agent first).
     uninstall_exit: Arc<Mutex<Option<i32>>>,
+    /// Evidence host (sandboxed in the state directory).
+    evidence: std::sync::OnceLock<Arc<crate::sim_evidence::SimEvidence>>,
 }
 
 struct SimUninstallHelper(Arc<Mutex<Option<i32>>>);
@@ -143,7 +145,33 @@ impl SimPlatform {
             quarantined: Mutex::default(),
             uninstalls: Mutex::default(),
             uninstall_exit: Arc::default(),
+            evidence: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The simulated evidence host (tests inspect its packet captures).
+    pub fn sim_evidence(&self) -> Arc<crate::sim_evidence::SimEvidence> {
+        self.evidence
+            .get_or_init(|| {
+                Arc::new(crate::sim_evidence::SimEvidence::new(
+                    self.opts.state_dir.clone(),
+                ))
+            })
+            .clone()
+    }
+
+    /// Deliver a write hint the way a real sensor would (through
+    /// `SensorConfig::write_tx`). False when the sensors run without a
+    /// write sink (staged-file capture off) or are stopped.
+    pub fn send_write_hint(&self, h: kestrel_platform::WriteHint) -> bool {
+        let sink = self
+            .shared
+            .sink
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .and_then(|(_, cfg)| cfg.write_tx.clone());
+        sink.is_some_and(|tx| tx.try_send(h).is_ok())
     }
 
     /// Remote removals started so far (`purge_data` of each).
@@ -449,6 +477,26 @@ fn replay(path: &Path, speed: f64, shared: &Shared) -> Result<()> {
         {
             continue;
         }
+        // The real sensor reports a new file as a confirmed write hint
+        // (Kernel-File CreateNewFile, `SensorConfig::write_tx`) besides any
+        // event; replays encode staged files as `file_access` create /
+        // write, so the simulator sends the hint too (review of the 1.1.7
+        // integration, M2: only confirmed creations outside the user's own
+        // profile are copied into evidence).
+        if let (EventData::FileAccess { path, op }, Some(wtx)) = (&e.data, cfg.write_tx.as_ref()) {
+            if matches!(
+                op,
+                kestrel_common::FileOp::Create | kestrel_common::FileOp::Write
+            ) {
+                let _ = wtx.try_send(kestrel_platform::WriteHint {
+                    ts: e.ts,
+                    pid: e.pid,
+                    guid: e.guid.clone(),
+                    path: path.clone(),
+                    op: kestrel_common::evidence::WriteOp::Created,
+                });
+            }
+        }
         match tx.try_send(e) {
             Ok(()) => {
                 shared.sent.fetch_add(1, Ordering::Relaxed);
@@ -472,6 +520,8 @@ impl SensorHandle for SimSensors {
             events_lost: self.shared.lost.load(Ordering::Relaxed),
             kernel_events_lost: 0,
             internal_dropped: self.shared.lost.load(Ordering::Relaxed),
+            // Replayed events are not classified: every drop counts.
+            high_value_dropped: self.shared.lost.load(Ordering::Relaxed),
             buffers_lost: 0,
             events_total: self.shared.sent.load(Ordering::Relaxed),
             sysmon_present: false,
@@ -748,6 +798,10 @@ impl Platform for SimPlatform {
             ))
         });
         Some(fs.clone())
+    }
+
+    fn evidence(&self) -> Option<Arc<dyn kestrel_platform::EvidenceHost>> {
+        Some(self.sim_evidence())
     }
 
     fn remote_desktop(&self) -> Option<Arc<dyn kestrel_platform::RemoteDesktop>> {

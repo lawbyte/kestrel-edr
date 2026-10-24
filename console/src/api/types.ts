@@ -257,6 +257,13 @@ export type DeviceEvent = KEvent & {
   hostname?: string
   /** Optional enrichment (console assumption): image of the acting process for non-process events. */
   process_image?: string
+  /**
+   * Repeat summary (agents 1.1.7+): this row stands for `repeat_count` identical events
+   * (same process, kind and target) from `repeat_first_ts` to `ts`, after a first copy
+   * stored as its own row. Absent on ordinary rows.
+   */
+  repeat_count?: number
+  repeat_first_ts?: TimestampMs
 }
 
 // ---------------------------------------------------------------- rules.rs
@@ -329,6 +336,9 @@ export type ResponseAction =
   | { type: 'collect_triage' }
   /** Remote removal (`POST /devices/:id/remove`, privilege `devices.remove`); never offered as a normal action. */
   | { type: 'uninstall_agent'; purge_data?: boolean }
+  /** Evidence bundle upload / deletion (`/evidence` endpoints, privilege `evidence.download`); never offered as a normal action. */
+  | { type: 'collect_evidence'; bundle_id: Uuid }
+  | { type: 'delete_evidence'; bundle_id: Uuid }
   | {
       type: 'remove_autorun'
       kind: AutorunKind
@@ -462,6 +472,8 @@ export interface Policy {
   remote_access?: RemoteAccessProfile
   /** Local "turn protection off" switch in the tray; absent on older servers (treat as defaults). */
   local_pause?: LocalPause
+  /** Evidence capture after ST-02 / ST-04; absent on older servers (treat as EVIDENCE_POLICY_DEFAULTS). */
+  evidence?: EvidencePolicy
 }
 
 // ---------------------------------------------------------------- pause.rs
@@ -522,6 +534,10 @@ export interface AgentHealth {
   etw_kernel_events_lost?: number | null
   /** Part of etw_events_lost dropped by the agent's own sensor queues / caps. */
   sensor_internal_dropped?: number | null
+  /** Part of sensor_internal_dropped that may blind a detection (high-value records). Absent from agents before 1.1.7. */
+  sensor_high_value_dropped?: number | null
+  /** Events the sensors handed to the engine since the agent started (loss-ratio denominator). Absent before 1.1.7. */
+  sensor_events_total?: number | null
   events_per_min?: number
   outbox_depth?: number
   sysmon_present?: boolean
@@ -1003,7 +1019,8 @@ export interface OidcSettings {
 export interface Settings {
   org_name: string
   branding: Branding
-  retention_days: { events: number; alerts: number; audit: number }
+  /** `evidence`: days a collected evidence bundle is kept on the server (1-365, default 14; absent on older servers). */
+  retention_days: { events: number; alerts: number; audit: number; evidence?: number }
   notifications: NotificationSettings
   oidc: OidcSettings
   session_timeout_minutes: number
@@ -1040,7 +1057,7 @@ export interface ApiErrorBody {
   }
 }
 
-export type LiveEventType = 'incident' | 'alert' | 'device' | 'action' | 'group' | 'update_release'
+export type LiveEventType = 'incident' | 'alert' | 'device' | 'action' | 'group' | 'update_release' | 'evidence'
 export interface LiveEvent {
   kind: LiveEventType
   id: string
@@ -1309,4 +1326,186 @@ export type DesktopServerMsg =
 export interface RemoteDesktopStatus {
   active: boolean
   session: { session_id: string; admin_email: string; admin_name: string; view_only: boolean; started_at: TimestampMs } | null
+}
+
+// ---------------------------------------------------------------- evidence.rs
+
+/** `Hello.capabilities` entry of agents that capture evidence. */
+export const CAP_EVIDENCE = 'evidence.v1'
+
+/** `Policy.evidence`: parts of an evidence capture after ST-02 / ST-04 (defaults: all on). */
+export interface EvidencePolicy {
+  staged_files: boolean
+  secrets_list: boolean
+  /** Copies of the credential stores; needs `secrets_list`. */
+  secrets_copy: boolean
+  pcap: boolean
+  /** Days an uncollected bundle stays on the PC (1-365). */
+  local_retention_days: number
+}
+export const EVIDENCE_POLICY_DEFAULTS: EvidencePolicy = {
+  staged_files: true,
+  secrets_list: true,
+  secrets_copy: true,
+  pcap: true,
+  local_retention_days: 14,
+}
+export const EVIDENCE_RETENTION_DEFAULT_DAYS = 14
+
+export type WriteOp = 'created' | 'overwritten' | 'renamed' | 'written'
+export type ProcessRole = 'alerting' | 'descendant' | 'ancestor'
+export type CopyStatus =
+  | 'copied'
+  | 'truncated'
+  | 'too_large'
+  | 'bundle_full'
+  | 'link'
+  | 'locked'
+  | 'missing'
+  | 'kestrel'
+  | 'not_a_file'
+  | 'error'
+  | 'disabled'
+export interface FileCopy {
+  status: CopyStatus
+  entry?: string | null
+  size?: number
+  sha256?: string | null
+  detail?: string
+}
+export interface EvidenceProcess {
+  guid: string
+  pid: number
+  image: string
+  start_ts?: TimestampMs
+  role?: ProcessRole
+}
+export interface StagedFile {
+  path: string
+  written_at: TimestampMs
+  op?: WriteOp
+  process_guid: string
+  image?: string
+  copy?: FileCopy
+}
+export interface SecretRead {
+  path: string
+  store: string
+  noun: string
+  category: DataCategory
+  first_read: TimestampMs
+  last_read: TimestampMs
+  open_count: number
+  process_guid: string
+  image?: string
+  size?: number | null
+  /** `null` = list only (copies turned off). */
+  copy?: FileCopy | null
+}
+export interface PcapFilter {
+  ip: string
+  port?: number | null
+  proto?: NetProto | null
+}
+export type PcapStatus = 'captured' | 'stopped' | 'no_connections' | 'busy' | 'unsupported' | 'failed' | 'disabled'
+export interface PcapInfo {
+  status: PcapStatus
+  mechanism?: string
+  filters?: PcapFilter[]
+  started_at?: TimestampMs | null
+  ended_at?: TimestampMs | null
+  bytes?: number
+  truncated?: boolean
+  entry?: string | null
+  sha256?: string | null
+  detail?: string
+}
+export interface EvidenceTotals {
+  staged_listed?: number
+  staged_copied?: number
+  staged_bytes?: number
+  staged_unlisted?: number
+  secrets_listed?: number
+  secrets_copied?: number
+  secret_bytes?: number
+  pcap_bytes?: number
+  data_bytes?: number
+}
+/** Privacy-filtered manifest (metadata) the agent reported; the bundle itself has the unfiltered one. */
+export interface EvidenceManifest {
+  format?: number
+  bundle_id: Uuid
+  alert_id: Uuid
+  alert_ids?: Uuid[]
+  rule_id: string
+  hostname?: string
+  agent_version?: string
+  started_at: TimestampMs
+  window_start: TimestampMs
+  window_end: TimestampMs
+  completed_at: TimestampMs
+  parts: EvidencePolicy
+  processes?: EvidenceProcess[]
+  staged?: StagedFile[]
+  secrets?: SecretRead[]
+  pcap?: PcapInfo | null
+  totals?: EvidenceTotals
+  notes?: string[]
+}
+
+/**
+ * Server-side state of a bundle:
+ * `capturing` (the PC is still capturing), `ready_on_device` (complete, encrypted on the PC),
+ * `collecting` (an admin asked for it; queued or uploading), `stored` (on the server, ready to download),
+ * `failed` (capture failed), `expired` (retention ran out, on the PC or the server), `deleted` (an admin deleted it).
+ */
+export type EvidenceStatus = 'capturing' | 'ready_on_device' | 'collecting' | 'stored' | 'failed' | 'expired' | 'deleted'
+
+/** `GET /incidents/:id/evidence` item, `GET /evidence/:id`. */
+export interface EvidenceBundle {
+  id: Uuid
+  device_id: Uuid
+  hostname: string
+  incident_id: Uuid | null
+  alert_id: Uuid
+  alert_ids: Uuid[]
+  rule_id: string
+  status: EvidenceStatus
+  /** First report from the PC (capture start). */
+  created_at: TimestampMs
+  /** Bundle completed on the PC. */
+  captured_at: TimestampMs | null
+  manifest: EvidenceManifest | null
+  /** Container bytes on the PC (what an upload transfers). */
+  bundle_size: number
+  bundle_sha256: string | null
+  /** When the PC deletes it if nobody collects it. */
+  local_expires_at: TimestampMs | null
+  collect_requested_at: TimestampMs | null
+  collect_requested_by: string | null
+  collected_at: TimestampMs | null
+  /** When the server deletes the stored copy (retention). */
+  expires_at: TimestampMs | null
+  deleted_at: TimestampMs | null
+  deleted_by: string | null
+  /** Last upload / capture problem (shown with a retry when `ready_on_device`). */
+  last_error: string | null
+  downloads: number
+  last_downloaded_at: TimestampMs | null
+  /** The device is connected now. */
+  device_online: boolean
+  /** The agent announces `evidence.v1` (false = too old to upload). */
+  agent_supports_evidence: boolean
+}
+
+/** `POST /evidence/:id/download` (admin, interactive session): the password is shown once and never stored. */
+export interface EvidenceDownloadTicket {
+  download_id: string
+  /** AES-256 zip password (WinZip AE-2; opens in 7-Zip, not Windows Explorer's built-in zip). */
+  password: string
+  file_name: string
+  size: number
+  expires_at: TimestampMs
+  /** `GET` this (same session) within `expires_at`; single use. */
+  url: string
 }

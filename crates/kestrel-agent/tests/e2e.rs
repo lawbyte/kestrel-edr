@@ -294,10 +294,22 @@ impl AgentService for Mock {
     }
 }
 
+/// Events a batch stands for: its rows, plus for each repeat summary the
+/// identical events it merged (the row itself is counted once).
+fn represented(p: &AgentPayload) -> usize {
+    match p {
+        AgentPayload::Events { events, repeats } => {
+            events.len() + repeats.iter().map(|r| r.count as usize - 1).sum::<usize>()
+        }
+        _ => 0,
+    }
+}
+
 fn tuning() -> Tuning {
     Tuning {
         heartbeat: Duration::from_millis(400),
         batch_max_delay: Duration::from_millis(150),
+        upload_dedupe_window: Duration::from_millis(300),
         tick: Duration::from_millis(50),
         ..Tuning::default()
     }
@@ -439,16 +451,7 @@ async fn enroll_connect_replay_ack_restart() {
         "all replayed events uploaded",
         Duration::from_secs(30),
         || {
-            let n: usize = all_msgs(&rec)
-                .iter()
-                .map(|(_, p)| {
-                    if let AgentPayload::Events { events } = p {
-                        events.len()
-                    } else {
-                        0
-                    }
-                })
-                .sum();
+            let n: usize = all_msgs(&rec).iter().map(|(_, p)| represented(p)).sum();
             n >= replay_len
         },
     )
@@ -495,14 +498,19 @@ async fn enroll_connect_replay_ack_restart() {
     let events: Vec<_> = msgs
         .iter()
         .flat_map(|(_, p)| {
-            if let AgentPayload::Events { events } = p {
+            if let AgentPayload::Events { events, .. } = p {
                 events.clone()
             } else {
                 vec![]
             }
         })
         .collect();
-    assert_eq!(events.len(), replay_len, "no duplicates or losses");
+    let represented_total: usize = msgs.iter().map(|(_, p)| represented(p)).sum();
+    assert_eq!(
+        represented_total, replay_len,
+        "no duplicates or losses (repeat summaries counted)"
+    );
+    assert!(events.len() <= replay_len);
     let now = kestrel_common::now_ms();
     assert!(
         events.iter().all(|e| (now - e.ts).abs() < 120_000),
@@ -511,7 +519,7 @@ async fn enroll_connect_replay_ack_restart() {
     // Batches ≤ 500 events.
     assert!(msgs
         .iter()
-        .all(|(_, p)| !matches!(p, AgentPayload::Events { events } if events.len() > 500)));
+        .all(|(_, p)| !matches!(p, AgentPayload::Events { events, .. } if events.len() > 500)));
     // Command executed once, result sent twice with the same id.
     let results: Vec<_> = msgs
         .iter()
@@ -1116,6 +1124,18 @@ async fn remote_access_live() {
         }
         other => panic!("{other:?}"),
     }
+    // The mandatory banner was up before the first operation ran.
+    let files_banner = || -> serde_json::Value {
+        std::fs::read(state.join(kestrel_agent::sim_remote::SIM_FILES_BANNER_FILE))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    };
+    assert_eq!(files_banner()["active"], true);
+    assert!(files_banner()["text"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("IT (Jane Doe) is accessing files on this PC"));
     // Upload (consent answered "allow" by the simulated employee).
     let target = r"C:\Users\j.doe\Documents\upload.txt";
     let data = b"uploaded through the live channel".repeat(50);
@@ -1281,6 +1301,20 @@ async fn remote_access_live() {
         } => assert_eq!(code, kestrel_common::remote::RemoteErrorCode::ProtectedPath),
         other => panic!("{other:?}"),
     }
+    // The admin closes the file manager: the banner goes.
+    send_live(
+        &inj,
+        Uuid::new_v4(),
+        LiveServerMsg::FileSessionEnd {
+            fm_session: fm,
+            admin_name: "Jane Doe".into(),
+        },
+    )
+    .await;
+    wait_for("files banner removed", Duration::from_secs(10), || {
+        files_banner()["active"] == false
+    })
+    .await;
 
     // --- remote desktop
     let d = Uuid::new_v4();

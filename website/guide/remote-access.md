@@ -36,7 +36,7 @@ Profiles can be customised in the install wizard: remote desktop **Off**, **View
 
 ## What is always true
 
-* **The employee always knows.** In every profile, a banner stays at the top of the employee's screen for the whole desktop session ("IT (name) is viewing / controlling this PC", with the reason), and the tray shows a notification. The banner is always on top, click-through and cannot be closed. There is no hidden mode.
+* **The employee always knows.** In every profile, a banner stays at the top of the employee's screen for the whole remote session, and the tray shows a notification. Remote desktop: "IT (name) is viewing / controlling this PC", with the reason. File manager: "IT (name) is accessing files on this PC since 14:02", with the reason. The banner is always on top, click-through and cannot be closed, and it does not depend on the tray window being open. There is no hidden mode.
 * **Administrators only**, through the `remote.desktop` and `remote.files` privileges, and only from an interactive console session. API tokens are refused.
 * **Audited.** Every session start, mode change and stop, every consent result and every file operation is in the hash-chained audit log, with path, byte count and SHA-256 for transfers. Screen frames and file contents never reach telemetry, ClickHouse or logs.
 * Switching from view only to control asks for consent again (when consent is required).
@@ -64,6 +64,12 @@ Limits:
 <Shot name="console/device-files" alt="Remote file manager in the console" />
 
 The file manager runs as SYSTEM on the device. It can browse drives, download, and (when allowed) upload, rename, move, delete and create folders. Only absolute `X:\...` paths are accepted. Every operation works on an opened handle and never follows links; a recursive delete removes links, never their targets. Uploads go to a temporary file and replace the target only after the size and SHA-256 match. Downloads stream from the device straight to the browser; the server never stores file data.
+
+**The banner during file access.** Before the first operation of a file-manager session runs (even just listing the drives), the agent puts the banner on the employee's screen, using the same helper as remote desktop without capturing anything. If the banner cannot be shown, nothing runs: the console shows *the on-screen notice for the user at this PC could not be shown ... remote file access is refused*, and the session does not start. The rules are those of remote desktop: the device needs an interactive console session, and a helper that cannot start means no access. The agent checks the banner again before every operation; if it disappeared (for example after a user switch) it is shown again, and if that fails the file sessions end.
+
+* The banner ends when you leave the **Files** tab or close the console window, after 5 minutes without file operations, when the connection to the device drops, or when a policy switches the file manager off.
+* While a remote desktop session runs on the same PC, there is one banner: the desktop banner also says that IT is accessing files. When the desktop session ends and file access continues, the file banner appears before the desktop banner goes away.
+* Consent works as before: notify-only profiles show the banner and the notification without asking; with consent required, the employee is asked before the first change (upload, rename, delete, new folder).
 
 ::: warning Full file access equals administrator access
 Uploading files as SYSTEM can change anything on the PC, including how the agent behaves. An administrator with **Full** file access and upload could rewrite the agent's configuration, so hours, blocked folders and consent are soft limits against a malicious administrator. The hard boundaries are the install ceiling (none, view only, read only) and MFA for administrators.

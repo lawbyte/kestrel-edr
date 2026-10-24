@@ -56,6 +56,10 @@ enum Ev {
     DesktopStop(String),
     DesktopAck(u64),
     DesktopInput,
+    FileSessionEnd {
+        fm: Uuid,
+        admin: String,
+    },
 }
 
 struct FakeState {
@@ -438,6 +442,15 @@ fn spawn_fake(mut stream: AgentStream) -> Fake {
                 LiveServerMsg::DesktopStop { reason } => {
                     let _ = ev_tx.send(Ev::DesktopStop(reason));
                 }
+                LiveServerMsg::FileSessionEnd {
+                    fm_session,
+                    admin_name,
+                } => {
+                    let _ = ev_tx.send(Ev::FileSessionEnd {
+                        fm: fm_session,
+                        admin: admin_name,
+                    });
+                }
                 LiveServerMsg::DesktopSettings(set) if set.view_only == Some(false) => {
                     let answer = st.lock().unwrap().control_consent;
                     if let Some(allowed) = answer {
@@ -624,7 +637,7 @@ async fn file_manager_end_to_end() {
     let e = enroll_with(&ts, tok["token"].as_str().unwrap(), "FIN-LAPTOP-07").await;
     assert_eq!(e.ceiling, RemoteAccessProfile::unrestricted());
     let dev = e.agent.device_id;
-    let fake = connect_fake(&ts, &e, &[CAP_LIVE_FILES, CAP_LIVE_DESKTOP]).await;
+    let mut fake = connect_fake(&ts, &e, &[CAP_LIVE_FILES, CAP_LIVE_DESKTOP]).await;
 
     // Device detail: availability and profiles.
     let (s, d) = ts.get(&format!("/api/devices/{dev}")).await;
@@ -927,6 +940,43 @@ async fn file_manager_end_to_end() {
         .await
         .unwrap();
     assert!(!all.iter().any(|r| r.0.contains("quarterly report")));
+
+    // Closing the file manager ends the session on the agent (banner off).
+    let end = |q: Vec<(&'static str, String)>| {
+        ts.http
+            .post(files_url(&ts, dev, "/end"))
+            .query(&q)
+            .header("X-CSRF-Token", &ts.csrf)
+            .send()
+    };
+    assert_eq!(end(vec![]).await.unwrap().status(), 400);
+    assert_eq!(
+        end(vec![("fm_session", "nope".into())])
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    assert_eq!(
+        end(vec![("fm_session", fm.to_string())])
+            .await
+            .unwrap()
+            .status(),
+        204
+    );
+    assert_eq!(
+        fake.next_event(|e| matches!(e, Ev::FileSessionEnd { .. }))
+            .await,
+        Ev::FileSessionEnd {
+            fm,
+            admin: "Ada Admin".into()
+        }
+    );
+    let a = wait_audit(&ts, "remote.files.end", |v| {
+        v["fm_session"] == fm.to_string()
+    })
+    .await;
+    assert_eq!(a["delivered"], true);
 
     // stat is audited too.
     wait_audit(&ts, "remote.files.stat", |v| {

@@ -97,6 +97,24 @@ What leaves the device. Detection always runs locally on full-fidelity events; t
 
 See [Privacy](../guide/privacy).
 
+## Evidence capture
+
+**Evidence capture after data theft (ST-02 / ST-04)** decides what the PC keeps, encrypted, after one of these alerts. All parts are on by default, also for policies saved before the setting existed.
+
+<Shot name="console/evidence-policy" alt="Evidence capture section in the policy editor" />
+
+| Setting | What it keeps |
+|---|---|
+| Copies of staged files | Files the suspicious processes created or overwrote in user folders and Temp during the alert window. Up to 50 MB per file and 200 MB in total. |
+| List of secrets it read | Which credential stores the processes opened, when and how often. Metadata only; analysts see it on the incident. |
+| Copies of the secrets it read | Copies of those stores, with the employee's real passwords and cookies. Needs the list; turning the list off turns copies off too. Stores the app keeps locked are listed but not copied. |
+| Connection capture | 60 s of the processes' network traffic with `pktmon` (Windows 10 version 2004 or later). Encrypted traffic stays encrypted; other apps talking to the same address can appear. |
+| Keep uncollected bundles on the PC | Days (1 to 365, default 14) before the PC deletes a bundle nobody collected. Collected bundles follow the server retention in [Settings](./settings#branding-privacy-and-retention). |
+
+**To turn evidence capture off** for a policy, turn off staged files, the list of secrets and connection capture. The ST-02 and ST-04 alerts still arrive; nothing is kept for an investigation. To keep the metadata but never hold copies of real passwords, turn off only **Copies of the secrets it read**.
+
+Capture runs only after one of these alerts and only for the process tree that raised it. Content reaches the server only when an administrator collects it, and the employee is told in the tray. Mention evidence capture in the employee notice. See [Evidence capture](./evidence).
+
 ## Telemetry
 
 * **Upload raw events for hunting.** Off: only alerts and their evidence leave the device.

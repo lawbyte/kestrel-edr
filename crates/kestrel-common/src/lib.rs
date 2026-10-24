@@ -9,11 +9,14 @@
 
 pub mod alert;
 pub mod event;
+pub mod evidence;
 pub mod pause;
 pub mod policy;
 pub mod remote;
 pub mod response;
 pub mod rules;
+#[cfg(feature = "seal")]
+pub mod seal;
 pub mod tray;
 pub mod update;
 pub mod wire;

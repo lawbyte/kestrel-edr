@@ -139,6 +139,8 @@ impl TestServer {
             outbound_allow: vec![],
             update_pubkey: None,
             run_jobs: false,
+            evidence_dir: std::env::temp_dir().join(format!("kestrel-evidence-{db_name}")),
+            evidence_max_bytes: 20 * 1024 * 1024 * 1024,
         };
         let mut cfg = cfg;
         tweak(&mut cfg);
@@ -209,6 +211,7 @@ impl TestServer {
     }
 
     pub async fn cleanup(self) {
+        let _ = std::fs::remove_dir_all(&self.state.cfg.evidence_dir);
         self.running.handle.shutdown();
         self.running.grpc.abort();
         self.state.db.close().await;

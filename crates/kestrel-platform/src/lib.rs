@@ -16,10 +16,16 @@ use tokio::sync::mpsc;
 
 pub use detect::{CanarySpec, ProcessFacts};
 
+pub use evidence::{
+    CaptureSession, CaptureStartError, CapturedFile, EvidenceHost, PacketCapture, SourceError,
+    SourceFile, WriteHint,
+};
+
+pub mod evidence;
 pub mod remote;
 pub use remote::{
     DesktopEvent, DesktopSession, DesktopSink, DesktopStartParams, FsGuard, FsOpError,
-    RemoteDesktop, RemoteFs,
+    RemoteDesktop, RemoteFs, SessionBanner,
 };
 
 /// Sensor configuration derived from policy + host context.
@@ -41,6 +47,11 @@ pub struct SensorConfig {
     /// exceeded, or a background revocation check demoted the signature).
     /// The agent feeds them to `Engine::enrich_process`.
     pub enrich_tx: Option<mpsc::Sender<LateEnrichment>>,
+    /// Evidence journal sink: files processes created / overwrote / renamed
+    /// under user-writable locations (staged-file candidates). `None` =
+    /// not wanted (policy has staged-file capture off); sensors then skip
+    /// the work. Sensors `try_send` and count drops; never telemetry.
+    pub write_tx: Option<mpsc::Sender<WriteHint>>,
 }
 
 /// Facts that arrived after a process's `ProcessStart` was emitted.
@@ -223,6 +234,10 @@ pub struct SensorStats {
     pub kernel_events_lost: u64,
     /// Part of `events_lost`: dropped by the sensor's own queues and caps.
     pub internal_dropped: u64,
+    /// Part of `internal_dropped` that may blind a detection (process
+    /// start / stop, handle opens, DPAPI, file access, network connects,
+    /// persistence...); the rest are low-value records shed under pressure.
+    pub high_value_dropped: u64,
     pub buffers_lost: u64,
     pub events_total: u64,
     pub sysmon_present: bool,
@@ -400,6 +415,13 @@ pub trait Platform: Send + Sync {
     /// `allowed_hours` guardrail. `None` = unknown: profiles with allowed
     /// hours then refuse (fail closed).
     fn local_weekday_minute(&self) -> Option<(u8, u16)> {
+        None
+    }
+
+    /// Evidence capture for suspected data theft (`None` = unsupported;
+    /// announced as `kestrel_common::evidence::CAP_EVIDENCE`). See
+    /// [`evidence::EvidenceHost`].
+    fn evidence(&self) -> Option<Arc<dyn EvidenceHost>> {
         None
     }
 }

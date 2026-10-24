@@ -10,7 +10,7 @@ name = "kestrel-server"
 path = "src/main.rs"
 
 [dependencies]
-kestrel-common = { path = "../kestrel-common" }
+kestrel-common = { path = "../kestrel-common", features = ["seal"] }
 kestrel-detect = { path = "../kestrel-detect" }
 serde.workspace = true
 serde_json.workspace = true
@@ -19,7 +19,7 @@ thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tokio.workspace = true
-tonic = { workspace = true, features = ["tls"] }
+tonic = { workspace = true, features = ["tls", "zstd"] }
 prost.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 axum = { version = "0.7", features = ["macros", "ws"] }
@@ -57,6 +57,8 @@ lettre = { version = "0.11", default-features = false, features = ["builder", "s
 yaml_serde = "0.10"
 ipnet = "2"
 time = "0.3"
+# Evidence downloads: AES-256 (WinZip AE-2) encrypted zip, stored entries. MIT.
+zip = { version = "9", default-features = false, features = ["aes-crypto"] }
 
 [build-dependencies]
 tonic-build = "0.12"

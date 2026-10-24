@@ -36,6 +36,7 @@ import { blockedPrefix, fileOpDenied, hoursContain, isNoneProfile, normaliseProf
 import { pathIsWithin, validateRemotePath } from '@/lib/remote-path'
 import { fsFor, RemoteFsError } from './remote-files'
 import { consentedFmSessions, desktopSessions, reauth, remoteAccessFor } from './remote-state'
+import { registerEvidenceRoutes } from './evidence'
 
 type Handler = (req: { params: Record<string, string>; query: URLSearchParams; body: unknown; method: string }) => unknown
 
@@ -853,6 +854,8 @@ route('PUT', '/policies/:id', ({ params, body }) => {
     throw bad('Indicator block lifetime must be between 1 minute and 30 days')
   const lp = p.local_pause
   if (lp && (!Number.isInteger(lp.max_minutes) || lp.max_minutes < 1 || lp.max_minutes > PAUSE_MAX_MINUTES_CAP)) throw bad('Longest turn-off must be between 1 minute and 7 days')
+  const ev = p.evidence
+  if (ev && (!Number.isInteger(ev.local_retention_days) || ev.local_retention_days < 1 || ev.local_retention_days > 365)) throw bad('Evidence retention on the PC must be between 1 and 365 days')
   const next = { ...p, id: params.id, version: db.policies[i].version + 1 }
   db.policies[i] = next
   POLICY_UPDATED[next.id] = Date.now()
@@ -1149,6 +1152,8 @@ route('PUT', '/settings', ({ body }) => {
   if (s.oidc.enabled && !s.oidc.allowed_domains.filter((d) => d.trim()).length)
     throw bad('oidc.allowed_domains must list at least one email domain; single sign-on denies everyone when it is empty')
   if (s.oidc.default_role === 'admin') throw bad('oidc.default_role cannot be an administrator role; promote SSO users explicitly')
+  const ev = s.retention_days.evidence
+  if (ev != null && (!Number.isInteger(ev) || ev < 1 || ev > 365)) throw bad('Evidence retention must be between 1 and 365 days')
   if (s.notifications.email.password) s.notifications.email.password_set = true
   delete s.notifications.email.password
   if (s.notifications.webhook.secret) s.notifications.webhook.secret_set = true
@@ -1449,6 +1454,17 @@ route('POST', '/devices/:id/files/mkdir', async ({ params, query, body }) => {
   await consentFor(eff, c.fmSession, u, d.id)
   return fileOp(u, d.hostname, d.id, 'remote.files.mkdir', { path: b.path }, () => fs.mkdir(b.path))
 })
+route('POST', '/devices/:id/files/end', ({ params, query }) => {
+  const u = me()
+  if (!canDo(u, 'remote.files')) throw new HttpError(403, 'forbidden', 'The remote file manager needs the remote.files privilege (admins only)')
+  const d = findDevice(params.id)
+  const fm = query.get('fm_session') ?? ''
+  if (!/^[0-9a-f-]{36}$/i.test(fm)) throw new HttpError(400, 'bad_request', fm ? 'fm_session must be a UUID' : 'fm_session is required')
+  // The agent ends the session: banner and tray notice off, consent dropped.
+  consentedFmSessions.delete(fm)
+  db.log(u, 'remote.files.end', d.id, { hostname: d.hostname, fm_session: fm, delivered: d.status === 'online', ok: true })
+  return undefined
+})
 route('GET', '/devices/:id/remote-desktop/status', ({ params }) => {
   const u = me()
   if (!canDo(u, 'remote.desktop')) throw new HttpError(403, 'forbidden', 'Remote desktop needs the remote.desktop privilege (admins only)')
@@ -1474,6 +1490,10 @@ export async function mockUpload(deviceId: string, target: string, file: Blob, c
   return res.body as FileUploadResult
 }
 
+
+// ------------------------------------------------------------------ evidence capture (ST-02 / ST-04)
+
+registerEvidenceRoutes({ route, db, emit, me, requirePriv, err: (status, code, message, extra) => new HttpError(status, code, message, undefined, extra) })
 
 // ------------------------------------------------------------------ dispatcher
 

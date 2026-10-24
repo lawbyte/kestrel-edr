@@ -51,7 +51,8 @@ impl Priority {
             | AgentPayload::ActionResult { .. }
             | AgentPayload::ReviewRequest(_)
             | AgentPayload::UpdateResult { .. }
-            | AgentPayload::Pause(_) => Priority::High,
+            | AgentPayload::Pause(_)
+            | AgentPayload::Evidence(_) => Priority::High,
         }
     }
 }
@@ -70,6 +71,7 @@ pub fn payload_kind(p: &AgentPayload) -> &'static str {
         AgentPayload::UpdateResult { .. } => "update_result",
         AgentPayload::Live { .. } => "live",
         AgentPayload::Pause(_) => "pause",
+        AgentPayload::Evidence(_) => "evidence",
     }
 }
 
@@ -535,6 +537,7 @@ mod tests {
     fn events(n: u32) -> AgentPayload {
         AgentPayload::Events {
             events: (0..n).map(ev).collect(),
+            repeats: vec![],
         }
     }
 

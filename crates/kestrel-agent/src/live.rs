@@ -46,13 +46,30 @@
 //!   after [`LiveConfig::fm_idle`] without operations or on stream loss).
 //!   `TrayStatus.remote_session` shows the desktop session, else an active
 //!   file-manager session.
+//! * **On-screen banner** (mandatory, privacy rule): the employee sees a
+//!   banner for the whole of every remote session. Desktop: the platform's
+//!   capture helper shows it. Files: before the first operation of a
+//!   file-manager session runs, the agent shows a stand-alone banner
+//!   (`RemoteDesktop::show_banner`; Windows: the same helper in banner-only
+//!   mode) reading "IT (admin) is accessing files on this PC since HH:MM";
+//!   if it cannot be shown the operation is refused (fail closed, like a
+//!   desktop session whose helper cannot start) and the session does not
+//!   start. Every operation re-checks the banner (a helper that died is
+//!   restarted, else the file sessions end). While a desktop session runs,
+//!   its banner carries the file notice (`DesktopSession::set_files_notice`)
+//!   and the stand-alone banner is closed: one banner on screen. When the
+//!   desktop session ends with file sessions still active, the stand-alone
+//!   banner is shown *before* the desktop banner is removed. The banner ends
+//!   with the last file-manager session: `FileSessionEnd` from the server
+//!   (admin closed the file manager), [`LiveConfig::fm_idle`] without
+//!   operations, stream loss, files switched off by policy, agent shutdown.
 
 use base64::Engine as _;
 use kestrel_common::{
     remote::{
         file_op_class, DesktopInfo, DesktopMode, DesktopStart, FileContext, FileMode, FileOp,
         FileOpClass, FileReply, LiveAgentMsg, LiveServerMsg, RemoteAccessProfile, RemoteErrorCode,
-        DESKTOP_MAX_INFLIGHT, DESKTOP_SERVER_SILENCE_MS, LIVE_MAX_MESSAGE,
+        DESKTOP_MAX_INFLIGHT, DESKTOP_SERVER_SILENCE_MS, FILE_SESSION_IDLE_MS, LIVE_MAX_MESSAGE,
         TRANSFER_IDLE_TIMEOUT_MS,
     },
     tray::{ActivityItem, ConsentRequest, RemoteKind, RemoteSessionNotice, TrayResponse},
@@ -61,7 +78,7 @@ use kestrel_common::{
 };
 use kestrel_platform::{
     Audience, DesktopEvent, DesktopSession, DesktopStartParams, RemoteDesktop, RemoteFs,
-    TrayClient, TrayPush,
+    SessionBanner, TrayClient, TrayPush,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -112,8 +129,8 @@ pub struct LiveConfig {
     pub max_file_sessions: usize,
     /// Desktop housekeeping period (silence / duration / hours checks).
     pub tick: Duration,
-    /// A file-manager session without operations for this long is shown
-    /// as ended to the employee.
+    /// A file-manager session without operations for this long is ended
+    /// (tray notice and on-screen banner).
     pub fm_idle: Duration,
     /// How often idle file-manager sessions are swept.
     pub fm_sweep: Duration,
@@ -126,7 +143,7 @@ impl Default for LiveConfig {
             transfer_idle: Duration::from_millis(TRANSFER_IDLE_TIMEOUT_MS as u64),
             max_file_sessions: 8,
             tick: Duration::from_secs(1),
-            fm_idle: Duration::from_secs(5 * 60),
+            fm_idle: Duration::from_millis(FILE_SESSION_IDLE_MS as u64),
             fm_sweep: Duration::from_secs(30),
         }
     }
@@ -236,6 +253,31 @@ type FmKey = (Uuid, String);
 struct FmActive {
     notice: RemoteSessionNotice,
     last: Instant,
+    /// Device local start time "HH:MM" ("" when unknown), for the banner.
+    since: String,
+}
+
+/// The mandatory on-screen banner (see the module docs).
+#[derive(Default)]
+struct BannerState {
+    /// Running desktop session whose banner is on screen; the file-manager
+    /// notice is shown as part of it.
+    desktop: Option<(Uuid, Arc<dyn DesktopSession>)>,
+    /// Stand-alone banner of the file-manager sessions (no desktop session).
+    files: Option<Arc<dyn SessionBanner>>,
+    /// File-manager notice last given to `desktop` / `files`.
+    shown: String,
+    /// Agent shutting down: nothing is shown any more.
+    closed: bool,
+}
+
+/// Desktop-session change applied together with a banner update.
+enum DeskBanner {
+    Keep,
+    /// The desktop session's banner is on screen (capture is running).
+    Set(Uuid, Arc<dyn DesktopSession>),
+    /// The desktop session is about to stop.
+    Clear(Uuid),
 }
 
 struct Inner {
@@ -257,6 +299,10 @@ struct Inner {
     asking: Mutex<HashMap<FmKey, Arc<tokio::sync::Mutex<()>>>>,
     /// Active file-manager sessions shown to the employee.
     fm_active: Mutex<HashMap<FmKey, FmActive>>,
+    /// What the on-screen banner shows (mandatory notice).
+    banner: Mutex<BannerState>,
+    /// Serialises banner changes (starting a banner helper takes time).
+    banner_op: tokio::sync::Mutex<()>,
     /// A desktop session in control mode is running: the admin could click
     /// "Allow" on a consent prompt through injected input (M2).
     control_active: AtomicBool,
@@ -296,6 +342,8 @@ impl LiveManager {
                 grants: Mutex::new(HashMap::new()),
                 asking: Mutex::new(HashMap::new()),
                 fm_active: Mutex::new(HashMap::new()),
+                banner: Mutex::new(BannerState::default()),
+                banner_op: tokio::sync::Mutex::new(()),
                 fm_sweeper: AtomicBool::new(false),
                 control_active: AtomicBool::new(false),
                 last_oversize_warn: AtomicI64::new(0),
@@ -321,7 +369,9 @@ impl LiveManager {
     }
 
     /// The stream of attachment `gen` ended: end every live session.
-    pub fn detach(&self, gen: u64) {
+    /// Returns whether `gen` was the current attachment (callers end their
+    /// own stream-bound sessions too, e.g. evidence uploads).
+    pub fn detach(&self, gen: u64) -> bool {
         let mine = {
             let mut out = lock(&self.inner.out);
             if out.as_ref().is_some_and(|o| o.gen == gen) {
@@ -334,6 +384,15 @@ impl LiveManager {
         if mine {
             self.inner.end_all("connection to the server lost");
         }
+        mine
+    }
+
+    /// Send one live message (`AgentPayload::Live`, seq 0) on the attached
+    /// stream, outside any remote-access session (evidence uploads).
+    /// Returns false when no stream is attached or the message was dropped
+    /// (over `LIVE_MAX_MESSAGE`).
+    pub async fn send_message(&self, session_id: Uuid, msg: LiveAgentMsg) -> bool {
+        self.inner.send(session_id, msg).await == Sent::Ok
     }
 
     /// Agent shutdown: stop the desktop session now (banner removed),
@@ -354,6 +413,17 @@ impl LiveManager {
         lock(&self.inner.grants).clear();
         lock(&self.inner.fm_active).clear();
         self.inner.cancel_files(None);
+        // Remove the file-manager banner now (the desktop one went with the
+        // desktop session above).
+        let files = {
+            let mut b = lock(&self.inner.banner);
+            b.closed = true;
+            b.desktop = None;
+            b.files.take()
+        };
+        if let Some(b) = files {
+            b.close();
+        }
     }
 
     /// A new policy is in force: recompute the effective profile and end /
@@ -380,6 +450,11 @@ impl LiveManager {
         };
         if files_changed {
             lock(&self.inner.grants).clear();
+            if eff.files == FileMode::Off {
+                // No file access any more: the file-manager sessions (and
+                // their banner) end now.
+                self.inner.end_fm_notices(&*host, |_, _| true);
+            }
             if !lock(&self.inner.files).is_empty() {
                 tracing::info!("remote-access profile changed; aborting file transfers");
                 self.inner.cancel_files(Some((
@@ -454,6 +529,12 @@ impl LiveManager {
         }
     }
 
+    /// Whether a stand-alone file-manager banner is on screen (tests,
+    /// diagnostics).
+    pub fn files_banner_shown(&self) -> bool {
+        lock(&self.inner.banner).files.is_some()
+    }
+
     /// Whether a desktop session is running (tests, diagnostics).
     pub fn desktop_active(&self) -> bool {
         lock(&self.inner.desktop).is_some()
@@ -480,6 +561,10 @@ impl LiveManager {
                 context,
             } => inner.file_request(session_id, request_id, op, context),
             LiveServerMsg::DesktopStart(s) => inner.desktop_start(session_id, s),
+            LiveServerMsg::FileSessionEnd {
+                fm_session,
+                admin_name,
+            } => inner.file_session_end(fm_session, &admin_name),
             LiveServerMsg::Unknown => {
                 tracing::debug!(%session_id, "unknown live message kind ignored")
             }
@@ -634,7 +719,7 @@ impl Inner {
         // session); consents are not carried over to another stream.
         lock(&self.grants).clear();
         if let Some(host) = self.host() {
-            self.end_fm_notices(&*host, |_| true);
+            self.end_fm_notices(&*host, |_, _| true);
         }
     }
 
@@ -881,13 +966,15 @@ impl Inner {
             ctx.map(|c| c.fm_session).unwrap_or(session_id),
             admin.clone(),
         );
+        // Mandatory banner before anything runs (fail closed).
         self.touch_fm(
             host,
             fm.clone(),
             &admin,
             &reason,
             eff.files == FileMode::ReadOnly,
-        );
+        )
+        .await?;
         if file_op_class(op) != FileOpClass::Read && g.require_consent {
             let cell = lock(&self.asking)
                 .entry(fm.clone())
@@ -1080,40 +1167,66 @@ impl Inner {
         }
     }
 
-    /// Record activity of file-manager session `fm`; the first operation
-    /// tells the employee.
-    fn touch_fm(
+    /// Record activity of file-manager session `fm` and make sure the
+    /// mandatory banner is on screen; the first operation tells the employee
+    /// (banner first, then tray). `Err` = no banner: the operation is
+    /// refused (a new session does not start; running ones end).
+    async fn touch_fm(
         self: &Arc<Self>,
         host: &dyn LiveHost,
         fm: FmKey,
         admin: &str,
         reason: &str,
         read_only: bool,
-    ) {
-        let notice = {
+    ) -> Result<(), Refusal> {
+        let new = {
             let mut m = lock(&self.fm_active);
             if let Some(a) = m.get_mut(&fm) {
                 a.last = Instant::now();
-                return;
+                None
+            } else {
+                let notice = RemoteSessionNotice {
+                    active: true,
+                    kind: RemoteKind::Files,
+                    admin_name: admin.to_string(),
+                    view_only: read_only,
+                    reason: reason.to_string(),
+                    started_at: kestrel_common::now_ms(),
+                    ended_at: None,
+                };
+                let since = host
+                    .local_weekday_minute()
+                    .map(|(_, m)| format!("{:02}:{:02}", (m / 60) % 24, m % 60))
+                    .unwrap_or_default();
+                m.insert(
+                    fm.clone(),
+                    FmActive {
+                        notice: notice.clone(),
+                        last: Instant::now(),
+                        since,
+                    },
+                );
+                Some(notice)
             }
-            let notice = RemoteSessionNotice {
-                active: true,
-                kind: RemoteKind::Files,
-                admin_name: admin.to_string(),
-                view_only: read_only,
-                reason: reason.to_string(),
-                started_at: kestrel_common::now_ms(),
-                ended_at: None,
-            };
-            m.insert(
-                fm,
-                FmActive {
-                    notice: notice.clone(),
-                    last: Instant::now(),
-                },
-            );
-            notice
         };
+        if let Err(r) = self.banner_update(DeskBanner::Keep).await {
+            if let Some(n) = &new {
+                // Never shown to the employee: drop it silently.
+                let mut m = lock(&self.fm_active);
+                if m.get(&fm)
+                    .is_some_and(|a| a.notice.started_at == n.started_at)
+                {
+                    m.remove(&fm);
+                }
+            }
+            tracing::warn!(code = r.0.as_str(), "remote file access refused: {}", r.1);
+            // Sessions already running have no banner either: end them.
+            if !lock(&self.fm_active).is_empty() {
+                self.files_fail_closed(host, r.clone());
+            }
+            return Err(r);
+        }
+        let Some(notice) = new else { return Ok(()) };
         let mut body = String::new();
         if !reason.is_empty() {
             body.push_str(&format!("Reason given: {reason}. "));
@@ -1123,7 +1236,9 @@ impl Inner {
         } else {
             "IT can browse, download and change files on this PC. "
         });
-        body.push_str("If you did not expect this, contact IT.");
+        body.push_str(
+            "A banner stays at the top of the screen while IT has access. If you did not expect this, contact IT.",
+        );
         host.notify_activity(ActivityItem {
             id: Uuid::new_v4(),
             ts: kestrel_common::now_ms(),
@@ -1137,6 +1252,31 @@ impl Inner {
         });
         host.broadcast(public(TrayResponse::RemoteSession(notice)));
         self.start_fm_sweeper();
+        Ok(())
+    }
+
+    /// The admin closed the file manager (`FileSessionEnd`).
+    fn file_session_end(self: &Arc<Self>, fm_session: Uuid, admin_name: &str) {
+        let admin = clean_text(admin_name, 100);
+        let admin = if admin.is_empty() {
+            "an administrator".to_string()
+        } else {
+            admin
+        };
+        let key: FmKey = (fm_session, admin);
+        lock(&self.grants).remove(&key);
+        let Some(host) = self.host() else { return };
+        tracing::info!(%fm_session, "remote file-manager session ended by the server");
+        self.end_fm_notices(&*host, |k, _| *k == key);
+    }
+
+    /// No banner can be shown for the file-manager sessions: end them all,
+    /// abort running transfers (queued requests get `r`) and drop consents.
+    fn files_fail_closed(self: &Arc<Self>, host: &dyn LiveHost, r: Refusal) {
+        tracing::warn!("ending remote file-manager sessions: {}", r.1);
+        self.cancel_files(Some(r));
+        lock(&self.grants).clear();
+        self.end_fm_notices(host, |_, _| true);
     }
 
     fn start_fm_sweeper(self: &Arc<Self>) {
@@ -1150,7 +1290,13 @@ impl Inner {
                 let Some(host) = me.host() else { break };
                 let idle = me.cfg.fm_idle;
                 let now = Instant::now();
-                me.end_fm_notices(&*host, |a| now.duration_since(a.last) >= idle);
+                me.end_fm_notices(&*host, |_, a| now.duration_since(a.last) >= idle);
+                // The banner of the remaining sessions must still be up.
+                if !lock(&me.fm_active).is_empty() {
+                    if let Err(r) = me.banner_update(DeskBanner::Keep).await {
+                        me.files_fail_closed(&*host, r);
+                    }
+                }
                 // Stop when nothing is active (under the lock, so a new
                 // session either sees the flag cleared or is swept).
                 let m = lock(&me.fm_active);
@@ -1162,13 +1308,18 @@ impl Inner {
         });
     }
 
-    /// End (tell the employee) the file-manager sessions matching `pred`.
-    fn end_fm_notices(&self, host: &dyn LiveHost, pred: impl Fn(&FmActive) -> bool) {
+    /// End (tell the employee) the file-manager sessions matching `pred`;
+    /// the banner follows (removed with the last session).
+    fn end_fm_notices(
+        self: &Arc<Self>,
+        host: &dyn LiveHost,
+        pred: impl Fn(&FmKey, &FmActive) -> bool,
+    ) {
         let ended: Vec<RemoteSessionNotice> = {
             let mut m = lock(&self.fm_active);
             let keys: Vec<FmKey> = m
                 .iter()
-                .filter(|(_, a)| pred(a))
+                .filter(|(k, a)| pred(k, a))
                 .map(|(k, _)| k.clone())
                 .collect();
             // Prompt locks of ended sessions (unless a prompt is running)
@@ -1181,10 +1332,189 @@ impl Inner {
                 .map(|a| a.notice)
                 .collect()
         };
+        if ended.is_empty() {
+            return;
+        }
+        self.spawn_banner_sync();
         for mut n in ended {
             n.active = false;
             n.ended_at = Some(kestrel_common::now_ms());
             host.broadcast(public(TrayResponse::RemoteSession(n)));
+        }
+    }
+
+    // ------------------------------------------------------------ banner
+
+    /// File-manager notice for the banner ("" = no file-manager session).
+    fn files_notice(&self) -> String {
+        let m = lock(&self.fm_active);
+        let mut v: Vec<&FmActive> = m.values().collect();
+        v.sort_by_key(|a| a.notice.started_at);
+        let parts: Vec<(&str, &str, &str)> = v
+            .iter()
+            .map(|a| {
+                (
+                    a.notice.admin_name.as_str(),
+                    a.since.as_str(),
+                    a.notice.reason.as_str(),
+                )
+            })
+            .collect();
+        files_banner_text(&parts)
+    }
+
+    /// Bring the screen in line with the sessions (after applying `desk`):
+    /// while a desktop session runs its banner carries the file notice;
+    /// otherwise a stand-alone banner shows it while file-manager sessions
+    /// are active; otherwise nothing. `Err` = file-manager sessions are
+    /// active but no banner could be shown.
+    async fn banner_update(self: &Arc<Self>, desk: DeskBanner) -> Result<(), Refusal> {
+        let _op = self.banner_op.lock().await;
+        {
+            let mut st = lock(&self.banner);
+            match desk {
+                DeskBanner::Keep => {}
+                DeskBanner::Set(id, s) => {
+                    if !st.closed {
+                        st.desktop = Some((id, s));
+                        // The desktop helper starts without the notice.
+                        st.shown.clear();
+                    }
+                }
+                DeskBanner::Clear(id) => {
+                    if st.desktop.as_ref().is_some_and(|(d, _)| *d == id) {
+                        st.desktop = None;
+                        st.shown.clear();
+                    }
+                }
+            }
+        }
+        let text = self.files_notice();
+        let (desk, files, shown, closed) = {
+            let st = lock(&self.banner);
+            (
+                st.desktop.clone(),
+                st.files.clone(),
+                st.shown.clone(),
+                st.closed,
+            )
+        };
+        if closed {
+            return if text.is_empty() {
+                Ok(())
+            } else {
+                Err((
+                    RemoteErrorCode::Unavailable,
+                    "the Kestrel agent is stopping".into(),
+                ))
+            };
+        }
+        if let Some((_, d)) = desk {
+            if shown != text {
+                d.set_files_notice(&text);
+            }
+            // The desktop banner is on screen: one banner only.
+            let old = {
+                let mut st = lock(&self.banner);
+                st.shown = text;
+                st.files.take()
+            };
+            if let Some(b) = old {
+                b.close();
+            }
+            return Ok(());
+        }
+        if text.is_empty() {
+            let old = {
+                let mut st = lock(&self.banner);
+                st.shown.clear();
+                st.files.take()
+            };
+            if let Some(b) = old {
+                b.close();
+                tracing::info!("remote file access ended; banner removed");
+            }
+            return Ok(());
+        }
+        if let Some(b) = files {
+            if b.is_alive() {
+                if shown != text {
+                    b.set_text(&text);
+                    lock(&self.banner).shown = text;
+                }
+                return Ok(());
+            }
+            tracing::warn!("the remote-access banner is no longer on screen; showing it again");
+            {
+                let mut st = lock(&self.banner);
+                if st.files.as_ref().is_some_and(|f| Arc::ptr_eq(f, &b)) {
+                    st.files = None;
+                }
+            }
+            b.close();
+        }
+        let refuse = |code: RemoteErrorCode, msg: &str| -> Refusal {
+            (
+                code,
+                format!(
+                    "the on-screen notice for the user at this PC could not be shown ({msg}); remote file access is refused"
+                ),
+            )
+        };
+        let Some(rd) = self.host().and_then(|h| h.remote_desktop()) else {
+            return Err(refuse(
+                RemoteErrorCode::Unavailable,
+                "this device cannot show it",
+            ));
+        };
+        let t = text.clone();
+        match tokio::task::spawn_blocking(move || rd.show_banner(&t)).await {
+            Ok(Ok(b)) => {
+                let b: Arc<dyn SessionBanner> = Arc::from(b);
+                let mut st = lock(&self.banner);
+                if st.closed {
+                    drop(st);
+                    b.close();
+                    return Err((
+                        RemoteErrorCode::Unavailable,
+                        "the Kestrel agent is stopping".into(),
+                    ));
+                }
+                st.files = Some(b);
+                st.shown = text;
+                tracing::info!("remote file access: banner shown");
+                Ok(())
+            }
+            Ok(Err((code, msg))) => Err(refuse(code, &msg)),
+            Err(_) => Err(refuse(
+                RemoteErrorCode::Unavailable,
+                "the banner helper failed",
+            )),
+        }
+    }
+
+    /// [`Inner::banner_update`] in the background (after sessions ended).
+    fn spawn_banner_sync(self: &Arc<Self>) {
+        match tokio::runtime::Handle::try_current() {
+            Ok(h) => {
+                let me = self.clone();
+                h.spawn(async move {
+                    if let Err(r) = me.banner_update(DeskBanner::Keep).await {
+                        if let Some(host) = me.host() {
+                            me.files_fail_closed(&*host, r);
+                        }
+                    }
+                });
+            }
+            Err(_) => {
+                // No runtime: only removing is possible.
+                if lock(&self.fm_active).is_empty() {
+                    let old = lock(&self.banner).files.take();
+                    if let Some(b) = old {
+                        b.close();
+                    }
+                }
+            }
         }
     }
 
@@ -1436,6 +1766,8 @@ impl Inner {
         let mut sent: u64 = 0;
         let mut acked: u64 = 0;
         let mut started_sent = false;
+        // This session's banner carries the file-manager notice.
+        let mut banner_registered = false;
         let mut last_heard = Instant::now();
         let mut tick = tokio::time::interval(self.cfg.tick);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1514,6 +1846,10 @@ impl Inner {
                             LiveAgentMsg::DesktopInfo(info)
                         } else {
                             started_sent = true;
+                            // Capture runs only once the banner is up: it
+                            // now carries the file-manager notice too.
+                            let _ = self.banner_update(DeskBanner::Set(session_id, session.clone())).await;
+                            banner_registered = true;
                             LiveAgentMsg::DesktopStarted(info)
                         };
                         if self.send(session_id, msg).await == Sent::Detached {
@@ -1523,6 +1859,8 @@ impl Inner {
                     Some(DesktopEvent::Frame { width, height, ts, jpeg }) => {
                         if !started_sent {
                             started_sent = true;
+                            let _ = self.banner_update(DeskBanner::Set(session_id, session.clone())).await;
+                            banner_registered = true;
                             let info = DesktopInfo { width, height, monitors: 1, view_only, ..Default::default() };
                             if self.send(session_id, LiveAgentMsg::DesktopStarted(info)).await == Sent::Detached {
                                 break ("connection to the server lost".to_string(), None, false);
@@ -1602,6 +1940,13 @@ impl Inner {
             }
         };
 
+        if banner_registered {
+            // File-manager sessions still active: their stand-alone banner
+            // goes up before this one comes down; without it they end.
+            if let Err(r) = self.banner_update(DeskBanner::Clear(session_id)).await {
+                self.files_fail_closed(&*host, r);
+            }
+        }
         stopper.stop();
         self.control_active.store(false, Ordering::SeqCst);
         drop(switch_ask);
@@ -1645,6 +1990,34 @@ fn grant_valid(g: &Grant, eff: &RemoteAccessProfile, now: Instant) -> bool {
         return false;
     }
     true
+}
+
+/// Banner text of the active file-manager sessions, oldest first:
+/// `(admin, local start "HH:MM" or "", reason)`. "" when there are none.
+/// "IT (Jane Doe) is accessing files on this PC since 14:02 — Reason: …";
+/// several admins are listed together, the reason only when all sessions
+/// give the same one.
+fn files_banner_text(sessions: &[(&str, &str, &str)]) -> String {
+    let Some(first) = sessions.first() else {
+        return String::new();
+    };
+    let mut admins: Vec<&str> = Vec::new();
+    for (a, _, _) in sessions {
+        if !admins.contains(a) {
+            admins.push(a);
+        }
+    }
+    let mut s = format!("IT ({}) is accessing files on this PC", admins.join(", "));
+    if !first.1.is_empty() {
+        s.push_str(" since ");
+        s.push_str(first.1);
+    }
+    let reason = first.2;
+    if !reason.is_empty() && sessions.iter().all(|(_, _, r)| *r == reason) {
+        s.push_str(" \u{2014} Reason: ");
+        s.push_str(reason);
+    }
+    s
 }
 
 fn public(resp: TrayResponse) -> TrayPush {
@@ -1841,6 +2214,54 @@ mod tests {
         view_only_at_start: Arc<Mutex<Option<bool>>>,
         inputs: Arc<Mutex<Vec<InputEvent>>>,
         settings: Arc<Mutex<Vec<DesktopSettings>>>,
+        /// File notices given to the desktop session's banner.
+        files_notices: Arc<Mutex<Vec<String>>>,
+        /// `show_banner` fails while set.
+        banner_fail: Arc<AtomicBool>,
+        /// Stand-alone banners shown so far.
+        banners: Arc<Mutex<Vec<Arc<FakeBanner>>>>,
+        /// Ordered screen events: "banner.show", "banner.close",
+        /// "desktop.stop".
+        log: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl FakeDesktop {
+        fn banner_count(&self) -> usize {
+            lock(&self.banners).len()
+        }
+        fn last_banner(&self) -> Arc<FakeBanner> {
+            lock(&self.banners).last().cloned().expect("a banner")
+        }
+        /// Stand-alone banners on screen now.
+        fn banners_on_screen(&self) -> usize {
+            lock(&self.banners)
+                .iter()
+                .filter(|b| b.alive.load(Ordering::SeqCst))
+                .count()
+        }
+        fn log(&self) -> Vec<String> {
+            lock(&self.log).clone()
+        }
+    }
+
+    struct FakeBanner {
+        alive: AtomicBool,
+        text: Mutex<String>,
+        log: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl SessionBanner for FakeBanner {
+        fn set_text(&self, text: &str) {
+            *lock(&self.text) = text.to_string();
+        }
+        fn is_alive(&self) -> bool {
+            self.alive.load(Ordering::SeqCst)
+        }
+        fn close(&self) {
+            if self.alive.swap(false, Ordering::SeqCst) {
+                lock(&self.log).push("banner.close".into());
+            }
+        }
     }
 
     struct FakeSession {
@@ -1848,6 +2269,8 @@ mod tests {
         stops: Arc<AtomicU32>,
         inputs: Arc<Mutex<Vec<InputEvent>>>,
         settings: Arc<Mutex<Vec<DesktopSettings>>>,
+        files_notices: Arc<Mutex<Vec<String>>>,
+        log: Arc<Mutex<Vec<String>>>,
     }
 
     impl DesktopSession for FakeSession {
@@ -1858,8 +2281,13 @@ mod tests {
             lock(&self.settings).push(s.clone());
         }
         fn stop(&self) {
-            self.stop.store(true, Ordering::SeqCst);
+            if !self.stop.swap(true, Ordering::SeqCst) {
+                lock(&self.log).push("desktop.stop".into());
+            }
             self.stops.fetch_add(1, Ordering::SeqCst);
+        }
+        fn set_files_notice(&self, text: &str) {
+            lock(&self.files_notices).push(text.to_string());
         }
     }
 
@@ -1902,7 +2330,44 @@ mod tests {
                 stops: self.stops.clone(),
                 inputs: self.inputs.clone(),
                 settings: self.settings.clone(),
+                files_notices: self.files_notices.clone(),
+                log: self.log.clone(),
             }))
+        }
+
+        fn show_banner(
+            &self,
+            text: &str,
+        ) -> Result<Box<dyn SessionBanner>, (RemoteErrorCode, String)> {
+            if self.banner_fail.load(Ordering::SeqCst) {
+                return Err((
+                    RemoteErrorCode::Unavailable,
+                    "the banner window did not appear".into(),
+                ));
+            }
+            let b = Arc::new(FakeBanner {
+                alive: AtomicBool::new(true),
+                text: Mutex::new(text.to_string()),
+                log: self.log.clone(),
+            });
+            lock(&self.banners).push(b.clone());
+            lock(&self.log).push("banner.show".into());
+            Ok(Box::new(SharedBanner(b)))
+        }
+    }
+
+    /// Box adapter so the test keeps a handle on the banner.
+    struct SharedBanner(Arc<FakeBanner>);
+
+    impl SessionBanner for SharedBanner {
+        fn set_text(&self, text: &str) {
+            self.0.set_text(text)
+        }
+        fn is_alive(&self) -> bool {
+            self.0.is_alive()
+        }
+        fn close(&self) {
+            self.0.close()
         }
     }
 
@@ -3133,5 +3598,380 @@ mod tests {
         assert!(c.chars().all(|ch| !is_format_char(ch) && !ch.is_control()));
         let item = start_item(&clean_text("A\u{202E}B", 100), false, "");
         assert_eq!(item.title, "IT (AB) is controlling this PC");
+    }
+
+    // ------------------------------------------------ file-manager banner
+
+    async fn wait_until(what: &str, f: impl Fn() -> bool) {
+        for _ in 0..500 {
+            if f() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for: {what}");
+    }
+
+    /// Skip messages (frames…) until one matches.
+    async fn until(
+        rx: &mut mpsc::Receiver<AgentEnvelope>,
+        pred: impl Fn(&LiveAgentMsg) -> bool,
+    ) -> LiveAgentMsg {
+        loop {
+            let m = next(rx).await.1;
+            if pred(&m) {
+                return m;
+            }
+        }
+    }
+
+    fn is_reply(id: u64) -> impl Fn(&LiveAgentMsg) -> bool {
+        move |m| matches!(m, LiveAgentMsg::FileReply { request_id, .. } if *request_id == id)
+    }
+
+    fn fm_end(fm: Uuid, admin: &str) -> LiveServerMsg {
+        LiveServerMsg::FileSessionEnd {
+            fm_session: fm,
+            admin_name: admin.into(),
+        }
+    }
+
+    fn files_pushes(host: &FakeHost) -> Vec<bool> {
+        lock(&host.pushes)
+            .iter()
+            .filter_map(|p| match &p.resp {
+                TrayResponse::RemoteSession(n) if n.kind == RemoteKind::Files => Some(n.active),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn files_banner_texts() {
+        assert_eq!(files_banner_text(&[]), "");
+        assert_eq!(
+            files_banner_text(&[("Jane Doe", "09:05", "ticket 42")]),
+            "IT (Jane Doe) is accessing files on this PC since 09:05 \u{2014} Reason: ticket 42"
+        );
+        assert_eq!(
+            files_banner_text(&[("Jane Doe", "", "")]),
+            "IT (Jane Doe) is accessing files on this PC"
+        );
+        // Two admins (oldest first, listed once each); different reasons
+        // are not shown.
+        assert_eq!(
+            files_banner_text(&[
+                ("Jane Doe", "09:05", "a"),
+                ("Bob", "09:30", "b"),
+                ("Jane Doe", "09:40", "a"),
+            ]),
+            "IT (Jane Doe, Bob) is accessing files on this PC since 09:05"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn file_session_shows_banner_until_idle() {
+        let mut r = rig(LiveConfig {
+            fm_idle: Duration::from_millis(200),
+            fm_sweep: Duration::from_millis(50),
+            ..LiveConfig::default()
+        });
+        let fm = Uuid::new_v4();
+        r.mgr
+            .handle(Uuid::new_v4(), file_req(1, list("C:\\data"), Some(fm)));
+        assert!(is_ok_reply(&next(&mut r.rx).await.1));
+        // The banner was up before the operation ran, and before the tray
+        // was told.
+        assert_eq!(r.desk.banner_count(), 1);
+        assert!(r.mgr.files_banner_shown());
+        let b = r.desk.last_banner();
+        assert!(b.is_alive());
+        assert_eq!(
+            *lock(&b.text),
+            "IT (Jane Doe) is accessing files on this PC since 10:00 \u{2014} Reason: ticket 42"
+        );
+        assert_eq!(files_pushes(&r.host), vec![true]);
+        let item = lock(&r.host.activity)[0].clone();
+        assert!(item.body.contains("banner"), "{}", item.body);
+        // More operations of the session: the same banner.
+        for i in 2..5 {
+            r.mgr
+                .handle(Uuid::new_v4(), file_req(i, list("C:\\data"), Some(fm)));
+            assert!(is_ok_reply(&next(&mut r.rx).await.1));
+        }
+        assert_eq!(r.desk.banner_count(), 1);
+        assert!(b.is_alive());
+        // Idle: the session ends and the banner is removed.
+        wait_until("banner removed after idle", || !b.is_alive()).await;
+        wait_until("no banner", || !r.mgr.files_banner_shown()).await;
+        assert!(r.mgr.remote_session_notice().is_none());
+        assert_eq!(files_pushes(&r.host), vec![true, false]);
+        assert_eq!(r.desk.log(), vec!["banner.show", "banner.close"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn file_session_end_and_disconnect_remove_banner() {
+        let mut r = rig(LiveConfig::default());
+        let fm = Uuid::new_v4();
+        r.mgr
+            .handle(Uuid::new_v4(), file_req(1, list("C:\\data"), Some(fm)));
+        assert!(is_ok_reply(&next(&mut r.rx).await.1));
+        let b = r.desk.last_banner();
+        // Another admin cannot end Jane's session.
+        r.mgr.handle(Uuid::new_v4(), fm_end(fm, "Mallory"));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(b.is_alive());
+        // The admin closed the file manager.
+        r.mgr.handle(Uuid::new_v4(), fm_end(fm, "Jane Doe"));
+        wait_until("banner removed on FileSessionEnd", || !b.is_alive()).await;
+        assert!(r.mgr.remote_session_notice().is_none());
+        assert_eq!(files_pushes(&r.host), vec![true, false]);
+
+        // A new session shows a new banner; stream loss removes it.
+        let fm2 = Uuid::new_v4();
+        r.mgr
+            .handle(Uuid::new_v4(), file_req(2, list("C:\\data"), Some(fm2)));
+        assert!(is_ok_reply(&next(&mut r.rx).await.1));
+        assert_eq!(r.desk.banner_count(), 2);
+        let b2 = r.desk.last_banner();
+        assert!(b2.is_alive());
+        r.mgr.detach(r.gen);
+        wait_until("banner removed on disconnect", || !b2.is_alive()).await;
+
+        // Files switched off by policy: the session and banner end.
+        let mut r = rig(LiveConfig::default());
+        r.mgr
+            .handle(Uuid::new_v4(), file_req(3, list("C:\\data"), Some(fm)));
+        assert!(is_ok_reply(&next(&mut r.rx).await.1));
+        let b3 = r.desk.last_banner();
+        r.mgr.policy_changed(&RemoteAccessProfile::unrestricted());
+        assert!(b3.is_alive(), "unchanged files part keeps the session");
+        r.mgr.policy_changed(&RemoteAccessProfile::none());
+        wait_until("banner removed when files are switched off", || {
+            !b3.is_alive()
+        })
+        .await;
+        // Agent shutdown removes the banner at once.
+        let mut r = rig(LiveConfig::default());
+        r.mgr
+            .handle(Uuid::new_v4(), file_req(4, list("C:\\data"), Some(fm)));
+        assert!(is_ok_reply(&next(&mut r.rx).await.1));
+        let b4 = r.desk.last_banner();
+        r.mgr.shutdown();
+        assert!(!b4.is_alive());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn banner_failure_refuses_the_file_session() {
+        let mut r = rig(LiveConfig::default());
+        r.desk.banner_fail.store(true, Ordering::SeqCst);
+        let fm = Uuid::new_v4();
+        r.mgr.handle(
+            Uuid::new_v4(),
+            file_req(1, mkdir("C:\\data\\new"), Some(fm)),
+        );
+        match next(&mut r.rx).await.1 {
+            LiveAgentMsg::FileReply {
+                request_id: 1,
+                reply: FileReply::Error { code, message },
+            } => {
+                assert_eq!(code, RemoteErrorCode::Unavailable);
+                assert!(message.contains("could not be shown"), "{message}");
+                assert!(message.contains("did not appear"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!r.dir.path().join("C/data/new").exists(), "nothing ran");
+        // Reads are refused too; the employee was never told of a session
+        // that did not start.
+        r.mgr
+            .handle(Uuid::new_v4(), file_req(2, list("C:\\data"), Some(fm)));
+        assert_eq!(
+            reply_code(&next(&mut r.rx).await.1),
+            Some(RemoteErrorCode::Unavailable)
+        );
+        assert!(files_pushes(&r.host).is_empty());
+        assert!(lock(&r.host.activity).is_empty());
+        assert!(r.mgr.remote_session_notice().is_none());
+        assert!(!r.mgr.files_banner_shown());
+        // Once the banner can be shown, the same session works.
+        r.desk.banner_fail.store(false, Ordering::SeqCst);
+        r.mgr.handle(
+            Uuid::new_v4(),
+            file_req(3, mkdir("C:\\data\\new"), Some(fm)),
+        );
+        assert!(is_ok_reply(&next(&mut r.rx).await.1));
+        assert!(r.dir.path().join("C/data/new").exists());
+        assert!(r.mgr.files_banner_shown());
+
+        // A platform without a banner refuses file access.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("C/data")).unwrap();
+        let host = Arc::new(FakeHost {
+            fs: Some(Arc::new(TmpFs(dir.path().to_path_buf()))),
+            desk: None,
+            ..Default::default()
+        });
+        let mgr = LiveManager::default();
+        mgr.bind(Arc::downgrade(&(host.clone() as Arc<dyn LiveHost>)));
+        let (tx, mut rx) = mpsc::channel(8);
+        mgr.attach(tx);
+        mgr.handle(Uuid::new_v4(), file_req(1, list("C:\\data"), Some(fm)));
+        assert_eq!(
+            reply_code(&next(&mut rx).await.1),
+            Some(RemoteErrorCode::Unavailable)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dead_banner_is_restarted_or_the_sessions_end() {
+        let mut r = rig(LiveConfig::default());
+        let fm = Uuid::new_v4();
+        r.mgr
+            .handle(Uuid::new_v4(), file_req(1, list("C:\\data"), Some(fm)));
+        assert!(is_ok_reply(&next(&mut r.rx).await.1));
+        // The helper died (e.g. the user switched): shown again on the next
+        // operation, before it runs.
+        r.desk.last_banner().alive.store(false, Ordering::SeqCst);
+        r.mgr
+            .handle(Uuid::new_v4(), file_req(2, list("C:\\data"), Some(fm)));
+        assert!(is_ok_reply(&next(&mut r.rx).await.1));
+        assert_eq!(r.desk.banner_count(), 2);
+        assert!(r.desk.last_banner().is_alive());
+        // Died again and cannot come back: refused, and the session ends.
+        r.desk.last_banner().alive.store(false, Ordering::SeqCst);
+        r.desk.banner_fail.store(true, Ordering::SeqCst);
+        r.mgr.handle(
+            Uuid::new_v4(),
+            file_req(3, mkdir("C:\\data\\late"), Some(fm)),
+        );
+        assert_eq!(
+            reply_code(&next(&mut r.rx).await.1),
+            Some(RemoteErrorCode::Unavailable)
+        );
+        assert!(!r.dir.path().join("C/data/late").exists());
+        assert!(r.mgr.remote_session_notice().is_none());
+        assert_eq!(files_pushes(&r.host), vec![true, false]);
+
+        // The sweeper notices a dead banner without any operation.
+        let mut r = rig(LiveConfig {
+            fm_sweep: Duration::from_millis(50),
+            ..LiveConfig::default()
+        });
+        r.mgr
+            .handle(Uuid::new_v4(), file_req(1, list("C:\\data"), Some(fm)));
+        assert!(is_ok_reply(&next(&mut r.rx).await.1));
+        r.desk.banner_fail.store(true, Ordering::SeqCst);
+        r.desk.last_banner().alive.store(false, Ordering::SeqCst);
+        wait_until("file session ended by the sweeper", || {
+            r.mgr.remote_session_notice().is_none()
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn desktop_and_files_share_one_banner() {
+        // Files first, then a desktop session.
+        let mut r = rig(LiveConfig::default());
+        let fm = Uuid::new_v4();
+        r.mgr
+            .handle(Uuid::new_v4(), file_req(1, list("C:\\data"), Some(fm)));
+        assert!(is_ok_reply(&next(&mut r.rx).await.1));
+        let fb = r.desk.last_banner();
+        assert!(fb.is_alive());
+        let d = Uuid::new_v4();
+        r.mgr.handle(d, start_msg(true));
+        until(&mut r.rx, |m| matches!(m, LiveAgentMsg::DesktopStarted(_))).await;
+        // The desktop banner carries the file notice; the stand-alone one
+        // is gone (after the desktop banner was up).
+        wait_until("stand-alone banner closed", || !fb.is_alive()).await;
+        assert_eq!(r.desk.banners_on_screen(), 0);
+        let notice = lock(&r.desk.files_notices).last().cloned().unwrap();
+        assert!(
+            notice.starts_with("IT (Jane Doe) is accessing files"),
+            "{notice}"
+        );
+        // More file operations: no second banner.
+        r.mgr
+            .handle(Uuid::new_v4(), file_req(2, list("C:\\data"), Some(fm)));
+        until(&mut r.rx, is_reply(2)).await;
+        assert_eq!(r.desk.banner_count(), 1);
+        assert_eq!(r.desk.banners_on_screen(), 0);
+        // Desktop ends while files are active: the stand-alone banner is
+        // shown before the desktop banner comes down.
+        r.mgr.handle(
+            d,
+            LiveServerMsg::DesktopStop {
+                reason: String::new(),
+            },
+        );
+        until(&mut r.rx, |m| ended_code(m).is_some()).await;
+        wait_until("desktop stopped", || !r.mgr.desktop_active()).await;
+        assert_eq!(r.desk.banner_count(), 2);
+        assert_eq!(r.desk.banners_on_screen(), 1);
+        let log = r.desk.log();
+        let show = log.iter().rposition(|e| e == "banner.show").unwrap();
+        let stop = log.iter().position(|e| e == "desktop.stop").unwrap();
+        assert!(show < stop, "no gap: {log:?}");
+        // The admin closes the file manager: nothing on screen.
+        r.mgr.handle(Uuid::new_v4(), fm_end(fm, "Jane Doe"));
+        wait_until("no banner", || r.desk.banners_on_screen() == 0).await;
+
+        // Desktop first, then files: no stand-alone banner at all; the
+        // notice is removed from the desktop banner when files end.
+        let mut r = rig(LiveConfig::default());
+        let d = Uuid::new_v4();
+        r.mgr.handle(d, start_msg(false));
+        until(&mut r.rx, |m| matches!(m, LiveAgentMsg::DesktopStarted(_))).await;
+        r.mgr
+            .handle(Uuid::new_v4(), file_req(1, list("C:\\data"), Some(fm)));
+        until(&mut r.rx, is_reply(1)).await;
+        assert_eq!(r.desk.banner_count(), 0);
+        assert!(lock(&r.desk.files_notices)
+            .last()
+            .is_some_and(|n| n.contains("accessing files")));
+        r.mgr.handle(Uuid::new_v4(), fm_end(fm, "Jane Doe"));
+        wait_until("notice removed from the desktop banner", || {
+            lock(&r.desk.files_notices)
+                .last()
+                .is_some_and(|n| n.is_empty())
+        })
+        .await;
+        assert!(r.mgr.desktop_active(), "the desktop session goes on");
+        r.mgr.handle(
+            d,
+            LiveServerMsg::DesktopStop {
+                reason: String::new(),
+            },
+        );
+        until(&mut r.rx, |m| ended_code(m).is_some()).await;
+        wait_until("desktop stopped", || !r.mgr.desktop_active()).await;
+        assert_eq!(r.desk.banner_count(), 0, "no files session left");
+
+        // Handover fails: the file sessions end with the desktop session.
+        let mut r = rig(LiveConfig::default());
+        let d = Uuid::new_v4();
+        r.mgr.handle(d, start_msg(true));
+        until(&mut r.rx, |m| matches!(m, LiveAgentMsg::DesktopStarted(_))).await;
+        r.mgr
+            .handle(Uuid::new_v4(), file_req(1, list("C:\\data"), Some(fm)));
+        until(&mut r.rx, is_reply(1)).await;
+        r.desk.banner_fail.store(true, Ordering::SeqCst);
+        r.mgr.handle(
+            d,
+            LiveServerMsg::DesktopStop {
+                reason: String::new(),
+            },
+        );
+        until(&mut r.rx, |m| ended_code(m).is_some()).await;
+        wait_until("desktop stopped", || !r.mgr.desktop_active()).await;
+        assert!(r.mgr.remote_session_notice().is_none());
+        assert_eq!(files_pushes(&r.host), vec![true, false]);
+        r.mgr
+            .handle(Uuid::new_v4(), file_req(2, list("C:\\data"), Some(fm)));
+        assert_eq!(
+            reply_code(&until(&mut r.rx, is_reply(2)).await),
+            Some(RemoteErrorCode::Unavailable)
+        );
     }
 }

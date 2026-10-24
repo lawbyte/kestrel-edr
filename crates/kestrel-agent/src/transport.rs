@@ -165,7 +165,28 @@ fn capabilities(core: &Core) -> Vec<String> {
     if core.platform.supports_remote_uninstall() {
         caps.push(kestrel_common::CAP_REMOTE_UNINSTALL.to_string());
     }
+    if core.platform.evidence().is_some() {
+        caps.push(kestrel_common::evidence::CAP_EVIDENCE.to_string());
+    }
     caps
+}
+
+/// Route one `ServerPayload::Live` message without blocking. Evidence
+/// uploads (`EvidenceRead`) go to the evidence manager: they are not
+/// remote access and are not subject to the remote-access profile. Every
+/// other live message goes to the live manager.
+pub fn route_live(core: &Arc<Core>, session_id: Uuid, msg: kestrel_common::remote::LiveServerMsg) {
+    match msg {
+        kestrel_common::remote::LiveServerMsg::EvidenceRead {
+            request_id,
+            bundle_id,
+            offset,
+            len,
+        } => core
+            .evidence
+            .handle_read(core, session_id, request_id, bundle_id, offset, len),
+        other => core.live.handle(session_id, other),
+    }
 }
 
 /// Detaches the live manager from a stream when the session ends.
@@ -176,7 +197,10 @@ struct LiveAttachment {
 
 impl Drop for LiveAttachment {
     fn drop(&mut self) {
-        self.core.live.detach(self.gen);
+        if self.core.live.detach(self.gen) {
+            // Evidence uploads ride the same stream.
+            self.core.evidence.end_reads(None);
+        }
     }
 }
 
@@ -212,7 +236,13 @@ async fn session(core: &Arc<Core>, backoff: &mut Backoff, st: &mut SessionState)
     let cfg = ensure_enrolled(core).await?;
     let device_id = cfg.device_id.ok_or_else(|| anyhow!("no device id"))?;
     let channel = crate::pki::mtls_channel(&core.state_dir, &cfg).await?;
+    // Responses may be zstd-compressed by servers from 1.1.7 (negotiated
+    // with `grpc-accept-encoding`). Requests stay uncompressed at the
+    // transport level: an older server would refuse them, and every outbox
+    // payload is already zstd-compressed inside the envelope
+    // (`crate::codec`), so a second pass would only cost CPU.
     let mut client = AgentServiceClient::new(channel)
+        .accept_compressed(tonic::codec::CompressionEncoding::Zstd)
         .max_decoding_message_size(64 * 1024 * 1024)
         .max_encoding_message_size(64 * 1024 * 1024);
 
@@ -280,7 +310,7 @@ async fn session(core: &Arc<Core>, backoff: &mut Backoff, st: &mut SessionState)
             // Live traffic: routed without blocking, never acked.
             let payload = match payload {
                 ServerPayload::Live { session_id, msg } => {
-                    core.live.handle(session_id, msg);
+                    route_live(core, session_id, msg);
                     continue;
                 }
                 other => other,
@@ -507,7 +537,7 @@ async fn handle_server(
         }
         // Normally intercepted by the read loop; never acked.
         ServerPayload::Live { session_id, msg } => {
-            core.live.handle(session_id, msg);
+            route_live(core, session_id, msg);
             return Flow::NoAck;
         }
     }

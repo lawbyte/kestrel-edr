@@ -12,6 +12,7 @@ pub mod config;
 pub mod crypto;
 pub mod db;
 pub mod error;
+pub mod evidence;
 pub mod grpc;
 pub mod incidents;
 pub mod ingest;
@@ -91,6 +92,10 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<AppState> {
             Arc::new(PgEventStore::new(db.clone()))
         }
     };
+    // Evidence store: restrictive permissions, leftovers of a previous run
+    // (unfinished uploads, unused download archives) removed. A missing or
+    // unwritable directory only disables collection (logged), never startup.
+    evidence::init(&cfg);
     let (live, _) = broadcast::channel(4096);
     let outbound = netguard::Policy::new(&cfg.outbound_allow);
     let notifier = Notifier::start(
@@ -115,6 +120,7 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<AppState> {
         setup_code,
         outbound,
         remote: remote::Hub::default(),
+        evidence: evidence::Hub::default(),
     })))
 }
 
@@ -261,7 +267,17 @@ pub async fn serve(
         state: state.clone(),
     })
     .max_decoding_message_size(grpc::MAX_PAYLOAD + 1024 * 1024)
-    .max_encoding_message_size(grpc::MAX_PAYLOAD);
+    .max_encoding_message_size(grpc::MAX_PAYLOAD)
+    // Transport compression (2026-10-25): responses are zstd-compressed
+    // only when the agent advertises it (`grpc-accept-encoding`, agents
+    // 1.1.7+); older agents keep plain frames. Compressed *requests* are
+    // refused (tonic answers Unimplemented): tonic 0.12 inflates them with
+    // no bound on the decompressed size, before any handler runs, and
+    // `Enroll` needs no client certificate, so accepting them would let
+    // anyone exhaust the server's memory with a small frame (review
+    // 2026-10-25 H1). Agent payloads are zstd-compressed inside the
+    // envelope instead (`compressed`, bounded by `MAX_PAYLOAD`).
+    .send_compressed(tonic::codec::CompressionEncoding::Zstd);
     // Signed update packages placed in `<AGENT_DIR>/updates/` are also served
     // on the agent port (`GET /downloads/updates/<file>`, HTTP/2): agents pin
     // the agent CA, which only this listener presents. Read-only, no

@@ -233,7 +233,9 @@ struct QueueUsage {
 pub fn approx_size(m: &LiveAgentMsg) -> usize {
     match m {
         LiveAgentMsg::DesktopFrame(f) => f.jpeg_b64.len() + 64,
-        LiveAgentMsg::FileReply { reply, .. } => reply_size(reply),
+        LiveAgentMsg::FileReply { reply, .. } | LiveAgentMsg::EvidenceData { reply, .. } => {
+            reply_size(reply)
+        }
         _ => 256,
     }
 }

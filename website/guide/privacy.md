@@ -11,12 +11,26 @@ All telemetry, alerts and audit records stay on your own server (PostgreSQL and 
 Detection runs on the device on full-fidelity events. What it watches:
 
 * Process starts and stops, image loads, command lines, signer and hash of programs.
-* Opens of sensitive files (browser credential stores, wallets, messenger and cloud credential files, decoys), not their contents.
+* Opens of sensitive files (browser credential stores, wallets, messenger and cloud credential files, decoys), not their contents (except the evidence capture below, which keeps copies on the PC after a data-theft alert).
 * Network connections and DNS queries.
 * Registry writes to autorun and security-relevant keys, scheduled tasks, services, WMI subscriptions.
 * PowerShell script blocks and AMSI content.
 
 It never captures keystrokes, screenshots or browsing history. Admin remote access is the one deliberate exception to "no screen capture": it is interactive, admin-initiated, limited by the device's install profile, visible to the employee and audited, and frames and file contents are never stored. See [Remote access](./remote-access).
+
+## Evidence capture for suspected data theft
+
+Evidence capture is the second deliberate exception, besides remote access, to "content never leaves the device". After an **ST-02** or **ST-04** alert the agent keeps, encrypted on the PC, copies of the files the suspicious process tree staged, copies of the credential stores it read and a 60-second capture of its network connections. Nothing is captured in the background: every bundle is tied to one alert and one process tree.
+
+* **What reaches the server automatically:** only the list of contents (paths, sizes, times), filtered by the device's privacy settings like other uploads.
+* **When content is uploaded:** only when an administrator clicks **Collect evidence** on the incident. The employee is then told in the tray: "IT collected evidence from this PC for a security investigation".
+* **Who can see it:** every role with `read` sees the list of contents; only administrators (`evidence.download`, interactive session, not API tokens) can collect, download or delete. Downloads are AES-256 encrypted zips with a one-time password that is never stored.
+* **Accountability:** every collection, download, deletion and automatic expiry is in the hash-chained audit log.
+* **Retention:** on the PC, the policy's "Keep uncollected bundles on the PC" (default 14 days); on the server, **Evidence bundles** in Settings (default 14 days from upload). Both delete the content and keep the metadata and audit trail.
+* **Never in telemetry:** bundle contents never go into telemetry, ClickHouse or Hunt.
+* **Turning it off:** each part (staged files, list of secrets, copies of secrets, connection capture) can be turned off per policy; see [Policies](../console/policies#evidence-capture).
+
+The copies can contain the employee's real passwords, cookies and personal files. Mention evidence capture in the employee notice and in your DPIA. Details: [Evidence capture](../console/evidence).
 
 ## Upload controls (per policy)
 
@@ -33,7 +47,7 @@ The filters apply to what **leaves** the device. Alerts and their evidence are a
 
 ## Retention
 
-Set under **Settings > Branding, privacy & retention > Data retention**. Defaults: events 30 days (7 days on the PostgreSQL fallback), alerts 365 days, audit log 730 days.
+Set under **Settings > Branding, privacy & retention > Data retention**. Defaults: events 30 days (7 days on the PostgreSQL fallback), alerts 365 days, audit log 730 days. Collected evidence bundles: 14 days by default (1 to 365).
 
 ## Notice and transparency
 

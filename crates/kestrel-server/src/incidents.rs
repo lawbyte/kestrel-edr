@@ -136,6 +136,12 @@ pub fn describe_action(a: &ResponseAction) -> String {
         },
         ResponseAction::CollectTriage => "collected a triage package".into(),
         ResponseAction::ResumeProtection => "turned protection back on".into(),
+        ResponseAction::CollectEvidence { bundle_id } => {
+            format!("collected evidence bundle {bundle_id}")
+        }
+        ResponseAction::DeleteEvidence { bundle_id } => {
+            format!("deleted evidence bundle {bundle_id} on the PC")
+        }
         ResponseAction::RemoveAutorun {
             location,
             value_name,

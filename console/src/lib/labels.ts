@@ -140,6 +140,13 @@ export const PAUSE_MODE_HINT: Record<PauseMode, string> = {
 
 /** Labels for audit log actions (unlisted actions are shown as their raw id). */
 export const AUDIT_ACTION_LABEL: Record<string, string> = {
+  'evidence.collect_requested': 'Evidence collection requested',
+  'evidence.collected': 'Evidence collected from the PC and stored (encrypted)',
+  'evidence.collect_failed': 'Evidence collection failed',
+  'evidence.downloaded': 'Evidence downloaded',
+  'evidence.download_started': 'Evidence download started',
+  'evidence.deleted': 'Evidence deleted',
+  'evidence.expired': 'Evidence deleted after the retention period',
   'device.protection_off': 'Protection turned off on the device',
   'device.protection_on': 'Protection turned back on',
   'device.protection_off_denied': 'Wrong uninstall token for turning protection off',
@@ -311,6 +318,8 @@ export const ACTION_LABEL: Record<ResponseAction['type'], string> = {
   remove_autorun: 'Remove persistence entry',
   resume_protection: 'Turn protection back on',
   uninstall_agent: 'Remove device (uninstall agent)',
+  collect_evidence: 'Collect evidence',
+  delete_evidence: 'Delete evidence on the PC',
 }
 
 export const AUTORUN_KIND_LABEL: Record<import('@/api/types').AutorunKind, string> = {
@@ -413,6 +422,10 @@ export function describeAction(a: ResponseAction): string {
       return 'Collect triage package'
     case 'uninstall_agent':
       return a.purge_data ? 'Uninstall the agent and delete its quarantine and logs' : 'Uninstall the agent'
+    case 'collect_evidence':
+      return `Upload evidence bundle ${a.bundle_id.slice(0, 8)}`
+    case 'delete_evidence':
+      return `Delete evidence bundle ${a.bundle_id.slice(0, 8)} on the PC`
     case 'remove_autorun': {
       const loc = safeDisplay(a.location)
       const what = a.kind === 'registry_value' && a.value_name ? `${loc}\\${safeDisplay(a.value_name)}` : loc

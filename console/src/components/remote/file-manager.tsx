@@ -23,7 +23,7 @@ import {
   Hourglass,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react'
-import { downloadFile, MFA_NOT_ENABLED_TEXT, mfaNotEnabled, remoteApi, remoteErrorText, remoteKeys, uploadFile, type FmContext, type UploadHandle } from '@/api/remote'
+import { downloadFile, endFileSession, MFA_NOT_ENABLED_TEXT, mfaNotEnabled, remoteApi, remoteErrorText, remoteKeys, uploadFile, type FmContext, type UploadHandle } from '@/api/remote'
 import { MfaSetupLink } from '@/components/mfa-link'
 import type { FileEntry, RemoteAccessProfile, RemoteAvailability } from '@/api/types'
 import { Button } from '@/components/ui/button'
@@ -94,6 +94,24 @@ export function FileManager({ deviceId, hostname, availability, policyId, effect
     retry: false,
     staleTime: 15_000,
   })
+
+  // End the file-manager session on the device when the tab closes, so the
+  // employee's on-screen banner goes away now (the agent would otherwise
+  // end it after 5 minutes without operations).
+  const opened = useRef(false)
+  if (ready) opened.current = true
+  const ctxRef = useRef(ctx)
+  ctxRef.current = ctx
+  useEffect(() => {
+    const onHide = () => {
+      if (opened.current) endFileSession(deviceId, ctxRef.current, true)
+    }
+    window.addEventListener('pagehide', onHide)
+    return () => {
+      window.removeEventListener('pagehide', onHide)
+      if (opened.current) endFileSession(deviceId, ctxRef.current)
+    }
+  }, [deviceId])
 
   // Abort running uploads when the tab unmounts.
   const uploadsRef = useRef(uploads)

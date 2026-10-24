@@ -21,7 +21,7 @@ async function start() {
   }
   const connect = () => {
     const es = new EventSource(`${API_BASE}/events/stream`, { withCredentials: true })
-    const kinds: LiveEventType[] = ['incident', 'alert', 'device', 'action', 'group', 'update_release']
+    const kinds: LiveEventType[] = ['incident', 'alert', 'device', 'action', 'group', 'update_release', 'evidence']
     for (const k of kinds) {
       es.addEventListener(k, (m) => {
         try {
@@ -76,6 +76,9 @@ export function useLiveInvalidation() {
             break
           case 'update_release':
             void qc.invalidateQueries({ queryKey: ['updates'] })
+            break
+          case 'evidence':
+            void qc.invalidateQueries({ queryKey: ['evidence'] })
             break
           case 'action':
             void qc.invalidateQueries({ queryKey: ['actions'] })

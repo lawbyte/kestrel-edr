@@ -37,6 +37,7 @@ Other privileges, held by `admin` through `*`:
 | `response.persistence` | Remove or restore persistence entries as SYSTEM on endpoints |
 | `remote.desktop`, `remote.files` | Remote desktop and remote file manager, from an interactive console session only |
 | `devices.remove` | [Remove device](./devices#remove-device): uninstall the agent remotely, from an interactive console session only (API tokens are refused) |
+| `evidence.download` | [Evidence capture](./evidence): collect evidence bundles from PCs, download them and delete them, from an interactive console session only (API tokens are refused). Admins with two-factor authentication confirm a fresh code (valid 10 minutes) to collect or download. Every role with `read` sees the bundle status and list of contents. |
 
 ## API tokens
 
@@ -96,6 +97,7 @@ Enable two-factor authentication for every administrator, especially where remot
 
 * **Organisation and branding:** organisation name and the default IT contact (name, email, phone).
 * **Data retention:** how long the server keeps each kind of data. Defaults: events 30 days (7 days on the PostgreSQL fallback), alerts 365 days, audit log 730 days. The ClickHouse TTL is changed live.
+* **Evidence bundles:** how long the server keeps a collected [evidence bundle](./evidence), counted from the upload (1 to 365 days, default 14). After that the content is deleted and the bundle shows as Expired; its list of contents and audit trail stay. Bundles nobody collected follow the policy's "Keep uncollected bundles on the PC".
 
 Per-policy branding and the employee notice are in the [policy editor](./policies#branding-and-employee-notice).
 

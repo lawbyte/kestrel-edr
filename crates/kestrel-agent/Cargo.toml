@@ -22,7 +22,7 @@ default = ["win-platform"]
 win-platform = ["dep:kestrel-win"]
 
 [dependencies]
-kestrel-common = { path = "../kestrel-common" }
+kestrel-common = { path = "../kestrel-common", features = ["seal"] }
 kestrel-detect = { path = "../kestrel-detect" }
 kestrel-platform = { path = "../kestrel-platform" }
 
@@ -38,7 +38,7 @@ tokio-util = { version = "0.7", features = ["codec", "rt"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 async-trait = "0.1"
 
-tonic = { version = "0.12", features = ["tls"] }
+tonic = { version = "0.12", features = ["tls", "zstd"] }
 prost = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }

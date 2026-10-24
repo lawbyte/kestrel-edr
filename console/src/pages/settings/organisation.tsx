@@ -1,5 +1,6 @@
 import { Field, Input } from '@/components/ui/input'
 import { useAuth } from '@/lib/auth'
+import { evidenceRetentionOf } from '@/lib/evidence'
 import { NoticeEditor } from '../policy-editor'
 import { SaveBar, SettingsLoading, SettingsSection, useSettingsDraft } from '../settings'
 
@@ -32,11 +33,11 @@ export default function OrganisationTab() {
         </div>
       </SettingsSection>
       <SettingsSection title="Data retention" description="How long the server keeps each kind of data. Shorter retention means less personal data held, and less history to investigate with." footer={footer}>
-        <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {(
             [
               ['events', 'Raw events', 'Hunt and device timelines'],
-              ['alerts', 'Alerts and incidents', 'Including evidence'],
+              ['alerts', 'Alerts and incidents', 'Including their evidence events'],
               ['audit', 'Audit log', 'MAS TRM expects at least 1 year'],
             ] as const
           ).map(([k, label, hint]) => (
@@ -47,6 +48,12 @@ export default function OrganisationTab() {
               </div>
             </Field>
           ))}
+          <Field label="Evidence bundles" htmlFor="ret-evidence" hint="Collected evidence (can hold real passwords); 1–365 days from upload">
+            <div className="flex items-center gap-2">
+              <Input id="ret-evidence" type="number" min={1} max={365} value={evidenceRetentionOf(draft.retention_days)} onChange={(e) => setDraft({ ...draft, retention_days: { ...draft.retention_days, evidence: Number(e.target.value) } })} className="w-24 text-right tabular" disabled={ro} />
+              <span className="text-sm text-fg-muted">days</span>
+            </div>
+          </Field>
         </div>
       </SettingsSection>
     </div>

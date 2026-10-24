@@ -43,6 +43,10 @@ pub const DESKTOP_PING_EVERY_MS: i64 = 20_000;
 pub const DESKTOP_SERVER_SILENCE_MS: i64 = 90_000;
 /// An unfinished upload with no chunk for this long is aborted (temp file removed).
 pub const TRANSFER_IDLE_TIMEOUT_MS: i64 = 120_000;
+/// A file-manager session without operations for this long is over on the
+/// agent (its on-screen banner and tray notice end) unless the server ended
+/// it earlier with [`LiveServerMsg::FileSessionEnd`].
+pub const FILE_SESSION_IDLE_MS: i64 = 300_000;
 
 /// `Hello.capabilities` values.
 pub const CAP_LIVE_FILES: &str = "live.files";
@@ -79,6 +83,31 @@ pub enum LiveServerMsg {
         /// device). Absent from servers older than remote-access profiles.
         #[serde(default)]
         context: Option<FileContext>,
+    },
+    /// The admin closed the console's file manager: the file-manager session
+    /// `fm_session` of `admin_name` is over (its on-screen banner and tray
+    /// notice end, its consent grant is dropped). No reply. Older agents
+    /// ignore it (`Unknown`) and end the session after
+    /// [`FILE_SESSION_IDLE_MS`] without operations.
+    FileSessionEnd {
+        fm_session: uuid::Uuid,
+        #[serde(default)]
+        admin_name: String,
+    },
+    /// Read the next chunk of evidence bundle `bundle_id` (container
+    /// plaintext) for an upload the agent prepared with
+    /// `ResponseAction::CollectEvidence`. Within one live session (= one
+    /// upload) reads are sequential from offset 0 and `len` ≤
+    /// `evidence::READ_CHUNK_MAX`; answered by exactly one
+    /// `LiveAgentMsg::EvidenceData` (`FileReply::Data`, whose `eof` reply
+    /// carries the SHA-256 of the whole bundle, or `FileReply::Error`). Not
+    /// subject to the remote-access profile; only sent to agents announcing
+    /// `evidence::CAP_EVIDENCE`.
+    EvidenceRead {
+        request_id: u64,
+        bundle_id: uuid::Uuid,
+        offset: u64,
+        len: u32,
     },
     /// Message kind this agent does not know (newer server).
     #[serde(other)]
@@ -127,6 +156,11 @@ pub enum LiveAgentMsg {
         #[serde(default)]
         code: Option<RemoteErrorCode>,
     },
+    /// Answer to `EvidenceRead { request_id, .. }`: `FileReply::Data` or
+    /// `FileReply::Error` (`not_found` = no such bundle / not prepared for
+    /// upload, `invalid_operation` = out-of-order read, `integrity_error` =
+    /// the local bundle failed authentication).
+    EvidenceData { request_id: u64, reply: FileReply },
     /// Message kind this server does not know (newer agent).
     #[serde(other)]
     Unknown,
@@ -1309,6 +1343,25 @@ mod tests {
         let v = serde_json::to_value(&m).unwrap();
         assert_eq!(v["type"], "file_request");
         assert_eq!(v["op"]["op"], "delete");
+        let fm = uuid::Uuid::new_v4();
+        let end = LiveServerMsg::FileSessionEnd {
+            fm_session: fm,
+            admin_name: "Jane Doe".into(),
+        };
+        let v = serde_json::to_value(&end).unwrap();
+        assert_eq!(v["type"], "file_session_end");
+        assert_eq!(v["fm_session"], fm.to_string());
+        let back: LiveServerMsg = serde_json::from_str(&format!(
+            r#"{{"type":"file_session_end","fm_session":"{fm}"}}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            back,
+            LiveServerMsg::FileSessionEnd {
+                fm_session: fm,
+                admin_name: String::new()
+            }
+        );
         let r = LiveAgentMsg::FileReply {
             request_id: 7,
             reply: FileReply::error(RemoteErrorCode::ProtectedPath, "no"),

@@ -375,7 +375,12 @@ async fn ingest_hardening() {
             agent_spawned: false,
         }),
     };
-    let s3 = st.send(&AgentPayload::Events { events: vec![ev] }).await;
+    let s3 = st
+        .send(&AgentPayload::Events {
+            events: vec![ev],
+            repeats: vec![],
+        })
+        .await;
     st.wait_ack(s3).await;
     let (_, evs) = ts
         .get(&format!(

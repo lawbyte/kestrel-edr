@@ -50,8 +50,17 @@ pub async fn put_settings(
     if let Some(s) = take_secret(&mut body, &["notifications", "webhook", "secret"]) {
         sec.webhook_secret = s;
     }
+    // A console older than evidence capture sends `retention_days` without
+    // `evidence`: keep the stored value instead of resetting it to 14.
+    let evidence_given = body
+        .get("retention_days")
+        .and_then(|r| r.get("evidence"))
+        .is_some();
     let mut new: Settings = serde_json::from_value(body)
         .map_err(|e| ApiError::bad_request(format!("invalid settings: {e}")))?;
+    if !evidence_given {
+        new.retention_days.evidence = old.retention_days.evidence;
+    }
     new.org_name = new.org_name.trim().to_string();
     if new.org_name.is_empty() {
         return Err(ApiError::bad_request("org_name is required"));
@@ -64,6 +73,12 @@ pub async fn put_settings(
         return Err(ApiError::bad_request(
             "retention_days out of range (events/alerts 1-3650, audit 30-3650)",
         ));
+    }
+    if !(1..=kestrel_common::evidence::MAX_RETENTION_DAYS).contains(&r.evidence) {
+        return Err(ApiError::bad_request(format!(
+            "retention_days.evidence must be 1-{}",
+            kestrel_common::evidence::MAX_RETENTION_DAYS
+        )));
     }
     if !(5..=10_080).contains(&new.session_timeout_minutes) {
         return Err(ApiError::bad_request(
@@ -163,6 +178,13 @@ pub async fn put_settings(
     }
     if new.branding != old.branding || new.org_name != old.org_name {
         policy_svc::bump_and_push(&st, None).await?;
+    }
+    if new.retention_days.evidence != old.retention_days.evidence {
+        if let Err(e) =
+            crate::evidence::apply_retention_days(&st, new.retention_days.evidence).await
+        {
+            tracing::warn!(error = %e, "applying evidence retention failed");
+        }
     }
     if new.retention_days.events != old.retention_days.events {
         if let Err(e) = st.events.apply_retention(new.retention_days.events).await {

@@ -241,7 +241,12 @@ async fn full_agent_session() {
             },
         },
     ];
-    let s2 = st.send(&AgentPayload::Events { events: ev }).await;
+    let s2 = st
+        .send(&AgentPayload::Events {
+            events: ev,
+            repeats: vec![],
+        })
+        .await;
     st.wait_ack(s2).await;
     let (s, evs) = ts
         .get(&format!(
@@ -265,8 +270,14 @@ async fn full_agent_session() {
     );
 
     // Outbox replay of an already-stored seq is deduped but still acked.
-    st.send_seq(s2, &AgentPayload::Events { events: vec![] })
-        .await;
+    st.send_seq(
+        s2,
+        &AgentPayload::Events {
+            events: vec![],
+            repeats: vec![],
+        },
+    )
+    .await;
     st.wait_ack(s2).await;
 
     // Alert → incident with storyline + checklist.

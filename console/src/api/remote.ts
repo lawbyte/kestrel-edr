@@ -37,6 +37,8 @@ export const remoteApi = {
   rename: (id: string, from: string, to: string, c: FmContext, overwrite = false) => http.post<{ from: string; to: string }>(withCtx(`${dev(id)}/files/rename`, c), { from, to, overwrite }),
   remove: (id: string, path: string, recursive: boolean, c: FmContext) => http.post<{ path: string; removed: number }>(withCtx(`${dev(id)}/files/delete`, c), { path, recursive }),
   mkdir: (id: string, path: string, c: FmContext) => http.post<{ path: string }>(withCtx(`${dev(id)}/files/mkdir`, c), { path }),
+  /** The file manager closed: end this fm_session on the device (its on-screen banner and tray notice go away). 204, best effort. */
+  endSession: (id: string, c: FmContext) => http.post<void>(withCtx(`${dev(id)}/files/end`, c)),
   desktopStatus: (id: string) => http.get<RemoteDesktopStatus>(`${dev(id)}/remote-desktop/status`),
   downloadUrl: (id: string, path: string, c: FmContext) => `${API_BASE}${withCtx(`${dev(id)}/files/download`, c, { path })}`,
   reauth: (totp: string) => http.post<{ reauth_until: number }>('/me/reauth', { totp }),
@@ -60,6 +62,26 @@ export const invalidTotp = (e: unknown) => e instanceof ApiError && ((e.status =
 /** Shown for 403 `mfa_not_enabled`; the UI adds a link to the account page next to it. */
 export const MFA_NOT_ENABLED_TEXT = 'This device requires an MFA re-check, but your account has no authenticator app. Turn on two-factor authentication for your account first.'
 export const mfaNotEnabled = (e: unknown) => e instanceof ApiError && e.status === 403 && e.extra?.reason === 'mfa_not_enabled'
+
+/**
+ * Best-effort end of a file-manager session (tab closed / unmounted). While
+ * the page unloads a normal request may be cancelled, so `unloading` uses a
+ * `keepalive` fetch. Without it the agent still ends the session after 5
+ * minutes without operations.
+ */
+export function endFileSession(id: string, c: FmContext, unloading = false): void {
+  if (!unloading) {
+    remoteApi.endSession(id, c).catch(() => undefined)
+    return
+  }
+  const csrf = getCsrfToken()
+  fetch(`${API_BASE}${withCtx(`${dev(id)}/files/end`, c)}`, {
+    method: 'POST',
+    keepalive: true,
+    credentials: 'same-origin',
+    headers: csrf ? { 'X-CSRF-Token': csrf } : {},
+  }).catch(() => undefined)
+}
 
 export const remoteKeys = {
   files: (id: string, path: string) => ['device', id, 'files', path] as const,
@@ -158,8 +180,13 @@ export const REMOTE_ERROR_TEXT: Record<RemoteErrorCode, string> = {
 }
 
 /** Plain-words message for a failed remote-access call. */
+/** Agent refusal text when the file-manager banner cannot be shown (`kestrel-agent` live.rs). */
+const BANNER_REFUSED = /on-screen notice for the user at this PC could not be shown/i
+
 export function remoteErrorText(e: unknown): string {
   if (e instanceof ApiError) {
+    // Fail closed: the agent refuses file access while its mandatory on-screen banner cannot be shown.
+    if (BANNER_REFUSED.test(e.message)) return `File access was refused: the banner that tells the person at this PC about remote access could not be shown. Details: ${e.message}`
     if (e.remoteCode && REMOTE_ERROR_TEXT[e.remoteCode]) {
       const base = REMOTE_ERROR_TEXT[e.remoteCode]
       // The detail helps for these (which rule the path broke, which OS error).

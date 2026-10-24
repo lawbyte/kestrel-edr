@@ -145,6 +145,17 @@ describe('mock remote access', () => {
     expect(db.audit.some((a) => a.action === 'remote.consent')).toBe(true)
   }, 15_000)
 
+  it('ends a file-manager session (banner off on the device), audited', async () => {
+    const dev = await find((d) => d.device.group_id === 'grp-eng' && !!d.remote_access?.files.available)
+    const id = dev.device.id
+    const fm = crypto.randomUUID()
+    expect((await handleMock('POST', `/devices/${id}/files/end`, q(), undefined)).status).toBe(400)
+    expect((await handleMock('POST', `/devices/${id}/files/end`, q({ fm_session: 'nope' }), undefined)).status).toBe(400)
+    const r = await handleMock('POST', `/devices/${id}/files/end`, q({ fm_session: fm }), undefined)
+    expect(r.status).toBe(204)
+    expect(db.audit.some((a) => a.action === 'remote.files.end' && JSON.stringify(a.details).includes(fm))).toBe(true)
+  })
+
   it('creates enrollment tokens with a remote profile and a .cmd installer', async () => {
     const r = await handleMock('POST', '/enrollment-tokens', q(), {
       group_id: 'grp-it',

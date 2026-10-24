@@ -177,14 +177,14 @@ impl<'a> Scrub<'a> {
     }
 
     /// A path field: `[REDACTED]` when it starts with a redacted prefix.
-    fn path(&self, p: &mut String) {
+    pub fn path(&self, p: &mut String) {
         if self.is_redacted(p) {
             *p = REDACTED.into();
         }
     }
 
     /// Free text that may embed paths: every redacted-prefix path is replaced.
-    fn text(&self, t: &mut String) {
+    pub fn text(&self, t: &mut String) {
         for p in self.prefixes {
             let r = redact_prefixed_paths(t, p);
             if r != *t {

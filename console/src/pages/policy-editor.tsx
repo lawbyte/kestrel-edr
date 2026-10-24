@@ -19,6 +19,7 @@ import { cn } from '@/lib/utils'
 import { normaliseProfile, validateProfile } from '@/lib/remote-profile'
 import { RemoteProfileEditor } from '@/components/remote/profile-editor'
 import { LocalPauseEditor } from '@/components/local-pause-editor'
+import { EvidencePolicyEditor } from '@/components/evidence-policy-editor'
 
 const SECTIONS = [
   { id: 'rules', label: 'Detection rules' },
@@ -28,6 +29,7 @@ const SECTIONS = [
   { id: 'local-pause', label: 'Local turn-off' },
   { id: 'hardening', label: 'Windows hardening' },
   { id: 'privacy', label: 'Privacy' },
+  { id: 'evidence', label: 'Evidence capture' },
   { id: 'telemetry', label: 'Telemetry' },
   { id: 'canaries', label: 'Canaries & exfil domains' },
   { id: 'branding', label: 'Branding & notice' },
@@ -194,6 +196,10 @@ function Editor({ original, catalog }: { original: Policy; catalog: RuleRow[] })
               <Info className="mt-0.5 size-3.5 shrink-0" />
               Singapore’s PDPA lets employers monitor company devices without consent but requires that employees are told. Indonesia’s UU PDP requires a DPIA for systematic monitoring. Keep the employee notice below accurate when you change these.
             </p>
+          </Section>
+
+          <Section id="evidence" title="Evidence capture after data theft (ST-02 / ST-04)" description="What the PC keeps, encrypted, when a program reads many kinds of secrets (ST-02) or uploads right after reading them (ST-04). Turn every part off to switch capture off for this policy.">
+            <EvidencePolicyEditor value={p.evidence} onChange={(v) => set('evidence', v)} readOnly={readOnly} />
           </Section>
 
           <Section id="telemetry" title="Telemetry" description="Alerts are always uploaded. Raw events power Hunt and device timelines.">

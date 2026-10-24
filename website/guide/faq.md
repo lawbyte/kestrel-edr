@@ -25,7 +25,7 @@ The binaries are not code-signed yet, and Defender detects the unsigned agent he
 Not without the device's uninstall token, which only console users with `devices.write` can reveal (and each reveal is audited). An administrator can still defeat a user-mode agent in other ways; the tamper rules make that visible.
 
 **Can admins watch employees' screens without them knowing?**
-No. Every remote desktop session shows a banner on the employee's screen and a tray notification, in every profile. Devices installed with *No remote access* (the default) cannot be opened remotely at all.
+No. Every remote desktop and remote file-manager session shows a banner on the employee's screen and a tray notification, in every profile. Devices installed with *No remote access* (the default) cannot be opened remotely at all.
 
 **How many rules are in Protect by default?**
 The *safe on day one* set: ST-02, ST-04, ST-07, ST-16 and most ransomware, credential-dumping and persistence rules (see the [rule reference](../reference/rules)). Everything else, including the SigmaHQ pack, starts in Audit.

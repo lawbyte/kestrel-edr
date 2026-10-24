@@ -60,6 +60,8 @@ pub struct Inner {
     pub outbound: crate::netguard::Policy,
     /// Remote-access live sessions (remote desktop, file manager).
     pub remote: crate::remote::Hub,
+    /// Evidence uploads in progress and one-time download tickets.
+    pub evidence: crate::evidence::Hub,
 }
 
 #[derive(Clone)]

@@ -171,6 +171,85 @@ impl PrivacyFilter {
         a.summary = self.scrub_text(&a.summary, &full_cmds);
     }
 
+    /// Scrub an evidence manifest before it is reported to the server (the
+    /// copy inside the bundle on the PC stays complete). Same rules as
+    /// events and alerts: every path and image under a
+    /// `redact_path_prefixes` entry becomes `[redacted]` (a redacted file's
+    /// container entry name, which carries its file name, becomes
+    /// `<dir>/NNNN-redacted`), free text (copy details, pcap detail, notes)
+    /// gets secret redaction and path-prefix redaction. The manifest has no
+    /// user-name fields; with `hash_usernames` on, the profile folder of
+    /// every `X:\Users\<name>\…` path is replaced by the same salted
+    /// pseudonym as user names, so the uploaded manifest does not reveal
+    /// who the user is (`Public` is kept).
+    pub fn scrub_evidence_manifest(&self, m: &mut kestrel_common::evidence::EvidenceManifest) {
+        let redact_entry = |e: &mut Option<String>| {
+            if let Some(name) = e.as_mut() {
+                let keep = name
+                    .find('-')
+                    .map(|i| name[..=i].to_string())
+                    .unwrap_or_else(|| "staged/0000-".into());
+                *name = format!("{keep}redacted");
+            }
+        };
+        for p in &mut m.processes {
+            self.redact(&mut p.image);
+            self.pseudonymise_profile(&mut p.image);
+        }
+        for s in &mut m.staged {
+            if self.is_redacted(&s.path) {
+                s.path = REDACTED.into();
+                redact_entry(&mut s.copy.entry);
+            }
+            self.redact(&mut s.image);
+            self.pseudonymise_profile(&mut s.path);
+            self.pseudonymise_profile(&mut s.image);
+            s.copy.detail = self.scrub_text(&s.copy.detail, &[]);
+        }
+        for s in &mut m.secrets {
+            if self.is_redacted(&s.path) {
+                s.path = REDACTED.into();
+                if let Some(c) = s.copy.as_mut() {
+                    redact_entry(&mut c.entry);
+                }
+            }
+            self.redact(&mut s.image);
+            self.pseudonymise_profile(&mut s.path);
+            self.pseudonymise_profile(&mut s.image);
+            if let Some(c) = s.copy.as_mut() {
+                c.detail = self.scrub_text(&c.detail, &[]);
+            }
+        }
+        if let Some(p) = m.pcap.as_mut() {
+            p.detail = self.scrub_text(&p.detail, &[]);
+        }
+        for n in &mut m.notes {
+            *n = self.scrub_text(n, &[]);
+        }
+    }
+
+    /// With `hash_usernames` on: `C:\Users\alice\x` → `C:\Users\<pseudonym>\x`.
+    fn pseudonymise_profile(&self, path: &mut String) {
+        if !self.privacy.hash_usernames {
+            return;
+        }
+        let lower = path.replace('/', "\\").to_ascii_lowercase();
+        let Some(i) = lower.find(r"\users\") else {
+            return;
+        };
+        let start = i + r"\users\".len();
+        let end = lower[start..].find('\\').map_or(lower.len(), |j| start + j);
+        if end == start || !path.is_char_boundary(start) || !path.is_char_boundary(end) {
+            return;
+        }
+        let name = &path[start..end];
+        if name.eq_ignore_ascii_case("public") {
+            return;
+        }
+        let pseudo = self.user(name);
+        path.replace_range(start..end, &pseudo);
+    }
+
     /// Free text that may embed command lines, script content or paths
     /// (alert summaries).
     pub fn scrub_text(&self, text: &str, cmdlines: &[String]) -> String {

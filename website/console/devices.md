@@ -50,7 +50,7 @@ On devices with a remote-access profile, a summary card shows the install ceilin
 
 | Tab | Contents |
 |---|---|
-| Event timeline | Telemetry from the device in plain words (process starts, file access, network, DNS, registry, tasks, services, WMI), with the raw JSON one click away. Registry and persistence events show *writer inferred* or *writer unknown* when the writing process could not be pinned down exactly. Processes the agent itself started are labelled *started by Kestrel*. |
+| Event timeline | Telemetry from the device in plain words (process starts, file access, network, DNS, registry, tasks, services, WMI), Expand a row for a plain-language explanation and the key fields, with the raw event one click away (see [Reading evidence](./index#reading-evidence)). Registry and persistence events show *writer inferred* or *writer unknown* when the writing process could not be pinned down exactly. Processes the agent itself started are labelled *started by Kestrel*. |
 | Recent alerts | Alerts on this device. |
 | Process tree | Running and recent processes with signer, hash and path class. |
 | Effective settings | The policy as the device receives it, including exclusions, IOCs and branding. |

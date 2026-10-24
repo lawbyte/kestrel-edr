@@ -17,6 +17,17 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Repeat summary of one event in an `AgentPayload::Events` batch.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EventRepeat {
+    /// Index into the batch's `events`.
+    pub index: u32,
+    /// Identical events this row stands for (itself included), >= 1.
+    pub count: u32,
+    /// Time of the first of them (the row's own `ts` is the last).
+    pub first_ts: TimestampMs,
+}
+
 /// Agent → server.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -26,6 +37,13 @@ pub enum AgentPayload {
     Heartbeat(Heartbeat),
     Events {
         events: Vec<Event>,
+        /// Repeat summaries (agents from 1.1.7, `kestrel_agent::uploader`):
+        /// `events[index]` stands for `count` identical events (same
+        /// process, kind and target) seen from `first_ts` to its own `ts`,
+        /// after a first copy that was uploaded on its own. Older servers
+        /// ignore the field and store the summary as a plain event.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        repeats: Vec<EventRepeat>,
     },
     Alert(Box<Alert>),
     ActionResult {
@@ -69,6 +87,12 @@ pub enum AgentPayload {
     /// Older servers drop it as malformed (and ack it); the state is also in
     /// `AgentHealth.pause`.
     Pause(crate::pause::PauseReport),
+    /// Lifecycle of an evidence bundle (capturing, ready with its
+    /// privacy-filtered manifest, failed, deleted, expired). Metadata only:
+    /// the bundle itself is uploaded only when an administrator collects it.
+    /// Stored by the server outside telemetry. Older servers drop it as
+    /// malformed (and ack it).
+    Evidence(Box<crate::evidence::EvidenceReport>),
 }
 
 /// Server → agent.
@@ -216,6 +240,18 @@ pub struct AgentHealth {
     /// and caps (internal queue / agent channel full, aggregator caps).
     #[serde(default)]
     pub sensor_internal_dropped: Option<u64>,
+    /// Part of `sensor_internal_dropped` that may blind a detection
+    /// (high-value records lost to a full queue, persistence records,
+    /// processes the file-activity aggregator could not track); the rest
+    /// are low-value records shed under pressure. `None` from agents older
+    /// than 1.1.7. Cumulative since the agent started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensor_high_value_dropped: Option<u64>,
+    /// Events the sensors handed to the engine since the agent started
+    /// (the denominator of the loss ratio). `None` from agents older than
+    /// 1.1.7.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensor_events_total: Option<u64>,
     #[serde(default)]
     pub events_per_min: u64,
     #[serde(default)]

@@ -2,6 +2,7 @@ import type { DeviceEvent, FileActivity, KEvent, ServiceInstall, TaskChange } fr
 import type { HuntRecord } from './hunt'
 import { basename } from './utils'
 import { formatDuration, hex } from './format'
+import { dpapiKind, kb, NTSTATUS, protocolWords } from './event-knowledge'
 
 function plural(n: number, one: string, many = `${one}s`) {
   return `${n} ${n === 1 ? one : many}`
@@ -115,13 +116,6 @@ export function withAgentSpawned<T extends { guid: string; agent_spawned?: boole
   return nodes.map((n) => (spawned.has(n.guid) && !n.agent_spawned ? { ...n, agent_spawned: true } : n))
 }
 
-/** NTSTATUS values worth naming in the UI. */
-const NTSTATUS: Record<number, string> = {
-  0xc0000022: 'access denied',
-  0xc0000005: 'access violation',
-  0xc000000d: 'invalid parameter',
-}
-
 /** One-line, human-readable description of an event. */
 export function describeEvent(e: KEvent): string {
   switch (e.type) {
@@ -139,12 +133,19 @@ export function describeEvent(e: KEvent): string {
       if (e.op === 'delete_key') return `Deleted key ${e.key}`
       return `${at}${e.data ? ` = ${e.data}` : ''}`
     }
-    case 'net_connect':
-      return `${e.proto.toUpperCase()} → ${e.dst_host ? `${e.dst_host} (${e.dst_ip})` : e.dst_ip}:${e.dst_port}${e.bytes_sent ? `, ${e.bytes_sent} bytes sent` : ''}`
-    case 'dns_query':
-      return `Resolved ${e.qname}${e.answers?.length ? ` → ${e.answers.join(', ')}` : ''}`
-    case 'dpapi_unprotect':
-      return `Decrypted DPAPI blob "${e.description}"`
+    case 'net_connect': {
+      const pw = protocolWords(e.proto, e.dst_port)
+      const proto = pw.short === e.proto.toUpperCase() ? pw.short : `${pw.short} (${e.proto.toUpperCase()})`
+      return `${proto} → ${e.dst_host ? `${e.dst_host} (${e.dst_ip})` : e.dst_ip}:${e.dst_port}${e.bytes_sent ? `, ${kb(e.bytes_sent)} sent` : ''}`
+    }
+    case 'dns_query': {
+      const a = e.answers ?? []
+      return `Resolved ${e.qname}${a.length ? ` → ${a.slice(0, 3).join(', ')}${a.length > 3 ? ` +${a.length - 3} more` : ''}` : ''}`
+    }
+    case 'dpapi_unprotect': {
+      const k = dpapiKind(e.description)
+      return k ? `Decrypted the "${e.description}" key (${k.short})` : `Decrypted a DPAPI secret labelled "${e.description}"`
+    }
     case 'process_access': {
       const base = `Opened ${basename(e.target_image)} (PID ${e.target_pid}) with access ${hex(e.granted_access)}`
       if (!e.return_code) return base
