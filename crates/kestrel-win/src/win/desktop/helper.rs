@@ -7,6 +7,10 @@
 //! process alive, console session unchanged) and routes agent commands.
 //! The helper exits when the agent says `Stop`, the pipe closes, the agent
 //! process dies, or the console session changes.
+//!
+//! Banner-only mode (`HelperSettings.banner_only`, remote file manager
+//! without a desktop session): only the banner thread runs; no capture and
+//! no input thread are started and `Input` / `FrameAck` are ignored.
 
 use super::super::util::*;
 use super::banner::Banner;
@@ -14,7 +18,7 @@ use super::capture::{self, CapCmd};
 use super::input::{self, InputCmd};
 use super::spawn::active_console_session;
 use crate::desktop_proto::{
-    banner_text, is_valid_pipe_name, read_raw, write_raw, AgentMsg, Decoder, HelperMsg,
+    helper_banner_text, is_valid_pipe_name, read_raw, write_raw, AgentMsg, Decoder, HelperMsg,
     HelperSettings, ProtoError,
 };
 use anyhow::{anyhow, bail, Context};
@@ -198,11 +202,9 @@ pub fn run_desktop_helper(pipe: &str, parent_pid: u32) -> anyhow::Result<()> {
             Err(_) => bail!("no settings from the agent"),
         }
     };
-    let banner = match Banner::start(&banner_text(
-        &settings.admin_name,
-        settings.view_only,
-        &settings.reason,
-    )) {
+    let banner_only = settings.banner_only;
+    let mut shown_text = helper_banner_text(&settings);
+    let banner = match Banner::start(&shown_text) {
         Ok(b) => b,
         Err(e) => {
             let msg = format!("cannot show the remote-session banner: {e}");
@@ -213,32 +215,42 @@ pub fn run_desktop_helper(pipe: &str, parent_pid: u32) -> anyhow::Result<()> {
         }
     };
 
+    // The agent waits for this before it lets a file operation run.
+    let _ = out_tx.blocking_send(HelperMsg::BannerShown);
+
     let (cap_tx, cap_rx) = smpsc::channel::<CapCmd>();
     let (in_tx, in_rx) = smpsc::channel::<InputCmd>();
-    let cap_out = out_tx.clone();
-    let cap_settings = settings.clone();
-    let cap = std::thread::Builder::new()
-        .name("kestrel-desktop-capture".into())
-        .spawn(move || capture::run(cap_rx, cap_out, cap_settings, session))
-        .context("cannot start the capture thread")?;
-    let inp = std::thread::Builder::new()
-        .name("kestrel-desktop-input".into())
-        .spawn(move || input::run(in_rx))
-        .context("cannot start the input thread")?;
+    let (cap, inp) = if banner_only {
+        (None, None)
+    } else {
+        let cap_out = out_tx.clone();
+        let cap_settings = settings.clone();
+        let cap = std::thread::Builder::new()
+            .name("kestrel-desktop-capture".into())
+            .spawn(move || capture::run(cap_rx, cap_out, cap_settings, session))
+            .context("cannot start the capture thread")?;
+        let inp = std::thread::Builder::new()
+            .name("kestrel-desktop-input".into())
+            .spawn(move || input::run(in_rx))
+            .context("cannot start the input thread")?;
+        (Some(cap), Some(inp))
+    };
 
     let mut session_mismatch = 0u32;
     let mut error: Option<String> = None;
     loop {
         match ctl_rx.recv_timeout(Duration::from_millis(500)) {
             Ok(Ctl::Agent(AgentMsg::Settings(s))) => {
-                let old_mode = settings.view_only;
                 settings = s;
-                if settings.view_only != old_mode {
-                    banner.set_text(&banner_text(
-                        &settings.admin_name,
-                        settings.view_only,
-                        &settings.reason,
-                    ));
+                // The mode is fixed at start.
+                settings.banner_only = banner_only;
+                let text = helper_banner_text(&settings);
+                if text != shown_text {
+                    banner.set_text(&text);
+                    shown_text = text;
+                }
+                if banner_only {
+                    continue;
                 }
                 if settings.view_only {
                     let _ = in_tx.send(InputCmd::Event(
@@ -249,7 +261,7 @@ pub fn run_desktop_helper(pipe: &str, parent_pid: u32) -> anyhow::Result<()> {
             }
             Ok(Ctl::Agent(AgentMsg::Input(ev))) => {
                 // Defence in depth: the agent already drops view-only input.
-                if !settings.view_only {
+                if !settings.view_only && !banner_only {
                     let _ = in_tx.send(InputCmd::Event(ev));
                 }
             }
@@ -282,7 +294,7 @@ pub fn run_desktop_helper(pipe: &str, parent_pid: u32) -> anyhow::Result<()> {
         } else {
             session_mismatch = 0;
         }
-        if cap.is_finished() {
+        if cap.as_ref().is_some_and(|c| c.is_finished()) {
             error = Some("capture stopped".into());
             break;
         }
@@ -292,7 +304,8 @@ pub fn run_desktop_helper(pipe: &str, parent_pid: u32) -> anyhow::Result<()> {
     let _ = in_tx.send(InputCmd::Stop);
     let _ = cap_tx.send(CapCmd::Stop);
     let deadline = Instant::now() + Duration::from_secs(2);
-    while !(inp.is_finished() && cap.is_finished()) && Instant::now() < deadline {
+    let done = |t: &Option<std::thread::JoinHandle<()>>| t.as_ref().is_none_or(|t| t.is_finished());
+    while !(done(&inp) && done(&cap)) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
     banner.close();

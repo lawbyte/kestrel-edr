@@ -334,15 +334,16 @@ impl Watcher {
         } else {
             format!(r"{base}\{}", c.rel)
         };
-        self.sink.send(Raw::RegChange {
-            ts: kestrel_common::now_ms(),
-            key,
-            value_name: c.value_name,
-            op: c.op,
-            ty: c.ty,
-            data: c.data,
-            reopened,
-        });
+        self.sink
+            .send(Raw::RegChange(Box::new(super::etw::RegChangeRaw {
+                ts: kestrel_common::now_ms(),
+                key,
+                value_name: c.value_name,
+                op: c.op,
+                ty: c.ty,
+                data: c.data,
+                reopened,
+            })));
     }
 
     fn add_hives(&mut self) {

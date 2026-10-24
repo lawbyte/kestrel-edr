@@ -96,6 +96,34 @@ pub fn should_emit_image_load(path: &str) -> bool {
     }
 }
 
+/// Source-side form of [`should_emit_image_load`] for the ETW callback, which
+/// sees NT paths (`\Device\HarddiskVolume3\Windows\System32\ntdll.dll`).
+/// Owner-PC triage 2026-10-25: every process start queued 30 to 100 image
+/// loads that the translator then discarded, so a process storm (a build)
+/// filled the raw queue with records that could never become events. Only
+/// loads on the system volume (`system_device`, lower-case NT device, as in
+/// [`crate::fileagg::FileScope`]) or under `\SystemRoot\` are decided here,
+/// with exactly the translator's rule; anything else (other volumes,
+/// unknown forms, unknown system device) is forwarded and decided there.
+pub fn image_load_candidate(nt_path: &str, system_device: &str, system_drive: char) -> bool {
+    let dev = system_device.trim_end_matches('\\').to_ascii_lowercase();
+    let lower = nt_path.replace('/', "\\").to_ascii_lowercase();
+    let rest = if let Some(r) = lower.strip_prefix(r"\systemroot\") {
+        format!(r"\windows\{r}")
+    } else if !dev.is_empty() && lower.starts_with(&dev) && lower[dev.len()..].starts_with('\\') {
+        lower[dev.len()..].to_string()
+    } else {
+        return true;
+    };
+    let dos = format!("{}:{rest}", system_drive.to_ascii_lowercase());
+    match PathClass::of_with_system_drive(&dos, system_drive) {
+        PathClass::System | PathClass::Windows | PathClass::ProgramFiles => {
+            INTERESTING_DLLS.contains(&file_name_lower(&dos).as_str())
+        }
+        _ => true,
+    }
+}
+
 /// Exact location of a critical OS process (or kernel pseudo-process) on the
 /// system volume — the shared list in [`kestrel_detect::protect`] (L11).
 /// Location only: used to drop high-volume noise in the sensor translator.
@@ -187,8 +215,13 @@ pub fn may_be_sensitive(path: &str) -> bool {
         r
     });
     if ok {
-        return std::panic::catch_unwind(|| kestrel_detect::paths::may_be_sensitive(path))
-            .unwrap_or(false);
+        // 8.3 short names hiding a store component are expanded by the
+        // engine; let them through here too.
+        return std::panic::catch_unwind(|| {
+            kestrel_detect::paths::may_be_sensitive(path)
+                || kestrel_detect::paths::may_be_sensitive_short(path)
+        })
+        .unwrap_or(false);
     }
     let p = path.to_ascii_lowercase();
     const FALLBACK: &[&str] = &[
@@ -248,11 +281,17 @@ fn win32_relative(p: &str) -> &str {
 /// substring matches that do not depend on the drive, and canaries
 /// (`canary_keys`: lower-cased Win32 paths, as in the translator) are
 /// compared volume-relative, i.e. ignoring which volume — never narrower.
+/// Files named `Local State` pass wherever they are (FP-04: the translator
+/// narrows them to user profiles and the opener's `--user-data-dir`, which
+/// the callback does not know; [`crate::fileattr`]).
 pub fn kernel_file_candidate<'a>(
     nt_path: &str,
     canary_keys: impl IntoIterator<Item = &'a String>,
 ) -> bool {
-    if may_be_sensitive(nt_path) || is_extra_sensitive(nt_path) {
+    if may_be_sensitive(nt_path)
+        || is_extra_sensitive(nt_path)
+        || crate::fileattr::is_local_state(nt_path)
+    {
         return true;
     }
     let lower = nt_path.replace('/', "\\").to_ascii_lowercase();
@@ -313,6 +352,87 @@ pub fn msix_code_integrity_catalog(path: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// The callback filter must decide exactly like the translator's
+    /// `should_emit_image_load` on the mapped path, and forward whatever it
+    /// cannot map (never narrower than the translator).
+    #[test]
+    fn image_load_source_filter_matches_the_translator() {
+        let dev = r"\device\harddiskvolume3";
+        let cases = [
+            // System32 / Windows / Program Files noise: dropped at the source.
+            (r"\Device\HarddiskVolume3\Windows\System32\ntdll.dll", false),
+            (
+                r"\Device\HarddiskVolume3\Windows\SysWOW64\kernel32.dll",
+                false,
+            ),
+            (
+                r"\Device\HarddiskVolume3\Windows\WinSxS\x\comctl32.dll",
+                false,
+            ),
+            (
+                r"\Device\HarddiskVolume3\Program Files\Git\usr\bin\msys-2.0.dll",
+                false,
+            ),
+            (r"\SystemRoot\System32\advapi32.dll", false),
+            // Interesting DLLs anywhere.
+            (
+                r"\Device\HarddiskVolume3\Windows\System32\dbghelp.dll",
+                true,
+            ),
+            (
+                r"\Device\HarddiskVolume3\Program Files\Mozilla Firefox\nss3.dll",
+                true,
+            ),
+            (r"\SystemRoot\System32\vaultcli.dll", true),
+            // User-writable locations, including inside %SystemRoot%.
+            (
+                r"\Device\HarddiskVolume3\Users\a\AppData\Local\Temp\x.dll",
+                true,
+            ),
+            (r"\Device\HarddiskVolume3\Windows\Temp\x.dll", true),
+            (r"\Device\HarddiskVolume3\ProgramData\x\y.dll", true),
+            // Other volumes (a fake D:\Windows) and unknown forms: forwarded.
+            (r"\Device\HarddiskVolume5\Windows\System32\ntdll.dll", true),
+            (r"\Device\HarddiskVolume30\Windows\System32\ntdll.dll", true),
+            (r"\Device\Mup\srv\share\x.dll", true),
+            (r"C:\Windows\System32\ntdll.dll", true),
+        ];
+        for (nt, want) in cases {
+            assert_eq!(image_load_candidate(nt, dev, 'C'), want, "{nt}");
+        }
+        // Unknown system device: only \SystemRoot\ is decided.
+        assert!(image_load_candidate(
+            r"\Device\HarddiskVolume3\Windows\System32\ntdll.dll",
+            "",
+            'C'
+        ));
+        // Same decision as the translator on the Win32 form.
+        for (nt, win) in [
+            (
+                r"\Device\HarddiskVolume3\Windows\System32\ntdll.dll",
+                r"C:\Windows\System32\ntdll.dll",
+            ),
+            (
+                r"\Device\HarddiskVolume3\Users\a\Downloads\x.dll",
+                r"C:\Users\a\Downloads\x.dll",
+            ),
+            (
+                r"\Device\HarddiskVolume3\Program Files\Mozilla Firefox\nss3.dll",
+                r"C:\Program Files\Mozilla Firefox\nss3.dll",
+            ),
+        ] {
+            assert_eq!(
+                image_load_candidate(nt, dev, 'C'),
+                match PathClass::of_with_system_drive(win, 'C') {
+                    PathClass::System | PathClass::Windows | PathClass::ProgramFiles =>
+                        INTERESTING_DLLS.contains(&file_name_lower(win).as_str()),
+                    _ => true,
+                },
+                "{nt}"
+            );
+        }
+    }
+
     #[test]
     fn kernel_file_prefilter_is_superset_on_nt_paths() {
         let none: Vec<String> = Vec::new();
@@ -328,6 +448,12 @@ mod tests {
             r"\Device\HarddiskVolumeShadowCopy2\Windows\System32\config\SAM",
             r"\Device\HarddiskVolume3\Users\a\AppData\Local\Temp\lsass.dmp",
             r"\Device\HarddiskVolume3\Users\a\AppData\Roaming\Microsoft\Protect\S-1-5-21\key",
+            // Any `Local State` (own-profile reads of Electron apps, FP-04;
+            // a --user-data-dir may be anywhere).
+            r"\Device\HarddiskVolume3\Users\a\AppData\Roaming\Code\Local State",
+            r"\Device\HarddiskVolume5\Portable\Xeno\Data\Local State",
+            // 8.3 short names for a store component (expanded by the engine).
+            r"\Device\HarddiskVolume3\Users\a\AppData\Local\Google\Chrome\USERDA~1\Default\LOGIND~1",
         ] {
             assert!(kernel_file_candidate(p, &none), "{p}");
         }
@@ -337,6 +463,8 @@ mod tests {
             r"\Device\HarddiskVolume3\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44\include\vector",
             r"\Device\HarddiskVolume3\Windows\System32\kernel32.dll",
             r"\Device\HarddiskVolume3\Users\azka\.cargo\registry\src\x\lib.rs",
+            r"\Device\HarddiskVolume3\Users\a\AppData\Roaming\Code\Local Storage\leveldb\000003.log",
+            r"\Device\HarddiskVolume3\PROGRA~1\Foo\bar.exe",
         ] {
             assert!(!kernel_file_candidate(p, &none), "{p}");
         }

@@ -8,7 +8,8 @@
 //!
 //! Helper → agent: `Hello{pid}`, `Info(DesktopInfo JSON)`,
 //! `Frame{width, height, ts, jpeg}` (16-byte binary header + raw JPEG),
-//! `Error(text)`, `Log(text)`.
+//! `Error(text)`, `Log(text)`, `BannerShown` (the banner window is on
+//! screen; sent once, before anything is captured).
 //! Agent → helper: `Settings(JSON)`, `Input(InputEvent JSON)`,
 //! `FrameAck{accepted}` (one per `Frame`: the helper sends the next frame only
 //! after the ack, and compares change detection against the last *accepted*
@@ -34,6 +35,7 @@ pub mod kind {
     pub const FRAME: u8 = 0x03;
     pub const ERROR: u8 = 0x04;
     pub const LOG: u8 = 0x05;
+    pub const BANNER_SHOWN: u8 = 0x06;
     pub const SETTINGS: u8 = 0x81;
     pub const INPUT: u8 = 0x82;
     pub const FRAME_ACK: u8 = 0x83;
@@ -74,7 +76,19 @@ pub struct HelperSettings {
     pub admin_name: String,
     #[serde(default)]
     pub reason: String,
+    /// Banner only (remote file manager without a desktop session): the
+    /// helper shows the banner and nothing else (no capture, no input).
+    #[serde(default)]
+    pub banner_only: bool,
+    /// Remote file-manager notice composed by the agent ("IT (Jane Doe) is
+    /// accessing files on this PC since 14:02"); empty = none. Banner-only:
+    /// the whole text; desktop session: an extra part of the banner.
+    #[serde(default)]
+    pub files_notice: String,
 }
+
+/// Longest file-manager notice shown (chars).
+pub const FILES_NOTICE_MAX: usize = 300;
 
 impl HelperSettings {
     pub fn new(view_only: bool, admin_name: &str, reason: &str, s: &DesktopSettings) -> Self {
@@ -86,6 +100,17 @@ impl HelperSettings {
             view_only: c.view_only.unwrap_or(view_only),
             admin_name: admin_name.to_string(),
             reason: reason.to_string(),
+            banner_only: false,
+            files_notice: String::new(),
+        }
+    }
+
+    /// Settings of a banner-only helper showing `files_notice`.
+    pub fn banner_only(files_notice: &str) -> Self {
+        HelperSettings {
+            banner_only: true,
+            files_notice: files_notice.to_string(),
+            ..HelperSettings::new(true, "", "", &DesktopSettings::default())
         }
     }
 
@@ -109,6 +134,12 @@ impl HelperSettings {
             view_only: self.view_only,
             admin_name: self.admin_name.clone(),
             reason: self.reason.clone(),
+            banner_only: self.banner_only,
+            files_notice: self
+                .files_notice
+                .chars()
+                .take(FILES_NOTICE_MAX * 4)
+                .collect(),
         }
     }
 }
@@ -128,6 +159,8 @@ pub enum HelperMsg {
     },
     Error(String),
     Log(String),
+    /// The banner window is on screen.
+    BannerShown,
 }
 
 /// Agent → helper.
@@ -209,6 +242,7 @@ impl HelperMsg {
             }
             HelperMsg::Error(t) => encode_raw(kind::ERROR, clip_text(t).as_bytes()),
             HelperMsg::Log(t) => encode_raw(kind::LOG, clip_text(t).as_bytes()),
+            HelperMsg::BannerShown => encode_raw(kind::BANNER_SHOWN, &[]),
         }
     }
 
@@ -243,6 +277,7 @@ impl HelperMsg {
             }
             kind::ERROR => HelperMsg::Error(clip_text(&String::from_utf8_lossy(p))),
             kind::LOG => HelperMsg::Log(clip_text(&String::from_utf8_lossy(p))),
+            kind::BANNER_SHOWN => HelperMsg::BannerShown,
             other => return Err(ProtoError::UnknownKind(other)),
         })
     }
@@ -383,6 +418,25 @@ pub fn banner_text(admin_name: &str, view_only: bool, reason: &str) -> String {
     s
 }
 
+/// The banner text for `s`: the desktop text ([`banner_text`]) with the
+/// file-manager notice appended, or (banner-only) the notice alone.
+pub fn helper_banner_text(s: &HelperSettings) -> String {
+    let files = clean(&s.files_notice, FILES_NOTICE_MAX);
+    if s.banner_only {
+        return if files.is_empty() {
+            "IT is accessing files on this PC".to_string()
+        } else {
+            files
+        };
+    }
+    let mut t = banner_text(&s.admin_name, s.view_only, &s.reason);
+    if !files.is_empty() {
+        t.push_str("  |  ");
+        t.push_str(&files);
+    }
+    t
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,12 +479,16 @@ mod tests {
             },
             HelperMsg::Error("boom".into()),
             HelperMsg::Log("note".into()),
+            HelperMsg::BannerShown,
         ] {
             assert_eq!(roundtrip_helper(m.clone()), m);
         }
         let s = HelperSettings::new(true, "Jane", "ticket 7", &DesktopSettings::default());
+        let mut f = HelperSettings::banner_only("IT (Jane) is accessing files on this PC");
+        f.files_notice.push_str(" since 14:02");
         for m in [
             AgentMsg::Settings(s),
+            AgentMsg::Settings(f),
             AgentMsg::Input(InputEvent::MouseButton {
                 x: 0.5,
                 y: 0.25,
@@ -603,5 +661,44 @@ mod tests {
         let long = banner_text(&"a".repeat(500), true, &"r".repeat(500));
         assert!(long.chars().count() < 64 + 200 + 60, "{}", long.len());
         assert!(long.contains('…'));
+    }
+
+    #[test]
+    fn helper_banner_texts() {
+        // Banner-only: the agent's file notice, cleaned.
+        let b = HelperSettings::banner_only(
+            "IT (Jane Doe) is accessing
+files on this PC",
+        );
+        assert_eq!(
+            helper_banner_text(&b),
+            "IT (Jane Doe) is accessing files on this PC"
+        );
+        assert_eq!(
+            helper_banner_text(&HelperSettings::banner_only("  ")),
+            "IT is accessing files on this PC"
+        );
+        let long = HelperSettings::banner_only(&"x".repeat(5000));
+        assert!(helper_banner_text(&long).chars().count() <= FILES_NOTICE_MAX);
+        // Desktop: unchanged without a notice, the notice appended with one.
+        let mut d = HelperSettings::new(true, "Jane Doe", "", &DesktopSettings::default());
+        assert_eq!(helper_banner_text(&d), "IT (Jane Doe) is viewing this PC");
+        d.files_notice = "IT (Bob) is accessing files on this PC".into();
+        assert_eq!(
+            helper_banner_text(&d),
+            "IT (Jane Doe) is viewing this PC  |  IT (Bob) is accessing files on this PC"
+        );
+        // A settings change keeps the notice (only the agent changes it).
+        d.apply(&DesktopSettings {
+            view_only: Some(false),
+            ..DesktopSettings::default()
+        });
+        assert!(
+            helper_banner_text(&d).starts_with("IT (Jane Doe) is controlling this PC  |  IT (Bob)")
+        );
+        // Old agents' settings (no new fields) decode as a desktop session.
+        let old: HelperSettings =
+            serde_json::from_str(r#"{"quality":60,"scale_pct":100,"max_fps":5}"#).unwrap();
+        assert!(!old.banner_only && old.files_notice.is_empty());
     }
 }

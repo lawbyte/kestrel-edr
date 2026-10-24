@@ -29,6 +29,8 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+
+mod write_hints;
 use windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION;
 
 pub const CMDLINE_WAIT_MS: i64 = 1_000;
@@ -101,7 +103,13 @@ pub struct Translator {
     out: mpsc::Sender<Event>,
     flows: FlowTable,
     dns: HashMap<u32, HashMap<IpAddr, (String, i64)>>,
-    file_objects: HashMap<(u32, u64), (String, bool, i64)>,
+    /// (pid, FileObject) → name, for first-read events (only with
+    /// [`super::etw::FILE_READ_EVENTS`]; never reused across instances).
+    file_objects: crate::fileattr::FileObjects,
+    /// `Local State` opens outside the known stores, once per instance (FP-04).
+    local_state_seen: crate::fileattr::LocalStateSeen,
+    /// `--user-data-dir` per process instance (scope of those opens).
+    user_data_dirs: crate::fileattr::UserDataDirs,
     /// File-open de-duplication per process *instance* (GUID), so a reused
     /// pid neither inherits nor suppresses its predecessor's opens.
     file_seen: HashMap<(ProcessGuid, String, u8), i64>,
@@ -136,6 +144,8 @@ pub struct Translator {
     registry_side: VecDeque<Held>,
     /// Integrity level of live processes from their ProcessStart (V-H5).
     integrities: HashMap<u32, Integrity>,
+    /// Evidence write hints ([`write_hints`]).
+    write_hints: write_hints::WriteHints,
 }
 
 impl Translator {
@@ -145,7 +155,9 @@ impl Translator {
             out,
             flows: FlowTable::new(50_000, 10 * 60_000),
             dns: HashMap::new(),
-            file_objects: HashMap::new(),
+            file_objects: Default::default(),
+            local_state_seen: Default::default(),
+            user_data_dirs: Default::default(),
             file_seen: HashMap::new(),
             unattributed: PendingAttr::new(MAX_PENDING_ATTR),
             thread_opens: HashMap::new(),
@@ -164,6 +176,7 @@ impl Translator {
             agent_child_candidates: HashMap::new(),
             registry_side: VecDeque::new(),
             integrities: HashMap::new(),
+            write_hints: Default::default(),
         }
     }
 
@@ -177,6 +190,7 @@ impl Translator {
             Duration::from_millis(100),
             |r| {
                 let mut t = me.borrow_mut();
+                t.s.counters.raw_queued.received();
                 if let Err(e) =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| t.handle(r)))
                 {
@@ -190,6 +204,7 @@ impl Translator {
                 t.release(now);
                 t.flush_reg(now, false);
                 t.flush_persist(now, false);
+                t.expire_write_hints(now);
                 if t.last_gc.elapsed() > Duration::from_secs(10) {
                     t.gc();
                 }
@@ -203,10 +218,13 @@ impl Translator {
         self.release(i64::MAX);
         self.flush_reg(now_ms(), true);
         self.flush_persist(i64::MAX, true);
+        self.expire_write_hints(i64::MAX);
     }
 
     fn send(&mut self, mut ev: Event) {
         if let EventData::ProcessStart(p) = &mut ev.data {
+            // Final command line: scope of its own `Local State` (FP-04).
+            self.user_data_dirs.record(&ev.guid, &p.cmdline);
             if let Some((create_ft, creator, _)) = self.agent_child_candidates.remove(&ev.pid) {
                 p.agent_spawned = crate::spawnreg::is_agent_spawned(
                     ev.pid,
@@ -217,12 +235,17 @@ impl Translator {
                 );
             }
         }
+        // Every translated event is detection input (low-value records
+        // were shed before translation, `crate::pump`): a full agent
+        // channel is a high-value loss.
+        let c = &self.s.counters;
         match self.out.try_send(ev) {
             Ok(()) => {
-                self.s.counters.emitted.fetch_add(1, Ordering::Relaxed);
+                c.emitted.fetch_add(1, Ordering::Relaxed);
             }
             Err(_) => {
-                self.s.counters.out_dropped.fetch_add(1, Ordering::Relaxed);
+                c.out_dropped.fetch_add(1, Ordering::Relaxed);
+                c.high_value_dropped.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -453,8 +476,7 @@ impl Translator {
             m.retain(|_, (_, ts)| now - *ts < DNS_TTL_MS);
             !m.is_empty()
         });
-        self.file_objects
-            .retain(|_, (_, _, ts)| now - *ts < 10 * 60_000);
+        self.file_objects.gc(now);
         self.file_seen.retain(|_, ts| now - *ts < FILE_DEDUP_MS);
         self.thread_opens
             .retain(|_, (_, ts)| now - *ts < THREAD_OPEN_WINDOW_MS);
@@ -469,9 +491,6 @@ impl Translator {
             .is_some_and(|(t, _, _)| now - *t > 10_000)
         {
             self.reg_full_recent.pop_front();
-        }
-        if self.file_objects.len() > 100_000 {
-            self.file_objects.clear();
         }
     }
 
@@ -632,6 +651,19 @@ impl Translator {
                 return;
             }
         }
+        if let EventData::FileAccess { path, .. } = &ev.data {
+            // FP-04: a `Local State` outside the known stores is forwarded
+            // when it is in a user profile or under the opener's
+            // --user-data-dir, once per (instance, path), bounded.
+            if crate::fileattr::is_local_state(path) && !self.sensitive(path) {
+                let udd = self.user_data_dirs.get(&ev.guid);
+                if !crate::fileattr::local_state_in_scope(path, udd)
+                    || !self.local_state_seen.admit(&ev.guid, path)
+                {
+                    return;
+                }
+            }
+        }
         if let EventData::FileAccess { path, op } = &ev.data {
             let key = (ev.guid.clone(), norm_key(path), *op as u8);
             if self
@@ -747,19 +779,20 @@ impl Translator {
     pub fn handle(&mut self, r: Raw) {
         let now = now_ms();
         match r {
-            Raw::ProcStart {
-                ts,
-                pid,
-                ppid,
-                creator_pid,
-                create_ft,
-                session,
-                label_sid,
-                image_nt,
-                cmdline,
-                user_sid,
-                token_integrity,
-            } => {
+            Raw::ProcStart(p) => {
+                let super::etw::ProcStartRaw {
+                    ts,
+                    pid,
+                    ppid,
+                    creator_pid,
+                    create_ft,
+                    session,
+                    label_sid,
+                    image_nt,
+                    cmdline,
+                    user_sid,
+                    token_integrity,
+                } = *p;
                 let create_ft = if create_ft == 0 {
                     live_proc(pid).map(|l| l.create_ft).unwrap_or(0)
                 } else {
@@ -974,20 +1007,20 @@ impl Translator {
                 name_nt,
                 create_options,
             } => {
-                if file_object != 0 {
-                    self.file_objects.remove(&(pid, file_object));
-                }
-                if pid == self.s.self_pid || pid == 4 {
+                self.file_objects.forget(pid, file_object);
+                if pid == self.s.self_pid || pid == 4 || pid == 0 {
                     return;
                 }
                 let path = self.dos(&name_nt);
-                if !self.sensitive(&path) {
+                // `Local State` files outside the known stores are scoped
+                // per process instance in `finish_attr` (FP-04).
+                if !self.sensitive(&path) && !crate::fileattr::is_local_state(&path) {
                     return;
                 }
                 let op = file_op_for_path(create_options, filters::is_persistence_drop_path(&path));
-                if file_object != 0 {
+                if super::etw::FILE_READ_EVENTS {
                     self.file_objects
-                        .insert((pid, file_object), (path.clone(), false, ts));
+                        .on_create(pid, file_object, path.clone(), ts);
                 }
                 // Kernel-File is its own session: attribute by event time
                 // (pid reuse), de-duplicated per instance in `finish_attr`.
@@ -999,15 +1032,21 @@ impl Translator {
                 pid,
                 file_object,
             } => {
-                let Some((path, reported, _)) = self.file_objects.get_mut(&(pid, file_object))
-                else {
+                // Named after its Create only if the same process instance
+                // owned the pid at both times (pid / FileObject reuse).
+                let tracker = self.s.tracker.clone();
+                let same = |c: i64, r: i64| {
+                    let Ok(t) = tracker.read() else {
+                        return true;
+                    };
+                    match (t.at(pid, c), t.at(pid, r)) {
+                        (Some(a), Some(b)) => a.guid == b.guid,
+                        _ => true,
+                    }
+                };
+                let Some(path) = self.file_objects.first_read(pid, file_object, ts, same) else {
                     return;
                 };
-                if *reported {
-                    return;
-                }
-                *reported = true;
-                let path = path.clone();
                 let ev = Self::unattributed_event(
                     ts,
                     pid,
@@ -1146,16 +1185,17 @@ impl Translator {
                 let ev = self.base(ts, pid, EventData::ProcessAccess(t));
                 self.emit(ev);
             }
-            Raw::RegEtw {
-                ts,
-                pid,
-                key_object,
-                key,
-                value_name,
-                op,
-                ty,
-                data,
-            } => {
+            Raw::RegEtw(r) => {
+                let super::etw::RegEtwRaw {
+                    ts,
+                    pid,
+                    key_object,
+                    key,
+                    value_name,
+                    op,
+                    ty,
+                    data,
+                } = *r;
                 self.reg_join.record(
                     ts,
                     pid,
@@ -1197,15 +1237,16 @@ impl Translator {
                 );
                 self.emit(ev);
             }
-            Raw::RegChange {
-                ts,
-                key,
-                value_name,
-                op,
-                ty,
-                data,
-                reopened,
-            } => {
+            Raw::RegChange(r) => {
+                let super::etw::RegChangeRaw {
+                    ts,
+                    key,
+                    value_name,
+                    op,
+                    ty,
+                    data,
+                    reopened,
+                } = *r;
                 if self.pending_reg.len() >= MAX_PENDING_REG {
                     // Bounded: emit everything pending instead of growing.
                     self.flush_reg(now, true);
@@ -1240,11 +1281,11 @@ impl Translator {
                         ts,
                         pid: 0,
                         guid: ProcessGuid::default(),
-                        data: EventData::FileActivity(act),
+                        data: EventData::FileActivity(*act),
                     });
                     return;
                 }
-                let ev = Self::unattributed_event(ts, pid, EventData::FileActivity(act));
+                let ev = Self::unattributed_event(ts, pid, EventData::FileActivity(*act));
                 self.attribute(ev);
             }
             Raw::Persist {
@@ -1253,6 +1294,7 @@ impl Translator {
                 record,
                 task,
             } => {
+                let (record, task) = (*record, task.map(|t| *t));
                 if self
                     .persist_dedup
                     .seen(&record.dedup_key_with(task.as_ref()), ts)
@@ -1352,6 +1394,12 @@ impl Translator {
                 // Tamper events are never held.
                 self.send(ev);
             }
+            Raw::WriteHint {
+                ts,
+                pid,
+                name_nt,
+                op,
+            } => self.on_write_hint(ts, pid, name_nt, op),
         }
     }
 

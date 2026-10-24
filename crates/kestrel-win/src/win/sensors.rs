@@ -44,6 +44,7 @@ impl SensorHandle for Sensors {
             // queues), so they are also reported separately.
             kernel_events_lost: c.kernel_lost(),
             internal_dropped: c.internal_dropped(),
+            high_value_dropped: c.high_value_dropped(),
             buffers_lost: c.etw_buffers_lost.load(Ordering::Relaxed),
             events_total: c.emitted.load(Ordering::Relaxed),
             sysmon_present: c.sysmon_present.load(Ordering::Relaxed),
@@ -76,6 +77,8 @@ impl SensorHandle for Sensors {
             etw_events_lost = c.etw_events_lost.load(Ordering::Relaxed),
             raw_dropped = c.raw_dropped.load(Ordering::Relaxed),
             out_dropped = c.out_dropped.load(Ordering::Relaxed),
+            shed = c.raw_shed.load(Ordering::Relaxed),
+            high_value_dropped = c.high_value_dropped(),
             discarded_at_stop = c.raw_discarded_shutdown.load(Ordering::Relaxed),
             "sensors stopped"
         );
@@ -97,7 +100,7 @@ pub fn start(
     let counters = shared.counters.clone();
     let stop = Arc::new(AtomicBool::new(false));
     let drain = Arc::new(AtomicBool::new(false));
-    let (tx, rx) = sync_channel::<Raw>(65_536);
+    let (tx, rx) = sync_channel::<Raw>(etw::RAW_QUEUE_CAPACITY);
     let sink = Sink {
         tx,
         counters: counters.clone(),
@@ -116,6 +119,10 @@ pub fn start(
         .and_then(|m| m.device_for_drive(kestrel_common::system_drive()))
         .unwrap_or_default();
     let file_state = Arc::new(Mutex::new(FileState::new(FileScope::new(&system_device))));
+    // Raw queue depth of a previous sensor instance is meaningless here.
+    while !counters.raw_queued.is_empty() {
+        counters.raw_queued.received();
+    }
     let opts = SensorOpts {
         dns: cfg.dns,
         script_content: cfg.script_content,
@@ -124,11 +131,18 @@ pub fn start(
         credential_access: g.credential_access,
         file_state: file_state.clone(),
         canaries: shared.canaries.clone(),
+        system_device: system_device.clone(),
+        system_drive: kestrel_common::system_drive(),
+        write_scope: cfg
+            .write_tx
+            .as_ref()
+            .map(|_| Arc::new(crate::evidence_plan::WriteScope::new(&system_device))),
     };
 
     let mut threads: Vec<JoinHandle<()>> = Vec::new();
     let translator = {
-        let tr = Translator::new(shared.clone(), out);
+        let mut tr = Translator::new(shared.clone(), out);
+        tr.set_write_tx(cfg.write_tx.clone());
         let dr = drain.clone();
         std::thread::Builder::new()
             .name("kestrel-translate".into())
@@ -386,8 +400,15 @@ fn watchdog(
                 persist_dropped = counters.persist_dropped.load(Ordering::Relaxed),
                 kernel_events_lost = counters.kernel_lost(),
                 internal_dropped = counters.internal_dropped(),
+                high_value_dropped = counters.high_value_dropped(),
+                raw_shed = counters.raw_shed.load(Ordering::Relaxed),
+                raw_coalesced = counters.raw_coalesced.load(Ordering::Relaxed),
+                file_agg_trimmed = counters.file_agg_trimmed.load(Ordering::Relaxed),
+                image_prefiltered = counters.image_prefiltered.load(Ordering::Relaxed),
                 file_prefiltered = counters.file_prefiltered.load(Ordering::Relaxed),
                 pid_reuse_dropped = counters.pid_reuse_dropped.load(Ordering::Relaxed),
+                file_issuer_other = counters.file_issuer_other.load(Ordering::Relaxed),
+                file_issuer_unresolved = counters.file_issuer_unresolved.load(Ordering::Relaxed),
                 "sensor health"
             );
         }

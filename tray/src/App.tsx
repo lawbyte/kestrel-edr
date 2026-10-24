@@ -84,9 +84,11 @@ export function App({ api, initialTab }: Props) {
     }
   }, [api, loadStatus, loadActivity]);
 
-  // Initial load + backend events.
+  // Initial load + backend events. The backend builds this window on demand
+  // and destroys it when hidden, so everything is fetched here, on mount;
+  // nothing relies on events sent while the window didn't exist.
   useEffect(() => {
-    void loadStatus();
+    const firstStatus = loadStatus();
     void loadActivity();
     void api.getWindowMode().then(setMode).catch(() => {});
     const subs = [
@@ -121,6 +123,16 @@ export function App({ api, initialTab }: Props) {
     void api
       .getPendingConsents()
       .then((reqs) => reqs.forEach((req) => dispatchConsent({ type: "received", req, now: Date.now() })))
+      .catch(() => {});
+    // Listening, with the status in hand: the backend shows the window now
+    // (no blank flash) and hands over a tab / quick check asked for from the
+    // tray menu before this UI existed.
+    void Promise.all([...subs, firstStatus])
+      .then(() => api.uiReady())
+      .then((intent) => {
+        if (intent.quick_check) void runQuickCheck();
+        else if (intent.tab) setTab(intent.tab);
+      })
       .catch(() => {});
     // Refresh when the flyout is shown again.
     const onVis = () => {

@@ -601,6 +601,66 @@ mod tests {
         assert_eq!(t.owner_at(100, 8), Owner::Known(b));
     }
 
+    /// FP-01 as measured in the owner's export (2026-10-21/22, agents built
+    /// before this tracker): `wsl.exe` (pid 100) ran 165 ms and exited at
+    /// ETW 13_558; 13.5 s later `docker.exe` got pid 100 (start 13_713) and
+    /// opened `.docker\config.json` (13_723), `contexts\meta\…\meta.json`
+    /// (13_724) and `cli-plugins` (13_747). The Kernel-File session delivered
+    /// those opens before Kestrel-Core delivered docker's start, and the old
+    /// lookup gave them to the exited wsl.exe ("read 13.7 s into its life").
+    /// Now: held (the pid's only known owner had exited), then docker's.
+    #[test]
+    fn opens_of_successor_delivered_before_its_start_are_not_given_to_exited_owner() {
+        let mut t = ProcTracker::new("boot");
+        let wsl = t.on_etw_start(100, 0, 0, true, "wsl.exe", 1);
+        t.on_stop(100, Some(0), 13_558);
+        let mut q: PendingAttr<&str> = PendingAttr::new(16);
+        for (ts, what) in [
+            (13_723, "config.json"),
+            (13_724, "meta.json"),
+            (13_747, "cli-plugins"),
+        ] {
+            assert_eq!(t.owner_at(100, ts), Owner::Pending);
+            assert_ne!(t.decide(100, ts, false), Decision::Emit(wsl.clone()));
+            assert!(q
+                .push(20_000, 100, ts, what, |p, ts, f| t.decide(p, ts, f))
+                .is_empty());
+        }
+        // Interleaved: another pid's events are unaffected.
+        let other = t.on_etw_start(200, 13_000, 13_000, true, "rustc.exe", 1);
+        assert_eq!(t.decide(200, 13_723, false), Decision::Emit(other));
+        // Kestrel-Core catches up with docker's start.
+        let docker = t.on_etw_start(100, 13_713, 13_713, true, "docker.exe", 2);
+        let out = q.retry_pid(100, 14_000, |p, ts, f| t.decide(p, ts, f));
+        assert_eq!(
+            out,
+            vec![
+                (Decision::Emit(docker.clone()), "config.json"),
+                (Decision::Emit(docker.clone()), "meta.json"),
+                (Decision::Emit(docker), "cli-plugins"),
+            ]
+        );
+        // wsl.exe's own lifetime still resolves to wsl.exe.
+        assert_eq!(t.owner_at(100, 100), Owner::Known(wsl));
+    }
+
+    /// Same, but docker.exe's start never arrives (lost) and docker exited
+    /// before a live query could see it: dropped at the deadline, never
+    /// blamed on wsl.exe.
+    #[test]
+    fn successor_never_seen_is_not_given_to_exited_owner() {
+        let mut t = ProcTracker::new("boot");
+        let _wsl = t.on_etw_start(100, 0, 0, true, "wsl.exe", 1);
+        t.on_stop(100, Some(0), 13_558);
+        let mut q: PendingAttr<&str> = PendingAttr::new(16);
+        assert!(q
+            .push(2_500, 100, 13_723, "config.json", |p, ts, f| t
+                .decide(p, ts, f))
+            .is_empty());
+        let out = q.expire(2_500, |p, ts, f| t.decide(p, ts, f));
+        assert_eq!(out, vec![(Decision::Drop, "config.json")]);
+    }
+
     /// The existing early-event case: B's own event arrives before B's
     /// start event; the live query (sighting) already identifies B.
     #[test]

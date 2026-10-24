@@ -238,8 +238,8 @@ fn worker() -> Option<&'static Queue> {
                 j.sink.send(Raw::Persist {
                     ts: j.ts,
                     logger_pid: j.logger_pid,
-                    record: j.record,
-                    task,
+                    record: Box::new(j.record),
+                    task: task.map(Box::new),
                 });
             });
         match spawned {

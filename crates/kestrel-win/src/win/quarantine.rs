@@ -50,7 +50,9 @@ pub struct Vault {
     index: Mutex<QuarantineIndex>,
 }
 
-fn dpapi(data: &[u8], protect: bool) -> io::Result<Vec<u8>> {
+/// DPAPI machine scope (`CRYPTPROTECT_LOCAL_MACHINE | UI_FORBIDDEN`); also
+/// protects the evidence bundle key ([`super::evidence`]).
+pub(crate) fn dpapi(data: &[u8], protect: bool) -> io::Result<Vec<u8>> {
     let input = CRYPT_INTEGER_BLOB {
         cbData: data.len() as u32,
         pbData: data.as_ptr() as *mut u8,

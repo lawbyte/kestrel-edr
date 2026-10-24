@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { parseActivityItem, parseConsentRequest, parsePauseResult, parseRemoteSession, parseStatus, type ActivityItem, type TrayStatus } from "../protocol";
-import type { Ack, KestrelApi, Tab, WindowMode } from "./types";
+import { parseUiIntent, type Ack, type KestrelApi, type Tab, type WindowMode } from "./types";
 
 // Data from the backend is re-validated with the same parsers used for the
 // protocol, so a malformed agent response surfaces as an error, not a crash.
@@ -21,6 +21,9 @@ export const tauriApi: KestrelApi = {
   getWindowMode: () => invoke<WindowMode>("get_window_mode"),
   setWindowMode: (mode) => invoke("set_window_mode", { mode }),
   hideWindow: () => invoke("hide_window"),
+  async uiReady() {
+    return parseUiIntent(await invoke("ui_ready"));
+  },
   onNotification: (cb) => listen<unknown>("kestrel://notification", (e) => cb(parseActivityItem(e.payload) as ActivityItem)),
   onStatus: (cb) => listen<unknown>("kestrel://status", (e) => cb(parseStatus(e.payload) as TrayStatus)),
   onRemoteSession: (cb) => listen<unknown>("kestrel://remote-session", (e) => cb(parseRemoteSession(e.payload))),

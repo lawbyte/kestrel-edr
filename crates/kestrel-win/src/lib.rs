@@ -30,8 +30,10 @@ pub mod desktop_keymap;
 pub mod desktop_proto;
 pub mod dnswire;
 pub mod etwparse;
+pub mod evidence_plan;
 pub mod evtxml;
 pub mod fileagg;
+pub mod fileattr;
 pub mod filters;
 pub mod hardening_plan;
 pub mod hostfacts;
@@ -64,6 +66,8 @@ pub use win::desktop::run_desktop_helper;
 pub use win::hardfs::enable_redirection_guard;
 #[cfg(windows)]
 pub use win::platform::{resolve_host_direct, WindowsPlatform};
+#[cfg(windows)]
+pub use win::prio::{current_thread as lower_current_thread_priority, Background};
 #[cfg(windows)]
 pub use win::service::{install_service, run_service, service_installed, uninstall_service};
 #[cfg(windows)]

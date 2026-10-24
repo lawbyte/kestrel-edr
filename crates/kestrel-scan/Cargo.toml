@@ -18,6 +18,10 @@ serde_json.workspace = true
 anyhow.workspace = true
 yara-x = { version = "1.22", optional = true, default-features = false, features = ["pe-module", "hash-module", "math-module", "string-module", "dotnet-module", "fast-regexp", "constant-folding", "exact-atoms"] }
 
+[target.'cfg(windows)'.dependencies]
+# Background priority + EcoQoS for the scanner process (src/main.rs).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
 [[bin]]
 name = "kestrel-scan"
 path = "src/main.rs"

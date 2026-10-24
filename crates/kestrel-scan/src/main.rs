@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 
 fn main() {
+    background_priority();
     match run() {
         Ok(json) => println!("{json}"),
         Err(e) => {
@@ -37,3 +38,41 @@ fn run() -> Result<String> {
     let report = kestrel_scan::scan(&rules_dir, &targets)?;
     Ok(serde_json::to_string(&report)?)
 }
+
+/// A scan is analyst-requested but never urgent: run the whole process in
+/// background mode (lower CPU, I/O and memory priority; Windows never
+/// starves it) and EcoQoS so it does not compete with the employee's work
+/// or the agent's detection threads. Best effort: a failure only means the
+/// scan runs at normal priority. APIs: `SetPriorityClass(GetCurrentProcess(),
+/// PROCESS_MODE_BACKGROUND_BEGIN)` and `SetProcessInformation(..,
+/// ProcessPowerThrottling, PROCESS_POWER_THROTTLING_STATE { Version: 1,
+/// ControlMask: EXECUTION_SPEED, StateMask: EXECUTION_SPEED })` (Microsoft
+/// Learn, processthreadsapi.h).
+#[cfg(windows)]
+fn background_priority() {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, ProcessPowerThrottling, SetPriorityClass, SetProcessInformation,
+        PROCESS_MODE_BACKGROUND_BEGIN, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+    };
+    // SAFETY: pseudo-handle of this process; the state struct outlives the
+    // call and its size is passed.
+    unsafe {
+        let p = GetCurrentProcess();
+        let _ = SetPriorityClass(p, PROCESS_MODE_BACKGROUND_BEGIN);
+        let state = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            StateMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        };
+        let _ = SetProcessInformation(
+            p,
+            ProcessPowerThrottling,
+            &state as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn background_priority() {}

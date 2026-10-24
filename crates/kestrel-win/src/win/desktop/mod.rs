@@ -13,6 +13,13 @@
 //! shows the always-on-top banner; it follows input-desktop switches (UAC
 //! secure desktop, lock screen). Ctrl+Alt+Del is sent from this process
 //! (`SendSAS` only works from a service).
+//!
+//! Remote file-manager sessions use the same helper in banner-only mode
+//! ([`WindowsRemoteDesktop::show_banner`]): same spawn, pipe and handshake,
+//! no capture or input; `show_banner` returns only after the helper reported
+//! `BannerShown`, so the agent never runs a file operation without the
+//! banner on screen. While a desktop session runs, the file-manager notice is
+//! added to the desktop helper's banner instead (`set_files_notice`).
 
 mod banner;
 mod capture;
@@ -29,7 +36,7 @@ use crate::desktop_proto::{
 };
 use kestrel_common::remote::{DesktopSettings, InputEvent, RemoteErrorCode};
 use kestrel_platform::{
-    DesktopEvent, DesktopSession, DesktopSink, DesktopStartParams, RemoteDesktop,
+    DesktopEvent, DesktopSession, DesktopSink, DesktopStartParams, RemoteDesktop, SessionBanner,
 };
 use spawn::HelperProcess;
 use std::os::windows::io::AsRawHandle;
@@ -205,6 +212,30 @@ impl DesktopSession for WinDesktopSession {
     fn stop(&self) {
         self.shared.stop();
     }
+
+    fn set_files_notice(&self, text: &str) {
+        self.shared.set_files_notice(text);
+    }
+}
+
+impl Shared {
+    /// Replace the file-manager notice and push the settings to the helper.
+    fn set_files_notice(&self, text: &str) {
+        if self.stopped.load(Ordering::SeqCst) {
+            return;
+        }
+        let next = match self.settings.lock() {
+            Ok(mut cur) => {
+                if cur.files_notice == text {
+                    return;
+                }
+                cur.files_notice = text.to_string();
+                cur.clone()
+            }
+            Err(_) => return,
+        };
+        self.send(AgentMsg::Settings(next));
+    }
 }
 
 impl Drop for WinDesktopSession {
@@ -254,7 +285,7 @@ async fn bridge_reader<R: tokio::io::AsyncRead + Unpin>(
                     last_error = Some(e);
                 }
                 Ok(HelperMsg::Log(l)) => tracing::info!("remote desktop helper: {l}"),
-                Ok(HelperMsg::Hello { .. }) => {}
+                Ok(HelperMsg::Hello { .. } | HelperMsg::BannerShown) => {}
                 Err(e) => {
                     tracing::debug!("remote desktop: ignoring helper message: {e}");
                 }
@@ -328,6 +359,72 @@ async fn bridge_writer<W: tokio::io::AsyncWrite + Unpin>(
     }
 }
 
+/// Spawn the helper in the active console session and complete the
+/// handshake (client PID check, `Hello`, first settings). Blocking (up to
+/// [`START_TIMEOUT`]); call it off the async worker threads. Returns the
+/// process, the connected pipe, its decoder and the session id.
+fn launch(
+    rt: &tokio::runtime::Handle,
+    settings: &HelperSettings,
+    what: &str,
+) -> Result<(HelperProcess, NamedPipeServer, Decoder, u32), Fail> {
+    let session = spawn::active_console_session()
+        .ok_or_else(|| unavailable("no user is signed in at the console"))?;
+    let mut rnd = [0u8; 16];
+    getrandom::getrandom(&mut rnd)
+        .map_err(|e| unavailable(format!("no randomness for the pipe name: {e}")))?;
+    let name = pipe_name_from(&rnd);
+    let sd = sd_from_sddl(PIPE_SDDL).ok_or_else(|| unavailable("invalid pipe SDDL"))?;
+    let server = {
+        let _g = rt.enter();
+        create_pipe(&name, &sd)
+    }
+    .map_err(|e| unavailable(format!("cannot create the helper pipe: {e}")))?;
+    let child = spawn::spawn_helper(session, &name)
+        .map_err(|e| unavailable(format!("cannot start the {what}: {e}")))?;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let child_pid = child.pid;
+    let first = settings.clone();
+    let hs = rt.spawn(async move {
+        let r = tokio::time::timeout(START_TIMEOUT, handshake(server, child_pid, first))
+            .await
+            .unwrap_or_else(|_| Err("timed out waiting for the helper".into()));
+        let _ = tx.send(r);
+    });
+    let deadline = Instant::now() + START_TIMEOUT + Duration::from_secs(1);
+    let (server, dec) = loop {
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(Ok(v)) => break v,
+            Ok(Err(e)) => {
+                child.terminate();
+                return Err(unavailable(e));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(code) = child.exit_code() {
+                    hs.abort();
+                    return Err(unavailable(format!(
+                        "the {what} exited during start-up (code {code:#x})"
+                    )));
+                }
+                if Instant::now() > deadline {
+                    hs.abort();
+                    child.terminate();
+                    return Err((
+                        RemoteErrorCode::Timeout,
+                        format!("the {what} did not start"),
+                    ));
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                child.terminate();
+                return Err(unavailable("helper start-up was cancelled"));
+            }
+        }
+    };
+    Ok((child, server, dec, session))
+}
+
 impl RemoteDesktop for WindowsRemoteDesktop {
     fn start(
         &self,
@@ -336,66 +433,13 @@ impl RemoteDesktop for WindowsRemoteDesktop {
     ) -> Result<Box<dyn DesktopSession>, (RemoteErrorCode, String)> {
         let rt = tokio::runtime::Handle::try_current()
             .map_err(|_| unavailable("remote desktop needs the agent's async runtime"))?;
-        let session = spawn::active_console_session()
-            .ok_or_else(|| unavailable("no user is signed in at the console"))?;
-        let mut rnd = [0u8; 16];
-        getrandom::getrandom(&mut rnd)
-            .map_err(|e| unavailable(format!("no randomness for the pipe name: {e}")))?;
-        let name = pipe_name_from(&rnd);
-        let sd = sd_from_sddl(PIPE_SDDL).ok_or_else(|| unavailable("invalid pipe SDDL"))?;
-        let server = {
-            let _g = rt.enter();
-            create_pipe(&name, &sd)
-        }
-        .map_err(|e| unavailable(format!("cannot create the helper pipe: {e}")))?;
-        let child = spawn::spawn_helper(session, &name)
-            .map_err(|e| unavailable(format!("cannot start the remote desktop helper: {e}")))?;
         let settings = HelperSettings::new(
             params.view_only,
             &params.admin_name,
             &params.reason,
             &params.settings,
         );
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        let child_pid = child.pid;
-        let first = settings.clone();
-        let hs = rt.spawn(async move {
-            let r = tokio::time::timeout(START_TIMEOUT, handshake(server, child_pid, first))
-                .await
-                .unwrap_or_else(|_| Err("timed out waiting for the helper".into()));
-            let _ = tx.send(r);
-        });
-        let deadline = Instant::now() + START_TIMEOUT + Duration::from_secs(1);
-        let (server, dec) = loop {
-            match rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(Ok(v)) => break v,
-                Ok(Err(e)) => {
-                    child.terminate();
-                    return Err(unavailable(e));
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    if let Some(code) = child.exit_code() {
-                        hs.abort();
-                        return Err(unavailable(format!(
-                            "the remote desktop helper exited during start-up (code {code:#x})"
-                        )));
-                    }
-                    if Instant::now() > deadline {
-                        hs.abort();
-                        child.terminate();
-                        return Err((
-                            RemoteErrorCode::Timeout,
-                            "the remote desktop helper did not start".into(),
-                        ));
-                    }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    child.terminate();
-                    return Err(unavailable("helper start-up was cancelled"));
-                }
-            }
-        };
+        let (child, server, dec, session) = launch(&rt, &settings, "remote desktop helper")?;
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<AgentMsg>(512);
         let shared = Arc::new(Shared {
@@ -418,6 +462,132 @@ impl RemoteDesktop for WindowsRemoteDesktop {
         );
         Ok(Box::new(WinDesktopSession { shared }))
     }
+
+    fn show_banner(&self, text: &str) -> Result<Box<dyn SessionBanner>, Fail> {
+        let rt = tokio::runtime::Handle::try_current()
+            .map_err(|_| unavailable("the remote-access banner needs the agent's async runtime"))?;
+        let settings = HelperSettings::banner_only(text);
+        let (child, server, dec, session) = launch(&rt, &settings, "remote-access banner helper")?;
+        let (cmd_tx, cmd_rx) = mpsc::channel::<AgentMsg>(16);
+        let shared = Arc::new(Shared {
+            stopped: AtomicBool::new(false),
+            child: Mutex::new(Some(child)),
+            cmd: cmd_tx,
+            settings: Mutex::new(settings),
+            tasks: Mutex::new(Vec::new()),
+        });
+        let ended = Arc::new(AtomicBool::new(false));
+        let (shown_tx, shown_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let (rd, wr) = tokio::io::split(server);
+        let w = rt.spawn(bridge_writer(wr, cmd_rx));
+        let r = rt.spawn(banner_reader(
+            rd,
+            dec,
+            shared.clone(),
+            ended.clone(),
+            shown_tx,
+        ));
+        if let Ok(mut t) = shared.tasks.lock() {
+            t.push(w);
+            t.push(r);
+        }
+        // Fail closed: no file operation before the banner is on screen.
+        match shown_rx.recv_timeout(START_TIMEOUT) {
+            Ok(Ok(())) => {
+                tracing::info!("remote-access banner shown in session {session}");
+                Ok(Box::new(WinSessionBanner { shared, ended }))
+            }
+            Ok(Err(e)) => {
+                shared.stop();
+                Err(unavailable(format!(
+                    "cannot show the remote-access banner: {e}"
+                )))
+            }
+            Err(_) => {
+                shared.stop();
+                Err((
+                    RemoteErrorCode::Timeout,
+                    "the remote-access banner did not appear".into(),
+                ))
+            }
+        }
+    }
+}
+
+/// A banner-only helper (remote file manager without a desktop session).
+pub struct WinSessionBanner {
+    shared: Arc<Shared>,
+    /// The helper's pipe closed (it exited or failed).
+    ended: Arc<AtomicBool>,
+}
+
+impl SessionBanner for WinSessionBanner {
+    fn set_text(&self, text: &str) {
+        self.shared.set_files_notice(text);
+    }
+
+    fn is_alive(&self) -> bool {
+        if self.shared.stopped.load(Ordering::SeqCst) || self.ended.load(Ordering::SeqCst) {
+            return false;
+        }
+        match self.shared.child.lock() {
+            Ok(c) => c.as_ref().is_some_and(|c| c.exit_code().is_none()),
+            Err(_) => false,
+        }
+    }
+
+    fn close(&self) {
+        self.shared.stop();
+    }
+}
+
+impl Drop for WinSessionBanner {
+    fn drop(&mut self) {
+        self.shared.stop();
+    }
+}
+
+/// Pipe reader of a banner-only helper: reports `BannerShown` (or the
+/// failure) once on `shown`, then watches for the end of the helper.
+async fn banner_reader<R: tokio::io::AsyncRead + Unpin>(
+    mut rd: R,
+    mut dec: Decoder,
+    shared: Arc<Shared>,
+    ended: Arc<AtomicBool>,
+    shown: std::sync::mpsc::Sender<Result<(), String>>,
+) {
+    let mut shown = Some(shown);
+    let mut last_error: Option<String> = None;
+    let why = loop {
+        match read_raw(&mut rd, &mut dec).await {
+            Ok(Some((k, p))) => match HelperMsg::decode(k, &p) {
+                Ok(HelperMsg::BannerShown) => {
+                    if let Some(s) = shown.take() {
+                        let _ = s.send(Ok(()));
+                    }
+                }
+                Ok(HelperMsg::Error(e)) => {
+                    tracing::warn!("remote-access banner helper: {e}");
+                    last_error = Some(e);
+                }
+                Ok(HelperMsg::Log(l)) => tracing::info!("remote-access banner helper: {l}"),
+                Ok(_) => {}
+                Err(e) => tracing::debug!("remote-access banner: ignoring helper message: {e}"),
+            },
+            Ok(None) => break "the banner helper closed the connection".to_string(),
+            Err(e) => break format!("banner pipe error: {e}"),
+        }
+    };
+    ended.store(true, Ordering::SeqCst);
+    let why = last_error.unwrap_or(why);
+    if let Some(s) = shown.take() {
+        let _ = s.send(Err(why.clone()));
+    }
+    if !shared.stopped.load(Ordering::SeqCst) {
+        tracing::warn!("remote-access banner ended on its own: {why}");
+    }
+    // Kill leftovers and close the job.
+    shared.stop();
 }
 
 /// `SendSAS(FALSE)` from `%SystemRoot%\System32\sas.dll` (loaded by full

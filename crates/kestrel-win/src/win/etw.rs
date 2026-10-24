@@ -38,6 +38,7 @@ use crate::etwparse::*;
 use crate::evtxml::SysmonCross;
 use crate::fileagg::{DecoyOpeners, FileAgg, FileScope};
 use crate::persist::{record_from_fields, PersistRecord};
+use crate::pump::{shed_early, Coalescer, QueueGauge, Value};
 use crate::taskxml::TaskInfo;
 use ferrisetw::parser::Parser;
 use ferrisetw::provider::{kernel_providers, EventFilter, Provider};
@@ -68,21 +69,9 @@ pub const FILE_READ_EVENTS: bool = false;
 /// Raw, owned sensor record (decoded in the ETW callback).
 #[derive(Debug, Clone)]
 pub enum Raw {
-    ProcStart {
-        ts: i64,
-        pid: u32,
-        ppid: u32,
-        /// EVENT_HEADER ProcessId of the start event: the process that really
-        /// created this one. Differs from `ppid` under PPID spoofing (V-H1).
-        creator_pid: u32,
-        create_ft: u64,
-        session: u32,
-        label_sid: Option<String>,
-        image_nt: String,
-        cmdline: Option<String>,
-        user_sid: Option<String>,
-        token_integrity: Option<Integrity>,
-    },
+    /// Boxed: the large variants are boxed so that every slot of the raw
+    /// queue (65,536 preallocated slots) stays small ([`RAW_MAX_BYTES`]).
+    ProcStart(Box<ProcStartRaw>),
     ProcStop {
         ts: i64,
         pid: u32,
@@ -153,43 +142,22 @@ pub enum Raw {
     },
     /// Kernel-Registry 5 / 6. `key` is empty on current builds (measured);
     /// used for writer attribution, and emitted directly when it is not.
-    RegEtw {
-        ts: i64,
-        pid: u32,
-        key_object: u64,
-        /// Normalised key, or "" when the event carries none.
-        key: String,
-        value_name: String,
-        op: RegistryOp,
-        ty: u32,
-        data: Vec<u8>,
-    },
+    RegEtw(Box<RegEtwRaw>),
     /// Change seen by the registry watcher (writer unknown yet).
-    RegChange {
-        ts: i64,
-        key: String,
-        value_name: String,
-        op: RegistryOp,
-        ty: u32,
-        data: Option<Vec<u8>>,
-        /// The watched key (re)appeared — created, or renamed into place —
-        /// and its values are reported wholesale: only a KeyObject-exact
-        /// join counts (V-H7).
-        reopened: bool,
-    },
+    RegChange(Box<RegChangeRaw>),
     /// Ransomware sensor summary (paths are lower-cased NT paths).
     FileActivity {
         ts: i64,
         pid: u32,
-        act: FileActivity,
+        act: Box<FileActivity>,
     },
     /// Task / service / WMI persistence event (creator not yet attributed).
     Persist {
         ts: i64,
         /// Process that logged the event (Schedule svchost, services.exe, WMI host).
         logger_pid: u32,
-        record: PersistRecord,
-        task: Option<TaskInfo>,
+        record: Box<PersistRecord>,
+        task: Option<Box<TaskInfo>>,
     },
     Dns {
         ts: i64,
@@ -217,6 +185,90 @@ pub enum Raw {
         kind: TamperKind,
         detail: String,
     },
+    /// Evidence journal only (staged-file candidate, [`super::writehint`]):
+    /// a file created / overwritten under a user-writable location. Never
+    /// an `Event`.
+    WriteHint {
+        ts: i64,
+        pid: u32,
+        name_nt: String,
+        op: kestrel_common::evidence::WriteOp,
+    },
+}
+
+/// Upper bound on `size_of::<Raw>()` (test-enforced): the raw queue
+/// preallocates every slot, so the enum size is memory the agent commits at
+/// sensor start (224 bytes x 65,536 slots = 15 MB before 2026-10-25).
+pub(crate) const RAW_MAX_BYTES: usize = 64;
+const _: () = assert!(std::mem::size_of::<Raw>() <= RAW_MAX_BYTES);
+
+/// Kernel-Process ProcessStart (1), with the command line and token read in
+/// the callback.
+#[derive(Debug, Clone)]
+pub struct ProcStartRaw {
+    pub ts: i64,
+    pub pid: u32,
+    pub ppid: u32,
+    /// EVENT_HEADER ProcessId of the start event: the process that really
+    /// created this one. Differs from `ppid` under PPID spoofing (V-H1).
+    pub creator_pid: u32,
+    pub create_ft: u64,
+    pub session: u32,
+    pub label_sid: Option<String>,
+    pub image_nt: String,
+    pub cmdline: Option<String>,
+    pub user_sid: Option<String>,
+    pub token_integrity: Option<Integrity>,
+}
+
+/// Kernel-Registry 5 / 6. `key` is empty on current builds (measured);
+/// used for writer attribution, and emitted directly when it is not.
+#[derive(Debug, Clone)]
+pub struct RegEtwRaw {
+    pub ts: i64,
+    pub pid: u32,
+    pub key_object: u64,
+    /// Normalised key, or "" when the event carries none.
+    pub key: String,
+    pub value_name: String,
+    pub op: RegistryOp,
+    pub ty: u32,
+    pub data: Vec<u8>,
+}
+
+/// Change seen by the registry watcher (writer unknown yet).
+#[derive(Debug, Clone)]
+pub struct RegChangeRaw {
+    pub ts: i64,
+    pub key: String,
+    pub value_name: String,
+    pub op: RegistryOp,
+    pub ty: u32,
+    pub data: Option<Vec<u8>>,
+    /// The watched key (re)appeared — created, or renamed into place —
+    /// and its values are reported wholesale: only a KeyObject-exact
+    /// join counts (V-H7).
+    pub reopened: bool,
+}
+
+impl Raw {
+    /// Value to detection when the raw queue is under pressure
+    /// ([`crate::pump::shed_early`]).
+    pub fn value(&self) -> Value {
+        match self {
+            // Flow end and first-read tracking: never an event on their own.
+            // Evidence-journal hints are not detection input.
+            Raw::NetClose { .. } | Raw::FileRead { .. } | Raw::WriteHint { .. } => Value::Low,
+            // TCP / UDP sends: byte accounting (exfiltration volume) and the
+            // fallback that reports a flow whose connect was lost. Useful,
+            // but every flow sends many of them.
+            Raw::NetSend { .. } => Value::Medium,
+            // Everything else, including image loads that passed the source
+            // filter (interesting DLLs, user-writable locations) and DNS
+            // answers (IOC domains): review 2026-10-25 M2.
+            _ => Value::High,
+        }
+    }
 }
 
 /// Shared counters (heartbeat stats).
@@ -261,6 +313,39 @@ pub struct Counters {
     /// Kernel-File opens / creates not handed to the translator because the
     /// path can never be sensitive ([`crate::filters::kernel_file_candidate`]).
     pub file_prefiltered: AtomicU64,
+    /// Forwarded Kernel-File opens whose issuing thread belongs to another
+    /// process than the event header's pid: attributed to the issuer
+    /// ([`crate::fileattr::issuer`], FP-01). Diagnostics.
+    pub file_issuer_other: AtomicU64,
+    /// Forwarded opens whose issuing thread differs from the logging thread
+    /// and could not be resolved: dropped rather than blamed on the logging
+    /// context. Diagnostics (lab check: expected ~0).
+    pub file_issuer_unresolved: AtomicU64,
+    /// Image loads not handed to the translator because it would discard
+    /// them ([`crate::filters::image_load_candidate`]). Diagnostics.
+    pub image_prefiltered: AtomicU64,
+    /// Identical successive handle opens suppressed at the source
+    /// ([`crate::pump::Coalescer`]). Diagnostics, not a loss.
+    pub raw_coalesced: AtomicU64,
+    /// Records shed before the raw queue was full because they were of low
+    /// or medium value ([`crate::pump::shed_early`]). Part of
+    /// `internal_dropped`.
+    pub raw_shed: AtomicU64,
+    /// High-value records ([`crate::pump::Value::High`] / high-value event
+    /// kinds) lost to a full queue, plus persistence records and aggregator
+    /// refusals. The health signal for "detections may be blind".
+    pub high_value_dropped: AtomicU64,
+    /// Operations trimmed from a saturated per-process file-activity window
+    /// (the process keeps being summarised from its most recent operations,
+    /// far above every RW threshold). Diagnostics, not a loss.
+    pub file_agg_trimmed: AtomicU64,
+    /// Approximate depth of the raw queue (producers vs translator).
+    pub raw_queued: QueueGauge,
+    /// Evidence write hints handed to `SensorConfig.write_tx` / shed or
+    /// dropped on the way (raw queue or agent channel full). Diagnostics,
+    /// not part of `events_lost` (hints are never events).
+    pub write_hints_sent: AtomicU64,
+    pub write_hints_dropped: AtomicU64,
 }
 
 impl Counters {
@@ -270,15 +355,30 @@ impl Counters {
         self.etw_events_lost.load(Ordering::Relaxed)
     }
 
-    /// Events Kestrel itself dropped: raw queue full, agent channel full,
-    /// file-activity aggregator caps, persistence enrichment queue full.
+    /// Events Kestrel itself dropped: raw queue full or shed under pressure,
+    /// agent channel full, file-activity aggregator refusals, persistence
+    /// enrichment queue full.
     pub fn internal_dropped(&self) -> u64 {
         self.raw_dropped.load(Ordering::Relaxed)
+            + self.raw_shed.load(Ordering::Relaxed)
             + self.out_dropped.load(Ordering::Relaxed)
             + self.file_agg_dropped.load(Ordering::Relaxed)
             + self.persist_dropped.load(Ordering::Relaxed)
     }
+
+    /// Part of [`Counters::internal_dropped`] that may blind a detection:
+    /// high-value records lost to a full queue, persistence records the
+    /// enrichment queue refused, processes the file-activity aggregator
+    /// could not track.
+    pub fn high_value_dropped(&self) -> u64 {
+        self.high_value_dropped.load(Ordering::Relaxed)
+            + self.persist_dropped.load(Ordering::Relaxed)
+            + self.file_agg_dropped.load(Ordering::Relaxed)
+    }
 }
+
+/// Raw queue capacity (slots are preallocated: [`RAW_MAX_BYTES`] each).
+pub const RAW_QUEUE_CAPACITY: usize = 65_536;
 
 /// Kernel-File callback state shared with the canary poller.
 pub struct FileState {
@@ -317,18 +417,31 @@ pub struct Sink {
 
 impl Sink {
     pub fn send(&self, r: Raw) {
+        let value = r.value();
+        let c = &self.counters;
+        // Under pressure, low / medium value records give way first so that
+        // high-value ones still find room (owner-PC triage 2026-10-25).
+        if shed_early(value, c.raw_queued.len(), RAW_QUEUE_CAPACITY) {
+            c.raw_shed.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        c.raw_queued.sent();
         let full = match self.tx.try_send(r) {
             Ok(()) => {
-                self.counters.raw_delivered.fetch_add(1, Ordering::Relaxed);
+                c.raw_delivered.fetch_add(1, Ordering::Relaxed);
                 return;
             }
             Err(TrySendError::Full(_)) => true,
             Err(TrySendError::Disconnected(_)) => false,
         };
+        c.raw_queued.received();
         let closing = self.closing.load(Ordering::Relaxed);
         match crate::pump::classify_send_failure(full, closing) {
             crate::pump::SendFailure::Dropped => {
-                self.counters.raw_dropped.fetch_add(1, Ordering::Relaxed);
+                c.raw_dropped.fetch_add(1, Ordering::Relaxed);
+                if value == Value::High {
+                    c.high_value_dropped.fetch_add(1, Ordering::Relaxed);
+                }
             }
             crate::pump::SendFailure::ShutdownDiscard => {
                 self.counters
@@ -383,13 +496,92 @@ fn ts_of(rec: &EventRecord) -> i64 {
     }
 }
 
-fn decode_process(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
+/// State shared by the Core session's callbacks (one ProcessTrace thread
+/// delivers Kernel-Process and Kernel-Audit-API-Calls in order, so a process
+/// start / stop is seen before any later handle open of a reused pid).
+pub struct CoreCtx {
+    /// Lower-case NT device of the system volume ("" = unknown).
+    pub system_device: String,
+    pub system_drive: char,
+    /// Identical successive `OpenProcess` records and the pid generations
+    /// that keep a reused pid out of its predecessor's window.
+    opens: Mutex<OpenCoalescer>,
+    counters: Arc<Counters>,
+}
+
+/// (actor pid, actor generation, target pid, target generation, access,
+/// status).
+type OpenKey = (u32, u32, u32, u32, u32, u32);
+
+struct OpenCoalescer {
+    seen: Coalescer<OpenKey>,
+    /// Bumped on every start / stop of a pid: O(1) invalidation of every
+    /// window that pid is part of (review 2026-10-25 M3: a scan of the map
+    /// per process start on the Core callback thread was a lever to make
+    /// ETW lose events).
+    gens: HashMap<u32, u32>,
+}
+
+/// Bound on tracked pid generations; past it both maps start over.
+const OPEN_COALESCE_GENS: usize = 65_536;
+
+/// Window and bound of the handle-open coalescer. 2 s: a duplicate open
+/// carries nothing new for detection (every rule decides on the first one),
+/// and a start / stop of either pid ends the window early.
+pub const OPEN_COALESCE_MS: i64 = 2_000;
+const OPEN_COALESCE_KEYS: usize = 8_192;
+
+impl CoreCtx {
+    pub fn new(system_device: &str, system_drive: char, counters: Arc<Counters>) -> Self {
+        CoreCtx {
+            system_device: system_device.trim_end_matches('\\').to_ascii_lowercase(),
+            system_drive,
+            opens: Mutex::new(OpenCoalescer {
+                seen: Coalescer::new(OPEN_COALESCE_MS, OPEN_COALESCE_KEYS),
+                gens: HashMap::new(),
+            }),
+            counters,
+        }
+    }
+
+    /// A pid started or exited: no window of its predecessor may suppress
+    /// the new owner's opens (or opens of it). O(1).
+    fn pid_changed(&self, pid: u32) {
+        if let Ok(mut c) = self.opens.lock() {
+            if c.gens.len() >= OPEN_COALESCE_GENS && !c.gens.contains_key(&pid) {
+                c.gens.clear();
+                c.seen.clear();
+            }
+            let g = c.gens.entry(pid).or_insert(0);
+            *g = g.wrapping_add(1);
+        }
+    }
+
+    /// `(actor, target, access, status)`: forward this open?
+    fn admit_open(&self, (actor, target, access, status): (u32, u32, u32, u32), ts: i64) -> bool {
+        match self.opens.lock() {
+            Ok(mut c) => {
+                let ga = c.gens.get(&actor).copied().unwrap_or(0);
+                let gt = c.gens.get(&target).copied().unwrap_or(0);
+                let ok = c.seen.admit((actor, ga, target, gt, access, status), ts);
+                if !ok {
+                    self.counters.raw_coalesced.fetch_add(1, Ordering::Relaxed);
+                }
+                ok
+            }
+            // Poisoned: never suppress.
+            Err(_) => true,
+        }
+    }
+}
+
+fn decode_process(rec: &EventRecord, loc: &SchemaLocator, ctx: &CoreCtx) -> Option<Raw> {
     let ts = ts_of(rec);
     match rec.event_id() {
         eid::PROC_START => {
             let creator_pid = rec.process_id();
-            let r = with_fields(rec, loc, |f| {
-                Some(Raw::ProcStart {
+            let mut p = with_fields(rec, loc, |f| {
+                Some(ProcStartRaw {
                     ts,
                     pid: f.u32(field::PROCESS_ID)?,
                     ppid: f.u32(field::PARENT_PROCESS_ID).unwrap_or(0),
@@ -403,56 +595,40 @@ fn decode_process(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
                     token_integrity: None,
                 })
             })?;
+            ctx.pid_changed(p.pid);
             // Capture command line + token while the process is guaranteed young.
-            if let Raw::ProcStart {
-                pid,
-                ts,
-                ppid,
-                creator_pid,
-                create_ft,
-                session,
-                label_sid,
-                image_nt,
-                ..
-            } = r
-            {
-                let (mut cmdline, mut user_sid, mut token_integrity) = (None, None, None);
-                if let Some(h) = open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION) {
-                    cmdline = process_cmdline(&h);
-                    let (s, i) = process_token_info(&h);
-                    user_sid = s;
-                    token_integrity = i;
-                }
-                return Some(Raw::ProcStart {
-                    ts,
-                    pid,
-                    ppid,
-                    creator_pid,
-                    create_ft,
-                    session,
-                    label_sid,
-                    image_nt,
-                    cmdline,
-                    user_sid,
-                    token_integrity,
-                });
+            if let Some(h) = open_process(p.pid, PROCESS_QUERY_LIMITED_INFORMATION) {
+                p.cmdline = process_cmdline(&h);
+                let (s, i) = process_token_info(&h);
+                p.user_sid = s;
+                p.token_integrity = i;
             }
-            None
+            Some(Raw::ProcStart(Box::new(p)))
         }
         eid::PROC_STOP => with_fields(rec, loc, |f| {
+            let pid = f.u32(field::PROCESS_ID)?;
+            ctx.pid_changed(pid);
             Some(Raw::ProcStop {
                 ts,
-                pid: f.u32(field::PROCESS_ID)?,
+                pid,
                 create_ft: f.u64(field::CREATE_TIME).unwrap_or(0),
                 exit_code: f.u32(field::EXIT_CODE),
             })
         }),
         eid::IMAGE_LOAD => with_fields(rec, loc, |f| {
-            Some(Raw::ImageLoad {
-                ts,
-                pid: f.u32(field::PROCESS_ID)?,
-                image_nt: f.string(field::IMAGE_NAME)?,
-            })
+            let pid = f.u32(field::PROCESS_ID)?;
+            let image_nt = f.string(field::IMAGE_NAME)?;
+            if !crate::filters::image_load_candidate(
+                &image_nt,
+                &ctx.system_device,
+                ctx.system_drive,
+            ) {
+                ctx.counters
+                    .image_prefiltered
+                    .fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+            Some(Raw::ImageLoad { ts, pid, image_nt })
         }),
         _ => None,
     }
@@ -467,18 +643,11 @@ fn decode_process(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
 /// translator ignores everything else (and the agent / System process), so
 /// queueing it only costs channel capacity and CPU under build load. With
 /// [`FILE_READ_EVENTS`] every create is forwarded (the translator tracks
-/// file objects for the first read).
-fn forward_file_create(
-    name: &str,
-    pid: u32,
-    sink: &Sink,
-    canaries: &RwLock<HashSet<String>>,
-) -> bool {
+/// file objects for the first read). Name only; the process is decided by
+/// [`file_issuer`] for the opens that pass.
+fn file_candidate(name: &str, sink: &Sink, canaries: &RwLock<HashSet<String>>) -> bool {
     if FILE_READ_EVENTS {
         return true;
-    }
-    if pid == sink.self_pid || pid == 4 {
-        return false;
     }
     let keep = match canaries.read() {
         Ok(c) => crate::filters::kernel_file_candidate(name, c.iter()),
@@ -493,12 +662,64 @@ fn forward_file_create(
     keep
 }
 
+/// Issuing thread of a Kernel-File Create / CreateNewFile: `IssuingThreadId`
+/// (UInt32, template v1) or `ThreadId` (Pointer, v0) — manifest, build 26200.
+fn issuing_tid(f: &F) -> Option<u32> {
+    f.u32(field::ISSUING_THREAD_ID)
+        .or_else(|| f.u64(field::FILE_THREAD_ID).map(|t| t as u32))
+}
+
+/// The process a forwarded open belongs to (FP-01, [`crate::fileattr`]):
+/// the header pid when the issuing thread is the logging thread, otherwise
+/// the issuing thread's process (if that thread existed at the event's
+/// time). `None` = do not forward: the agent itself, Idle / System, or an
+/// issuer that cannot be resolved (counted).
+fn file_issuer(
+    rec: &EventRecord,
+    pid: u32,
+    issuing: Option<u32>,
+    ts: i64,
+    sink: &Sink,
+) -> Option<u32> {
+    use crate::fileattr::{issuer, thread_existed_at, Issuer};
+    let pid = match issuer(pid, rec.thread_id(), issuing, |tid| {
+        thread_process(tid)
+            .filter(|(_, created)| thread_existed_at(filetime_to_ms(*created), ts))
+            .map(|(p, _)| p)
+    }) {
+        Issuer::Header => pid,
+        Issuer::Other(p) => {
+            sink.counters
+                .file_issuer_other
+                .fetch_add(1, Ordering::Relaxed);
+            p
+        }
+        Issuer::Unresolved => {
+            sink.counters
+                .file_issuer_unresolved
+                .fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+    };
+    (pid != sink.self_pid && pid != 4 && pid != 0).then_some(pid)
+}
+
+/// Fold the aggregator's drop / trim counts since `before` into the
+/// shared counters.
+fn agg_counted(c: &Counters, agg: &FileAgg, before: (u64, u64)) {
+    c.file_agg_dropped
+        .fetch_add(agg.dropped - before.0, Ordering::Relaxed);
+    c.file_agg_trimmed
+        .fetch_add(agg.trimmed - before.1, Ordering::Relaxed);
+}
+
 fn decode_file(
     rec: &EventRecord,
     loc: &SchemaLocator,
     sink: &Sink,
     state: Option<&Mutex<FileState>>,
     canaries: &RwLock<HashSet<String>>,
+    write_scope: Option<&crate::evidence_plan::WriteScope>,
 ) -> Option<Raw> {
     let ts = ts_of(rec);
     let pid = rec.process_id();
@@ -514,38 +735,39 @@ fn decode_file(
             sink.send(Raw::FileActivity {
                 ts: e.ts,
                 pid: e.pid,
-                act: e.activity,
+                act: Box::new(e.activity),
             });
         }
     };
     let id = rec.event_id();
     match id {
         eid::FILE_CREATE => {
-            let (fo, name, co) = with_fields(rec, loc, |f| {
+            // `fwd`: Some(issuing thread) when the open passes the name
+            // filter (the issuing thread is parsed only then).
+            let (fo, name, co, fwd) = with_fields(rec, loc, |f| {
+                let name = f.string(field::FILE_NAME)?;
+                let fwd = file_candidate(&name, sink, canaries).then(|| issuing_tid(f));
                 Some((
                     f.u64(field::FILE_OBJECT).unwrap_or(0),
-                    f.string(field::FILE_NAME)?,
+                    name,
                     f.u32(field::CREATE_OPTIONS).unwrap_or(0),
+                    fwd,
                 ))
             })?;
             if let Some(st) = agg {
                 let nt = name.to_ascii_lowercase();
                 if let Ok(mut st) = st.lock() {
                     st.note_open(&nt, pid, ts, co);
-                    let before = st.agg.dropped;
+                    let before = (st.agg.dropped, st.agg.trimmed);
                     let e = st
                         .agg
                         .on_create(ts, pid, fo, &nt, co >> 24, is_directory_open(co));
-                    sink.counters
-                        .file_agg_dropped
-                        .fetch_add(st.agg.dropped - before, Ordering::Relaxed);
+                    agg_counted(&sink.counters, &st.agg, before);
                     drop(st);
                     emit(e);
                 }
             }
-            if !forward_file_create(&name, pid, sink, canaries) {
-                return None;
-            }
+            let pid = file_issuer(rec, pid, fwd?, ts, sink)?;
             Some(Raw::FileCreate {
                 ts,
                 pid,
@@ -561,30 +783,32 @@ fn decode_file(
             // CreateNewFile uses the Create template (CreateOptions
             // included); a directory create (mkdir) carries
             // FILE_DIRECTORY_FILE and is never a file for the aggregator.
-            let (fo, name, co) = with_fields(rec, loc, |f| {
+            // `fwd`: Some(issuing thread) when the open passes the name
+            // filter (the issuing thread is parsed only then).
+            let (fo, name, co, fwd) = with_fields(rec, loc, |f| {
+                let name = f.string(field::FILE_NAME)?;
+                let fwd = file_candidate(&name, sink, canaries).then(|| issuing_tid(f));
                 Some((
                     f.u64(field::FILE_OBJECT).unwrap_or(0),
-                    f.string(field::FILE_NAME)?,
+                    name,
                     f.u32(field::CREATE_OPTIONS).unwrap_or(0),
+                    fwd,
                 ))
             })?;
             if let Some(st) = agg {
                 let nt = name.to_ascii_lowercase();
                 let e = st.lock().ok().and_then(|mut st| {
-                    let before = st.agg.dropped;
+                    let before = (st.agg.dropped, st.agg.trimmed);
                     let e = st
                         .agg
                         .on_create_new(ts, pid, fo, &nt, is_directory_open(co));
-                    sink.counters
-                        .file_agg_dropped
-                        .fetch_add(st.agg.dropped - before, Ordering::Relaxed);
+                    agg_counted(&sink.counters, &st.agg, before);
                     e
                 });
                 emit(e);
             }
-            if !forward_file_create(&name, pid, sink, canaries) {
-                return None;
-            }
+            super::writehint::note_file_write(write_scope, sink, id, ts, pid, &name, co);
+            let pid = file_issuer(rec, pid, fwd?, ts, sink)?;
             Some(Raw::FileCreate {
                 ts,
                 pid,
@@ -603,7 +827,7 @@ fn decode_file(
             })?;
             let nt = path.to_ascii_lowercase();
             let e = st.lock().ok().and_then(|mut st| {
-                let before = st.agg.dropped;
+                let before = (st.agg.dropped, st.agg.trimmed);
                 let e = match id {
                     eid::FILE_DELETE_PATH => st.agg.on_delete(ts, pid, fo, &nt),
                     _ => st.agg.on_rename(ts, pid, fo, &nt),
@@ -611,9 +835,7 @@ fn decode_file(
                 if ts % 64 == 0 {
                     st.agg.gc(ts);
                 }
-                sink.counters
-                    .file_agg_dropped
-                    .fetch_add(st.agg.dropped - before, Ordering::Relaxed);
+                agg_counted(&sink.counters, &st.agg, before);
                 e
             });
             emit(e);
@@ -683,6 +905,7 @@ fn decode_audit_api(
     loc: &SchemaLocator,
     lsass_pid: u32,
     failed_lsass: bool,
+    ctx: &CoreCtx,
 ) -> Option<Raw> {
     let ts = ts_of(rec);
     let pid = rec.process_id();
@@ -699,6 +922,12 @@ fn decode_audit_api(
             }
             let access = f.u32(field::DESIRED_ACCESS)?;
             if !is_interesting_process_access(access) {
+                return None;
+            }
+            // Owner-PC triage 2026-10-25: OneDrive opened explorer.exe with
+            // PROCESS_DUP_HANDLE ~25,000 times per second; one record per
+            // window carries everything detection needs.
+            if !ctx.admit_open((pid, target_pid, access, return_code), ts) {
                 return None;
             }
             Some(Raw::OpenProcess {
@@ -773,7 +1002,7 @@ fn decode_registry(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
             k
         };
         let set = id == eid::REG_SET_VALUE;
-        Some(Raw::RegEtw {
+        Some(Raw::RegEtw(Box::new(RegEtwRaw {
             ts,
             pid,
             key_object: f.u64(field::KEY_OBJECT).unwrap_or(0),
@@ -794,7 +1023,7 @@ fn decode_registry(rec: &EventRecord, loc: &SchemaLocator) -> Option<Raw> {
             } else {
                 Vec::new()
             },
-        })
+        })))
     })
 }
 
@@ -978,6 +1207,13 @@ pub struct SensorOpts {
     /// Credential canary paths (lower-cased Win32, the translator's set)
     /// for the Kernel-File source filter.
     pub canaries: Arc<RwLock<HashSet<String>>>,
+    /// Lower-case NT device of the system volume ("" = unknown) and its
+    /// drive letter, for the image-load source filter.
+    pub system_device: String,
+    pub system_drive: char,
+    /// Evidence write hints wanted (`SensorConfig.write_tx` is set): the
+    /// scope checked in the Kernel-File callback. `None` = no extra work.
+    pub write_scope: Option<Arc<crate::evidence_plan::WriteScope>>,
 }
 
 /// Session properties: flush timer and `(MinimumBuffers, MaximumBuffers)`
@@ -1039,6 +1275,12 @@ pub fn start_session(kind: SessionKind, sink: &Sink, opts: &SensorOpts) -> anyho
     let a2 = alive.clone();
     let trace = match kind {
         SessionKind::Core => {
+            let ctx = Arc::new(CoreCtx::new(
+                &opts.system_device,
+                opts.system_drive,
+                sink.counters.clone(),
+            ));
+            let c1 = ctx.clone();
             let b = UserTrace::new()
                 .named(name.clone())
                 .set_trace_properties(props(1, consts::buffers::CORE))
@@ -1048,7 +1290,7 @@ pub fn start_session(kind: SessionKind, sink: &Sink, opts: &SensorOpts) -> anyho
                     5,
                     vec![eid::PROC_START, eid::PROC_STOP, eid::IMAGE_LOAD],
                     sink,
-                    decode_process,
+                    move |rec, loc| decode_process(rec, loc, &c1),
                 ))
                 .enable({
                     let counters = sink.counters.clone();
@@ -1066,7 +1308,7 @@ pub fn start_session(kind: SessionKind, sink: &Sink, opts: &SensorOpts) -> anyho
                         sink,
                         move |rec, loc| {
                             let lsass = counters.lsass_pid.load(Ordering::Relaxed);
-                            decode_audit_api(rec, loc, lsass, failed_lsass)
+                            decode_audit_api(rec, loc, lsass, failed_lsass, &ctx)
                         },
                     )
                 })
@@ -1114,6 +1356,7 @@ pub fn start_session(kind: SessionKind, sink: &Sink, opts: &SensorOpts) -> anyho
             }
             let state = opts.file_activity.then(|| opts.file_state.clone());
             let canaries = opts.canaries.clone();
+            let write_scope = opts.write_scope.clone();
             let s2 = sink.clone();
             let (t, h) = UserTrace::new()
                 .named(name.clone())
@@ -1124,7 +1367,16 @@ pub fn start_session(kind: SessionKind, sink: &Sink, opts: &SensorOpts) -> anyho
                     5,
                     file_ids,
                     sink,
-                    move |rec, loc| decode_file(rec, loc, &s2, state.as_deref(), &canaries),
+                    move |rec, loc| {
+                        decode_file(
+                            rec,
+                            loc,
+                            &s2,
+                            state.as_deref(),
+                            &canaries,
+                            write_scope.as_deref(),
+                        )
+                    },
                 ))
                 .start()
                 .map_err(|e| anyhow::anyhow!("start {name}: {e:?}"))?;
@@ -1398,4 +1650,128 @@ pub fn watched_providers(kind: SessionKind, opts: &SensorOpts) -> Vec<&'static s
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx() -> CoreCtx {
+        CoreCtx::new(
+            r"\device\harddiskvolume3",
+            'C',
+            Arc::new(Counters::default()),
+        )
+    }
+
+    #[test]
+    fn open_coalescing_is_per_pid_generation() {
+        let c = ctx();
+        let k = (100, 200, 0x40, 0);
+        assert!(c.admit_open(k, 1_000));
+        assert!(!c.admit_open(k, 1_500));
+        // The target restarted under the same pid: a new window.
+        c.pid_changed(200);
+        assert!(c.admit_open(k, 1_600));
+        assert!(!c.admit_open(k, 1_700));
+        // The actor's pid was reused.
+        c.pid_changed(100);
+        assert!(c.admit_open(k, 1_800));
+        // Unrelated pids do not reopen the window.
+        c.pid_changed(300);
+        assert!(!c.admit_open(k, 1_900));
+        assert_eq!(c.counters.raw_coalesced.load(Ordering::Relaxed), 3);
+    }
+
+    /// Process churn costs O(1) per start / stop and the maps stay bounded.
+    #[test]
+    fn pid_churn_is_cheap_and_bounded() {
+        let c = ctx();
+        for t in 0..8_000u32 {
+            assert!(c.admit_open((1, t, 0x1410, 0), 10));
+        }
+        let start = std::time::Instant::now();
+        for pid in 0..200_000u32 {
+            c.pid_changed(pid);
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        let g = c.opens.lock().unwrap();
+        assert!(g.gens.len() <= OPEN_COALESCE_GENS);
+        assert!(g.seen.len() <= OPEN_COALESCE_KEYS);
+    }
+
+    /// Every raw-queue slot is preallocated: keep the record small (large
+    /// payloads are boxed).
+    #[test]
+    fn raw_record_is_small() {
+        let n = std::mem::size_of::<Raw>();
+        assert!(n <= RAW_MAX_BYTES, "size_of::<Raw>() = {n}");
+    }
+
+    #[test]
+    fn values() {
+        let ip: IpAddr = "192.0.2.1".parse().unwrap();
+        let send = |tcp| Raw::NetSend {
+            ts: 0,
+            pid: 1,
+            tcp,
+            dst: ip,
+            dport: 443,
+            sport: 5000,
+            size: 1,
+        };
+        assert_eq!(send(true).value(), Value::Medium);
+        assert_eq!(send(false).value(), Value::Medium);
+        assert_eq!(
+            Raw::NetClose {
+                pid: 1,
+                dst: ip,
+                dport: 443,
+                sport: 5000
+            }
+            .value(),
+            Value::Low
+        );
+        for r in [
+            Raw::ImageLoad {
+                ts: 0,
+                pid: 1,
+                image_nt: String::new(),
+            },
+            Raw::Dns {
+                ts: 0,
+                pid: 1,
+                qname: "c2.example".into(),
+                results: String::new(),
+            },
+            Raw::ProcStop {
+                ts: 0,
+                pid: 1,
+                create_ft: 0,
+                exit_code: None,
+            },
+            Raw::OpenProcess {
+                ts: 0,
+                pid: 1,
+                target_pid: 2,
+                access: 0x10,
+                return_code: 0,
+            },
+            Raw::Dpapi {
+                ts: 0,
+                caller_pid: 1,
+                caller_create_ft: None,
+                description: String::new(),
+            },
+            Raw::NetConnect {
+                ts: 0,
+                pid: 1,
+                dst: ip,
+                dport: 443,
+                sport: 5000,
+            },
+        ] {
+            assert_eq!(r.value(), Value::High, "{r:?}");
+        }
+    }
 }

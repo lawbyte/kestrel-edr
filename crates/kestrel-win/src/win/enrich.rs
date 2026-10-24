@@ -192,7 +192,13 @@ impl Enricher {
             let rx = rx.clone();
             let _ = std::thread::Builder::new()
                 .name(format!("kestrel-enrich-{i}"))
-                .spawn(move || worker(weak, rx));
+                .spawn(move || {
+                    // Hashing / Authenticode of binaries already running:
+                    // below normal + EcoQoS (the first-run worker that a
+                    // held process start waits for stays normal).
+                    super::prio::current_thread(super::prio::Background::Light);
+                    worker(weak, rx)
+                });
         }
         {
             let weak = Arc::downgrade(&e);
@@ -204,7 +210,10 @@ impl Enricher {
             let weak = Arc::downgrade(&e);
             let _ = std::thread::Builder::new()
                 .name("kestrel-revocation".into())
-                .spawn(move || revocation_worker(weak, rev_rx));
+                .spawn(move || {
+                    super::prio::current_thread(super::prio::Background::Full);
+                    revocation_worker(weak, rev_rx)
+                });
         }
         e
     }
@@ -536,6 +545,7 @@ fn revocation_worker(e: std::sync::Weak<Enricher>, rx: Receiver<String>) {
         let _ = std::thread::Builder::new()
             .name("kestrel-revocation-check".into())
             .spawn(move || {
+                super::prio::current_thread(super::prio::Background::Full);
                 let _ = tx.send(verify_ex(&p2, RevMode::Online));
             });
         let verdict = rrx.recv_timeout(REVOCATION_TIMEOUT).ok();

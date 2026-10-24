@@ -55,6 +55,7 @@ struct Inner {
     bg_stop: Arc<AtomicBool>,
     remote_fs: Arc<super::remote_fs::WinRemoteFs>,
     remote_desktop: Arc<super::desktop::WindowsRemoteDesktop>,
+    evidence: Arc<super::evidence::WinEvidence>,
 }
 
 fn resolve(host: &str) -> Vec<IpAddr> {
@@ -163,6 +164,7 @@ impl WindowsPlatform {
             hardener: Hardener::new(&state_dir),
             remote_fs: Arc::new(super::remote_fs::WinRemoteFs::new(&state_dir, system_drive)),
             remote_desktop: Arc::new(super::desktop::WindowsRemoteDesktop::new()),
+            evidence: Arc::new(super::evidence::WinEvidence::new(&state_dir, &own_dirs)),
             state_dir,
             system_drive: system_drive.to_ascii_lowercase(),
             own_dirs,
@@ -359,6 +361,15 @@ impl Inner {
             ResponseAction::UninstallAgent { .. } => (
                 false,
                 "uninstall_agent is handled by the agent, not the platform".into(),
+                None,
+            ),
+            // Evidence bundles are built and served by the agent core.
+            ResponseAction::CollectEvidence { .. } | ResponseAction::DeleteEvidence { .. } => (
+                false,
+                format!(
+                    "{} is handled by the agent, not the platform",
+                    action.name()
+                ),
                 None,
             ),
             ResponseAction::KillProcess { pid, guid, tree } => plain(respond::kill(
@@ -840,6 +851,10 @@ impl Platform for WindowsPlatform {
 
     fn remote_desktop(&self) -> Option<Arc<dyn RemoteDesktop>> {
         Some(self.inner.remote_desktop.clone())
+    }
+
+    fn evidence(&self) -> Option<Arc<dyn kestrel_platform::EvidenceHost>> {
+        Some(self.inner.evidence.clone())
     }
 
     fn supports_remote_uninstall(&self) -> bool {

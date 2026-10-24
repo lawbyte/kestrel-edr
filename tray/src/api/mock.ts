@@ -400,6 +400,7 @@ export const mockApi: KestrelApi = {
     mode = m;
   },
   hideWindow: async () => {},
+  uiReady: async () => ({ tab: null, quick_check: false }),
   onNotification: notifications.on,
   onStatus: statuses.on,
   onRemoteSession: remoteSessions.on,

@@ -538,8 +538,17 @@ pub struct FileAgg {
     /// FileObjects opened as directories (in scope), see [`MAX_DIR_OBJECTS`].
     dir_objects: HashSet<(u32, u64)>,
     total_ops: usize,
-    /// Operations dropped by the caps (health counter).
+    /// Operations lost because a new process could not be tracked at all
+    /// ([`MAX_PIDS`]): health counter (a process the ransomware rules cannot
+    /// see).
     pub dropped: u64,
+    /// Oldest operations trimmed from a saturated window ([`MAX_OPS_PER_PID`],
+    /// the fair share of [`MAX_TOTAL_OPS`]). Not a loss: the process keeps
+    /// being summarised from its most recent operations (a full window is
+    /// far above every RW threshold). Owner-PC triage 2026-10-25: these were
+    /// reported as dropped events and turned a developer PC Degraded during
+    /// builds and `git checkout`s.
+    pub trimmed: u64,
     /// Summaries produced.
     pub emitted: u64,
 }
@@ -757,7 +766,7 @@ impl FileAgg {
         if st.ops.len() >= MAX_OPS_PER_PID {
             st.pop_front();
             self.total_ops -= 1;
-            self.dropped += 1;
+            self.trimmed += 1;
         }
         if kind == Kind::NewFile && confirmed && old.is_none() {
             // A file really created at a path that was a rename target: a
@@ -929,7 +938,7 @@ impl FileAgg {
         if let Some(st) = victim.and_then(|v| self.pids.get_mut(&v)) {
             if st.pop_front() {
                 self.total_ops -= 1;
-                self.dropped += 1;
+                self.trimmed += 1;
             }
         }
     }
@@ -1441,7 +1450,8 @@ mod tests {
             a.on_create(1, 1, 0, &doc(i, 0), 5, false);
         }
         assert!(a.total_ops <= MAX_OPS_PER_PID);
-        assert!(a.dropped >= 100);
+        assert!(a.trimmed >= 100);
+        assert_eq!(a.dropped, 0, "a saturated window is trimmed, not lost");
         a.forget_pid(1);
         assert_eq!(a.total_ops, 0);
     }

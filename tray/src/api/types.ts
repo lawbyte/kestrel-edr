@@ -15,6 +15,20 @@ export type WindowMode = "flyout" | "window";
 export type Tab = "status" | "activity" | "help";
 export type Unlisten = () => void;
 
+/** What a freshly built window should do first (asked for while it didn't exist). */
+export interface UiIntent {
+  tab: Tab | null;
+  quick_check: boolean;
+}
+
+/** Validate the backend's `ui_ready` answer; anything odd means "nothing to do". */
+export function parseUiIntent(v: unknown): UiIntent {
+  const o = typeof v === "object" && v !== null ? (v as Record<string, unknown>) : {};
+  const tabs: Tab[] = ["status", "activity", "help"];
+  const tab = tabs.find((t) => t === o.tab) ?? null;
+  return { tab, quick_check: o.quick_check === true };
+}
+
 /** Everything the UI needs from the host (Tauri backend or the browser mock). */
 export interface KestrelApi {
   readonly host: "tauri" | "mock";
@@ -27,7 +41,13 @@ export interface KestrelApi {
   launchUninstaller(): Promise<void>;
   getWindowMode(): Promise<WindowMode>;
   setWindowMode(mode: WindowMode): Promise<void>;
+  /** Close the window. The backend destroys it (no hidden WebView2) and rebuilds it on demand. */
   hideWindow(): Promise<void>;
+  /**
+   * The UI has mounted and its listeners are registered: the backend shows a
+   * freshly built window and returns what was asked for while it didn't exist.
+   */
+  uiReady(): Promise<UiIntent>;
   onNotification(cb: (item: ActivityItem) => void): Promise<Unlisten>;
   onStatus(cb: (s: TrayStatus) => void): Promise<Unlisten>;
   /** Remote-session start/end pushes (UI state only; the toast comes from the paired notification). */

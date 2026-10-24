@@ -475,7 +475,7 @@ pub fn start_poller(
                     sink.send(Raw::FileActivity {
                         ts: e.ts,
                         pid: e.pid,
-                        act: e.activity,
+                        act: Box::new(e.activity),
                     });
                 }
             };

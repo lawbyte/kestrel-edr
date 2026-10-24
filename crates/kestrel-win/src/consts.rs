@@ -190,6 +190,8 @@ pub mod field {
     pub const FILE_KEY: &str = "FileKey";
     pub const INFO_CLASS: &str = "InfoClass";
     pub const ISSUING_THREAD_ID: &str = "IssuingThreadId";
+    /// Kernel-File version-0 templates (Pointer): the issuing thread.
+    pub const FILE_THREAD_ID: &str = "ThreadId";
     // Kernel-Network
     pub const NET_PID: &str = "PID";
     pub const NET_SIZE: &str = "size";

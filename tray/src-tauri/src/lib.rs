@@ -1,8 +1,9 @@
 //! Kestrel employee tray app (Tauri 2).
 //!
 //! Runs per user at logon, unprivileged, single instance. Shows protection state
-//! in the notification area, a flyout window (Status / Activity / Help & privacy),
-//! and Windows toasts for pushed notifications. Talks to the agent service over
+//! in the notification area, a flyout window (Status / Activity / Help & privacy)
+//! that only exists while it is shown (see `window.rs`: an idle tray runs no
+//! WebView2), and Windows toasts for pushed notifications. Talks to the agent service over
 //! the tray protocol only. The one thing it can change is the local "turn
 //! protection off" switch, and only with the device's uninstall token (checked
 //! by the agent); turning protection back on never needs one. The token is
@@ -12,6 +13,7 @@ pub mod client;
 pub mod consent;
 pub mod mock;
 pub mod protocol;
+pub mod window;
 
 use client::{backoff, open_subscription, read_response_lenient, Client, ClientError};
 use protocol::*;
@@ -22,10 +24,12 @@ use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow, WindowEvent,
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, RunEvent, WebviewWindow,
+    WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
+use window::{blur_action, window_needed, BlurAction, IntentBox, UiIntent};
 
 const MAIN: &str = "main";
 const TRAY_ID: &str = "kestrel";
@@ -36,6 +40,9 @@ const PAUSE_TIMEOUT: Duration = Duration::from_secs(20);
 /// Longest token the tray sends (uninstall tokens are far shorter).
 const MAX_TOKEN_LEN: usize = 512;
 const STATUS_POLL: Duration = Duration::from_secs(30);
+/// A new window is shown when its UI says it is ready (no blank flash), or
+/// after this long if the UI never says so.
+const SHOW_FALLBACK: Duration = Duration::from_secs(3);
 
 // Frontend event names.
 const EV_NOTIFICATION: &str = "kestrel://notification";
@@ -68,6 +75,10 @@ struct AppState {
     mica: Mutex<bool>,
     /// IT consent requests waiting for the employee's answer.
     consents: Mutex<consent::ConsentQueue>,
+    /// Tab / quick-check requests waiting for the (re)built UI.
+    intents: Mutex<IntentBox>,
+    /// The window was just built; it is shown once its UI is ready.
+    show_on_ready: Mutex<bool>,
 }
 
 #[derive(Clone, Serialize)]
@@ -468,11 +479,24 @@ fn mica_enabled(app: AppHandle) -> bool {
     *state(&app).mica.lock().unwrap()
 }
 
+/// Close the window; it is rebuilt on demand (see `window.rs`).
 #[tauri::command]
 fn hide_window(app: AppHandle) {
-    if let Some(w) = app.get_webview_window(MAIN) {
-        let _ = w.hide();
+    close_main(&app);
+}
+
+/// The UI has mounted and listens for events: show a freshly built window and
+/// hand over the tab / quick-check requests made while it didn't exist.
+#[tauri::command]
+fn ui_ready(app: AppHandle) -> UiIntent {
+    let intent = state(&app).intents.lock().unwrap().ready();
+    let show = std::mem::take(&mut *state(&app).show_on_ready.lock().unwrap());
+    if show {
+        if let Some(w) = app.get_webview_window(MAIN) {
+            present(&app, &w);
+        }
     }
+    intent
 }
 
 // ---- Window behaviour --------------------------------------------------------
@@ -541,33 +565,102 @@ fn position_flyout(app: &AppHandle, w: &WebviewWindow) {
     let _ = w.set_position(PhysicalPosition::new(x, y));
 }
 
-fn show_main(app: &AppHandle) {
-    let Some(w) = app.get_webview_window(MAIN) else {
-        return;
-    };
+/// Build the window from its config entry. `create: false` in
+/// `tauri.conf.json`: it doesn't exist until something needs it, and is
+/// destroyed again when hidden, so an idle tray runs no WebView2 at all.
+fn create_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == MAIN)
+        .cloned()
+        .ok_or(tauri::Error::WindowNotFound)?;
+    let w = WebviewWindowBuilder::from_config(app, &config)?
+        .additional_browser_args(window::BROWSER_ARGS)
+        .visible(false)
+        .build()?;
+    let mode = *state(app).mode.lock().unwrap();
+    apply_mode(&w, mode)?;
+    if mode == WindowMode::Window {
+        let _ = w.center();
+    }
+    apply_backdrop(app, &w);
+    Ok(w)
+}
+
+fn present(app: &AppHandle, w: &WebviewWindow) {
     if *state(app).mode.lock().unwrap() == WindowMode::Flyout {
-        position_flyout(app, &w);
+        position_flyout(app, w);
     }
     let _ = w.unminimize();
     let _ = w.show();
     let _ = w.set_focus();
 }
 
-fn toggle_main(app: &AppHandle) {
-    let Some(w) = app.get_webview_window(MAIN) else {
+fn show_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window(MAIN) {
+        *state(app).show_on_ready.lock().unwrap() = false;
+        present(app, &w);
         return;
-    };
-    let st = state(app);
-    // Clicking the tray icon steals focus first, which hides the flyout via blur;
-    // treat a click within 300ms of that as "close" rather than reopening.
-    let recently_hidden = st
+    }
+    if let Err(e) = create_main(app) {
+        log::warn!("tray window: {e}");
+        return;
+    }
+    *state(app).show_on_ready.lock().unwrap() = true;
+    // Normally `ui_ready` shows it; don't leave it invisible if the UI fails.
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(SHOW_FALLBACK).await;
+        let pending = std::mem::take(&mut *state(&app2).show_on_ready.lock().unwrap());
+        if pending {
+            if let Some(w) = app2.get_webview_window(MAIN) {
+                present(&app2, &w);
+            }
+        }
+    });
+}
+
+/// Destroy the window (and with it the WebView2 processes).
+fn close_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window(MAIN) {
+        if let Err(e) = w.destroy() {
+            log::warn!("tray window close: {e}");
+        }
+    }
+}
+
+/// Send a tab / quick-check request to the UI now, or keep it until the
+/// (re)built UI is ready.
+fn send_intent(app: &AppHandle, intent: UiIntent) {
+    let now = state(app).intents.lock().unwrap().deliver(intent);
+    if let Some(i) = now {
+        if i.quick_check {
+            let _ = app.emit(EV_QUICK_CHECK, ());
+        }
+        if let Some(tab) = i.tab {
+            let _ = app.emit(EV_NAVIGATE, tab);
+        }
+    }
+}
+
+fn toggle_main(app: &AppHandle) {
+    // Clicking the tray icon steals focus first, which closes the flyout via
+    // blur (the window may already be gone); treat a click within 300ms of
+    // that as "close" rather than reopening.
+    let recently_hidden = state(app)
         .blur_hidden_at
         .lock()
         .unwrap()
         .map(|t| t.elapsed() < Duration::from_millis(300))
         .unwrap_or(false);
-    if w.is_visible().unwrap_or(false) {
-        let _ = w.hide();
+    let visible = app
+        .get_webview_window(MAIN)
+        .is_some_and(|w| w.is_visible().unwrap_or(false));
+    if visible {
+        close_main(app);
     } else if !recently_hidden {
         show_main(app);
     }
@@ -805,12 +898,12 @@ fn build_tray(app: &AppHandle) -> tauri::Result<TrayIcon> {
         .on_menu_event(|app, ev| match ev.id().as_ref() {
             "open" => show_main(app),
             "check" => {
+                send_intent(app, UiIntent::quick_check());
                 show_main(app);
-                let _ = app.emit(EV_QUICK_CHECK, ());
             }
             "contact" => {
+                send_intent(app, UiIntent::tab("help"));
                 show_main(app);
-                let _ = app.emit(EV_NAVIGATE, "help");
             }
             // Quitting only closes this app; the agent service keeps protecting.
             "quit" => app.exit(0),
@@ -825,9 +918,16 @@ fn build_tray(app: &AppHandle) -> tauri::Result<TrayIcon> {
             } = ev
             {
                 let app = tray.app_handle();
+                // The rect is physical on Windows; the scale only matters elsewhere.
                 let scale = app
                     .get_webview_window(MAIN)
                     .and_then(|w| w.scale_factor().ok())
+                    .or_else(|| {
+                        app.primary_monitor()
+                            .ok()
+                            .flatten()
+                            .map(|m| m.scale_factor())
+                    })
                     .unwrap_or(1.0);
                 let p = rect.position.to_physical::<f64>(scale);
                 let s = rect.size.to_physical::<f64>(scale);
@@ -859,6 +959,8 @@ pub fn run() {
             tray_anchor: Mutex::new(None),
             mica: Mutex::new(false),
             consents: Mutex::new(consent::ConsentQueue::default()),
+            intents: Mutex::new(IntentBox::default()),
+            show_on_ready: Mutex::new(false),
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
@@ -871,6 +973,7 @@ pub fn run() {
             set_window_mode,
             mica_enabled,
             hide_window,
+            ui_ready,
             get_pending_consents,
             respond_consent,
             pause_protection,
@@ -879,12 +982,9 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
             build_tray(&handle)?;
-            if let Some(w) = app.get_webview_window(MAIN) {
-                apply_mode(&w, WindowMode::Flyout)?;
-                apply_backdrop(&handle, &w);
-                if !background {
-                    show_main(&handle);
-                }
+            // Started at logon (`--background`): no window, so no WebView2.
+            if window_needed(!background, false) {
+                show_main(&handle);
             }
             tauri::async_runtime::spawn(run_subscriber(handle.clone()));
             tauri::async_runtime::spawn(poll_status(handle));
@@ -893,25 +993,37 @@ pub fn run() {
         .on_window_event(|window, event| {
             let app = window.app_handle();
             match event {
-                // Closing the window only hides it; the app lives in the tray.
-                WindowEvent::CloseRequested { api, .. } => {
-                    api.prevent_close();
-                    let _ = window.hide();
+                // Closing (or a flyout losing focus) destroys the window; the
+                // app lives in the tray and rebuilds it on demand, so no
+                // hidden WebView2 is left running.
+                WindowEvent::Focused(false) => {
+                    let mode = *state(app).mode.lock().unwrap();
+                    let visible = window.is_visible().unwrap_or(false);
+                    // A pending IT consent prompt keeps the flyout open until answered or expired.
+                    let consents = !state(app).consents.lock().unwrap().is_empty(now_ms());
+                    if blur_action(mode, visible, consents) == BlurAction::Destroy {
+                        *state(app).blur_hidden_at.lock().unwrap() = Some(Instant::now());
+                        let _ = window.destroy();
+                    }
                 }
-                // A pending IT consent prompt keeps the flyout open until answered or expired.
-                WindowEvent::Focused(false)
-                    if *state(app).mode.lock().unwrap() == WindowMode::Flyout
-                        && window.is_visible().unwrap_or(false)
-                        && state(app).consents.lock().unwrap().is_empty(now_ms()) =>
-                {
-                    *state(app).blur_hidden_at.lock().unwrap() = Some(Instant::now());
-                    let _ = window.hide();
+                WindowEvent::Destroyed => {
+                    state(app).intents.lock().unwrap().reset();
+                    *state(app).show_on_ready.lock().unwrap() = false;
                 }
                 _ => {}
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Kestrel tray");
+        .build(tauri::generate_context!())
+        .expect("error while building Kestrel tray")
+        .run(|_app, event| {
+            // The last window closing must not end the app (it lives in the
+            // tray); only "Quit" (`app.exit`, which sets a code) does.
+            if let RunEvent::ExitRequested { api, code, .. } = event {
+                if code.is_none() {
+                    api.prevent_exit();
+                }
+            }
+        });
 }
 
 #[cfg(test)]

@@ -26,8 +26,9 @@ use windows_sys::Win32::System::Registry::{
     REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetProcessTimes, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW,
-    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcess, GetProcessIdOfThread, GetProcessTimes, GetThreadTimes, OpenProcess,
+    OpenProcessToken, OpenThread, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, THREAD_QUERY_LIMITED_INFORMATION,
 };
 
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -135,6 +136,30 @@ pub fn process_create_time(h: &Handle) -> Option<u64> {
     } else {
         Some(ft_u64(&c))
     }
+}
+
+/// Process of thread `tid` and the thread's creation time (FILETIME u64),
+/// if the thread still exists (`OpenThread` with
+/// THREAD_QUERY_LIMITED_INFORMATION, `GetProcessIdOfThread`,
+/// `GetThreadTimes`). Kernel-File issuer attribution
+/// ([`crate::fileattr::issuer`]).
+pub fn thread_process(tid: u32) -> Option<(u32, u64)> {
+    let h = Handle::new(unsafe { OpenThread(THREAD_QUERY_LIMITED_INFORMATION, 0, tid) })?;
+    let pid = unsafe { GetProcessIdOfThread(h.raw()) };
+    if pid == 0 {
+        return None;
+    }
+    let mut c = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut e = c;
+    let mut k = c;
+    let mut u = c;
+    if unsafe { GetThreadTimes(h.raw(), &mut c, &mut e, &mut k, &mut u) } == 0 {
+        return None;
+    }
+    Some((pid, ft_u64(&c)))
 }
 
 /// (kernel + user) CPU time in 100 ns.
