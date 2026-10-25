@@ -19,6 +19,8 @@ Read `CLAUDE.md` first. This run took Kestrel from "compiled and simulated" to "
 | Website build and style check | pass |
 | Real Windows (lab VM) | **not run**: no lab VM exists at the moment. 1.1.6 and 1.1.7 are validated by tests and replays only. The owner's own PC runs it audit-only. |
 
+**After 1.1.7 (in `main`, not in a release yet):** the agent starts the tray in signed-in user sessions when the service starts, so the icon comes back right after an install or upgrade (DECISIONS 2026-10-25 "The agent starts the tray"). Lab check: upgrade with a user signed in, and confirm the tray appears without signing out, runs non-elevated under that user, and shows only one icon after the next logon.
+
 **Needs the owner:** rebuild a lab VM (TESTING-ON-WINDOWS.md) and run the lab checklists in the sections below before moving any PC out of audit-only.
 
 ## Evidence capture for suspected data theft (2026-10-25) - agent, Windows, server, console

@@ -945,8 +945,12 @@ pub fn run() {
 
     tauri::Builder::default()
         // Must be registered first so a second launch exits before doing work.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            show_main(app)
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // A background start (Run key at logon, or the agent after an
+            // install) racing the running tray must not open the window.
+            if !args.iter().any(|a| a == "--background") {
+                show_main(app)
+            }
         }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())

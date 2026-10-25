@@ -842,6 +842,12 @@ impl Platform for WindowsPlatform {
     }
 
     async fn serve_tray(&self, handler: Arc<dyn TrayHandler>) -> anyhow::Result<()> {
+        // Once the pipe is up, start the tray for users already signed in
+        // (after an install or upgrade; the Run key covers later logons).
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            let _ = tokio::task::spawn_blocking(super::tray_launch::start_in_user_sessions).await;
+        });
         tray_server::serve(handler).await
     }
 

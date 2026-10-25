@@ -68,6 +68,29 @@ pub fn feature_bits(features: &[String]) -> u8 {
     })
 }
 
+/// File name of the tray app, next to the agent in the install folder.
+pub const TRAY_EXE: &str = "kestrel-tray.exe";
+
+/// Sessions the agent starts the tray in when the service starts (after an
+/// install or upgrade the Run key only fires at the next logon, and the
+/// upgrade closed the old tray): active user sessions (never session 0)
+/// with no tray process yet, sorted and without duplicates.
+pub fn sessions_needing_tray(active: &[u32], tray_sessions: &[u32]) -> Vec<u32> {
+    let mut out: Vec<u32> = active
+        .iter()
+        .copied()
+        .filter(|s| *s != 0 && !tray_sessions.contains(s))
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Command line the tray is started with (no window: same as the Run key).
+pub fn tray_command_line(exe: &str) -> String {
+    format!("\"{exe}\" --background")
+}
+
 /// May `resp` be pushed to a connection with opt-in bits `bits`?
 pub fn push_allowed(resp: &TrayResponse, bits: u8) -> bool {
     match resp {
@@ -202,6 +225,17 @@ mod tests {
     use kestrel_common::Severity;
     use kestrel_platform::TrayPush;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn tray_started_only_where_missing() {
+        assert_eq!(sessions_needing_tray(&[0, 1, 2, 3, 2], &[2]), vec![1, 3]);
+        assert!(sessions_needing_tray(&[0], &[]).is_empty());
+        assert!(sessions_needing_tray(&[1], &[1, 1]).is_empty());
+        assert_eq!(
+            tray_command_line(r"C:\Program Files\Kestrel\kestrel-tray.exe"),
+            r#""C:\Program Files\Kestrel\kestrel-tray.exe" --background"#
+        );
+    }
 
     struct H {
         tx: broadcast::Sender<TrayPush>,
